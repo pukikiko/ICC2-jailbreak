@@ -12,19 +12,22 @@ rawplay link state"). Wireless Android Auto is parked on in LIVI's config and le
 toggling it under the running app upsets LIVI's helper.
 
 Reference hardware: **Xiaomi Mi A1 (qcom-msm8953, "tissot")**, postmarketOS edge with
-systemd. The virtual display is 800x480 to match the unit's panel. The phone's own screen
-runs the **fbkeyboard console UI**, the preferred UI for the appliance phone (see "The
-phone's own UI"): a plain framebuffer console with an on-screen keyboard, screen and
-backlight off when idle. The stack itself is generic: any aarch64 postmarketOS phone with a
-configfs/functionfs-capable UDC works.
+systemd. The virtual display is 800x480 to match the unit's panel, and it is a **virtual
+wayland session, not X**: weston's headless backend composites everything, rawlink captures
+the output over the `weston_capture_v1` wayland protocol, and touch/panel keys go back
+through the `weston-touch` module's socket. No X server, no XTest, no x11grab and no ffmpeg
+anywhere in the stack. The phone's own screen runs the **fbkeyboard console UI**, the
+preferred UI for the appliance phone (see "The phone's own UI"): a plain framebuffer
+console with an on-screen keyboard, screen and backlight off when idle. The stack itself
+is generic: any aarch64 postmarketOS phone with a configfs/functionfs-capable UDC works.
 
 ```
  phone (postmarketOS, musl)                          car (i.MX31, QNX, usb host)
  ┌──────────────────────────────────────────┐        ┌──────────────────────────┐
  │ LIVI AppImage (glibc)  ── ubuntu chroot  │        │                          │
- │      │ wayland                           │        │                          │
- │ weston (kiosk, pixman) ── Xvnc :9 800x480│        │                          │
- │      │ x11grab                           │        │                          │
+ │      │ wayland (nested compositor)        │        │                          │
+ │ weston headless (kiosk, pixman, 800x480) │        │                          │
+ │      │ weston_capture_v1 (shm)            │        │                          │
  │ rawlink stream ── functionfs vendor bulk ├───────►│ rawplay → IPU scanout    │
  │ rawlink gadget ── mass_storage (usb.img) │◄───────┤ /fs/usb0/homebrew/apps   │
  │      ▲ touch/knob/button (LI messages)   │        │ touch/knob/buttons       │
@@ -36,8 +39,8 @@ configfs/functionfs-capable UDC works.
 
 LIVI's release builds are glibc Electron bundles; postmarketOS is musl. `gcompat` cannot
 load Electron (`unsupported relocation type 1032`), so the AppImage runs inside a small
-**Ubuntu base rootfs** (aarch64 glibc) with the host's X11/Wayland/audio sockets
-bind-mounted in. `livi-chroot` is the launcher/supervisor that does the mounts and runs the
+**Ubuntu base rootfs** (aarch64 glibc) with the host's Wayland runtime dir and audio
+sockets bind-mounted in. `livi-chroot` is the launcher/supervisor that does the mounts and runs the
 AppImage; it also stays alive while LIVI's detached nested compositor lives, because the
 AppImage launcher exits by design (`src/main/index.ts`: "outer launcher hands off to the
 nested compositor and exits") and a plain `exec` would leave systemd with a finished unit
@@ -80,10 +83,9 @@ any other UI the image shipped with) and sets all of it up.
 | `livi-cmd.c` | one-line client for LIVI's helper control socket (`set-aa`), for toggling wireless AA by hand; goes to `/opt/livi/livi-cmd` |
 | `livi-link.service` | runs `livi-link-monitor` as root at boot, restart-forever |
 | `pipewire.desktop` | xdg autostart override that hides the desktop's pipewire-launcher so the systemd user units own audio (see "Audio") |
-| `livi-xvnc.service` | TigerVNC X server `:9` at 800x480 (the screen everything draws into) |
-| `livi-weston.service` | weston x11/kiosk/pixman on `:9`; hosts the app and the video plane |
-| `livi.service` | the LIVI AppImage, through `livi-chroot` |
-| `rawlink.service` | `rawlink run`: functionfs gadget + mass storage + `:9` sender |
+| `livi-weston.service` | weston headless/kiosk/pixman at 800x480 (repaint-on-capture, `--debug` for capture authorization); hosts the app, the video plane and the `weston-touch` module |
+| `livi.service` | the LIVI AppImage, through `livi-chroot`, on `wayland-livi` |
+| `rawlink.service` | `rawlink run`: functionfs gadget + mass storage + headless-weston wayland sender |
 | `rawlink-wait` | forces device mode, waits for the UDC, then execs rawlink (the unit's main process) |
 | `console-blank.service` | the phone UI's idle blanking: console blank on `tty1` (screen + backlight off) after 2 min |
 
@@ -94,21 +96,24 @@ for when something needs doing by hand.
 
 ### 1. Packages
 
-     sudo apk add build-base bash ffmpeg weston weston-dev weston-backend-x11 \
-                  weston-shell-kiosk tigervnc fuse3 xkeyboard-config \
+     sudo apk add build-base bash weston weston-backend-headless weston-shell-kiosk \
+                  weston-dev wayland-dev fuse3 xkeyboard-config \
                   postmarketos-ui-fbkeyboard
 
 * `postmarketos-ui-fbkeyboard` is the phone's own UI, the preferred console UI (see "The
   phone's own UI"). install it **before** removing a desktop UI, so the shared
   `postmarketos-base-ui` package is never orphaned in between (step 8).
-* `ffmpeg` is rawlink's capture source (`x11grab`). rawlink execs it off `PATH`; without
-  it the unit logs `rawstream: capture pipe closed, restarting ffmpeg` forever and never
-  draws a frame.
-
-* `weston-backend-x11` and `weston-shell-kiosk` are separate subpackages; without them
-  weston fails with `failed to create compositor backend`.
+* `weston`/`weston-dev` are the headless session and the headers for the `weston-touch`
+  module; `weston-backend-headless` and `weston-shell-kiosk` are separate subpackages
+  (without the headless backend weston fails with
+  `failed to create compositor backend`).
+* `wayland-dev` carries the `libwayland-client` headers and `wayland-scanner` rawlink's
+  `weston_capture_v1` capture needs. there is **no ffmpeg and no tigervnc**: the capture
+  is in-process and wayland-native.
+* `xkeyboard-config` provides the evdev keymap weston's fake-seat keyboard and the panel
+  key taps use.
 * `bash` is needed by the AppImage's `AppRun`; postmarketOS has busybox `ash` only.
-* tested with LIVI 8.3.0, weston 16.0.0, tigervnc 1.16.2, Ubuntu base 24.04.3.
+* tested with LIVI 8.3.0, weston 16.0.0, Ubuntu base 24.04.3.
 
 ### 2. Build the host tools
 
@@ -119,12 +124,11 @@ for when something needs doing by hand.
        $(pkg-config --libs libweston-16 wayland-server)
 
 The repo Makefile picks the newest installed `libweston-*` and passes its major, because
-weston 16 changed the touch API (see `weston-touch.c`): building the weston 14 call
-against 16 **aborts weston on the first touch**, which drops the touch socket and leaves
-rawlink on its XTest mouse fallback (pointer drags, a cursor, taps in the wrong place).
-`weston-touch.so` is the weston module that gives the compositor a touch device rawlink
-can drive, so the app gets real touch instead of an X11 mouse. `../` is the `rawplay/`
-(aka `rawplay/`) directory.
+weston 16 changed the touch and keyboard APIs (see `weston-touch.c`): building the weston
+14 call against 16 **aborts weston on the first touch**, which drops the input socket.
+`weston-touch.so` is the weston module that gives the compositor a touch device and
+injects the panel keys rawlink sends (`k CODE` evdev taps); both are wayland events, so
+there is no XTest mouse fallback to land on. `../` is the `rawplay/` directory.
 
 ### 3. Assets
 
@@ -194,9 +198,9 @@ Then the two in-chroot extras `install.sh` also does:
        -I/usr/lib/aarch64-linux-gnu/glib-2.0/include \
        -o /opt/livi/livi-stride-fix.so /tmp/livistride.c'
 
-`livi-chroot` re-does the `/dev`, `/proc`, `/sys`, `$XDG_RUNTIME_DIR`, `/run/dbus`,
-the pulse socket/cookie and `/tmp/.X11-unix` mounts itself (idempotently), so the manual
-mounts above are only needed for `apt` during setup.
+`livi-chroot` re-does the `/dev`, `/proc`, `/sys`, `$XDG_RUNTIME_DIR`, `/run/dbus` and
+the pulse socket/cookie mounts itself (idempotently), so the manual mounts above are only
+needed for `apt` during setup. There is no X11 socket to bind any more.
 
 ### 5. LIVI configuration
 
@@ -223,7 +227,7 @@ livi restart or reboot; doing that over ssh drops the connection when the AP tak
 
     sudo install -m 644 livi-*.service rawlink.service /etc/systemd/system/
     sudo systemctl daemon-reload
-    sudo systemctl enable livi-link livi-xvnc livi-weston livi rawlink
+    sudo systemctl enable livi-link livi-weston livi rawlink
 
 * `livi-link.service` runs `livi-link-monitor`, the power state machine. It reads the
   charger from the power supply's `online` flag and the rawplay connection state from
@@ -558,13 +562,13 @@ Afterwards `pactl info` (on the host and in the chroot) must report a default si
 
 ## Boot behaviour
 
-All five units are `WantedBy=multi-user.target` with `Restart=always` and
+All four units are `WantedBy=multi-user.target` with `Restart=always` and
 `StartLimitIntervalSec=0` (restart forever, no rate limit). With the charger present
-(and after the radios are confirmed) all five run; unplugged, `livi` is the one the
+(and after the radios are confirmed) all four run; unplugged, `livi` is the one the
 state machine takes down:
 
-    $ systemctl is-active livi-link livi-xvnc livi-weston livi rawlink
-    active active active active active
+    $ systemctl is-active livi-link livi-weston livi rawlink
+    active active active active
 
 The phone UI is separate from that chain: `getty@tty1`, `fbkeyboard` and `console-blank`
 come up with multi-user too, and `tinydm` is disabled so nothing else takes `tty1`:
@@ -572,13 +576,14 @@ come up with multi-user too, and `tinydm` is disabled so nothing else takes `tty
     $ systemctl is-active getty@tty1 fbkeyboard console-blank
     active active active
 
-* `livi-link`, `livi-xvnc`, `livi-weston`, `livi` and `rawlink` all enter within a
-  few seconds of multi-user; the gadget binds as soon as rawlink starts, `livi-link`
-  comes up `unplugged` or `idle` depending on the charger and starts watching the journal,
-  and LIVI brings wireless Android Auto up from its config (wlan0 goes to the AP; see
-  the wireless section). On an unplugged boot the multi-user `livi` still starts, but
-  `livi-link` stops it on its next tick (the state file stays `unplugged`; the app comes
-  back when the charger does).
+* `livi-link`, `livi-weston`, `livi` and `rawlink` all enter within a
+  few seconds of multi-user; weston creates `wayland-livi` in `/run/livi`, the gadget
+  binds as soon as rawlink starts (and its capture thread reconnects to weston on its
+  own), `livi-link` comes up `unplugged` or `idle` depending on the charger and starts
+  watching the journal, and LIVI brings wireless Android Auto up from its config (wlan0
+  goes to the AP; see the wireless section). On an unplugged boot the multi-user `livi`
+  still starts, but `livi-link` stops it on its next tick (the state file stays
+  `unplugged`; the app comes back when the charger does).
 * each program has its own unit, so a crash restarts only that program; killing weston or
   the app brings the whole chain back through the dependencies.
 * the AppImage's detached nested compositor is inside `livi.service`'s cgroup (the
@@ -593,16 +598,16 @@ come up with multi-user too, and `tinydm` is disabled so nothing else takes `tty
 
 Verification after a reboot:
 
-    systemctl is-active livi-link livi-xvnc livi-weston livi rawlink
+    systemctl is-active livi-link livi-weston livi rawlink
     cat /run/livi-link/state                                # idle <timestamp> (or unplugged/connected)
     systemctl is-active livi                                # stopped (inactive) while unplugged
     cat /sys/power/wake_lock                                # livi
     rfkill list                                             # blocked while unplugged
     sudo cat /sys/kernel/config/usb_gadget/liviraw/UDC      # 7000000.usb
     cat /sys/class/udc/7000000.usb/state                    # not attached / configured
-    sudo journalctl -u rawlink -n 5                         # bound to ..., listening on ...
+    sudo journalctl -u rawlink -n 5                         # bound to ..., wayland capture on ...
     systemctl is-active getty@tty1 fbkeyboard console-blank # the phone ui
-    DISPLAY=:9 ffmpeg -f x11grab -video_size 800x480 -i :9 -frames:v 1 -y /tmp/shot.png
+    XDG_RUNTIME_DIR=/run/livi WAYLAND_DISPLAY=wayland-livi weston-screenshooter
 
 ## Manual runs and `livi.sh`
 
@@ -613,16 +618,20 @@ still works on the phone once the AppImage is the chroot wrapper:
                                                        # added to the candidate list
     APPIMAGE=/opt/livi/livi-chroot ./livi.sh stop
 
-While the units run, `livi.sh start` sees the Xvnc port, the weston socket and the
-`--user-data-dir=` supervisor already alive and starts nothing.
+While the units run, `livi.sh start` sees the weston socket and the `--user-data-dir=`
+supervisor already alive and starts nothing.
 
 ## Troubleshooting
 
 | symptom | cause / fix |
 |---|---|
-| `rawstream: capture pipe closed, restarting ffmpeg` forever, 0 frames | `ffmpeg` is not on `PATH` (rawlink execs it for `x11grab`): `apk add ffmpeg`. It is easy to miss because the failure is in the child, not rawlink |
+| `rawstream: wayland ... not up (No such file or directory), retrying` forever, 0 frames | rawlink started before weston; the capture thread retries every second and recovers when `livi-weston` is up. If it never comes up check `systemctl status livi-weston` and its journal |
+| `rawstream: wayland capture failed: unauthorized` | weston refuses every `weston_capture_v1` shot unless an authority allows it: `livi-weston.service` must run weston with `--debug` (its allow-all screenshot authority). an old unit without it never captures; re-run `install.sh` |
+| `rawstream: weston output is 1280x720, expected 800x480` | weston came up with the wrong mode; the unit pins `--width 800 --height 480` (a local `weston.ini` can override the headless output) |
+| panel black but frames flow; `ps` shows no Electron, and `~/.config/LIVI/log/compositor.log` has `eglCreateImageKHR createImageFromDmaBufs failed` / `create_immed failed and produced an invalid wl_buffer` | LIVI 9+ forces its inner app to Wayland and its GPU process hands the nested compositor dmabufs; a pixman session's EGL is software and cannot import them, so Electron dies (the old X11 stack failed the same way). Run the session with `LIVI_WESTON_RENDERER=gl` (livi.sh) / `--renderer=gl` on a machine with a GPU, or stay on LIVI 8.3.0 with pixman |
+| picture is upside down on a GL session | weston's async GL capture is bottom-up on drivers without `GL_ANGLE_pack_reverse_row_order` (NVIDIA); start rawlink with `--flip`. pixman sessions are never affected |
 | frames draw line by line and/or audio stutters while the phone's screen is off | the CPUs sit in `cpu-power-collapse` between wakeups, taxing every FunctionFS completion and PipeWire period. `livi-link` must be in `connected` and holding `/dev/cpu_dma_latency` at 0 while a player is connected: check `cat /run/livi-link/state` and `journalctl -u livi-link` (it releases the latency by design in `idle` and `unplugged`); reinstall the current `livi-link-monitor`/unit and `rawlink` (1 MB video pipe, 256 KB ep1 writes); see the host section of `rawplay/README.md` |
-| `weston ... failed to create compositor backend` | `weston-backend-x11` not installed |
+| `weston ... failed to create compositor backend` | `weston-backend-headless` (and/or `weston-shell-kiosk`) is not installed; `apk add weston-backend-headless weston-shell-kiosk` |
 | `livi-compositor` exits right after `new output` | stale sockets; `livi-chroot` removes `$XDG_RUNTIME_DIR/{livi-compositor.ctrl,wayland-0*}`, keep it that way |
 | `xdg_surface geometry (1280x720) is larger than ... (800x480)` | `~/.config/LIVI/config.json` missing or not 800x480 (the inner app reads `$HOME/.config/LIVI`, not `--user-data-dir`) |
 | `usbgadget: no usb device controller` looping | phone not in device mode; `rawlink-wait` forces the role and waits for `/sys/class/udc` |
@@ -649,8 +658,8 @@ While the units run, `livi.sh start` sees the Xvnc port, the weston socket and t
 | `echo mem`/`systemctl suspend` resets the phone | expected on this port: s2idle hangs in device suspend with no working wake source and the PMIC watchdog resets the phone minutes later. `livi-link` holds the wake lock so nothing else tries it; do not stop the unit and suspend by hand |
 | AppImage `cannot execute: required file not found` | ran outside the chroot; use `livi-chroot` (or `APPIMAGE=/opt/livi/livi-chroot`) |
 | `unsupported relocation type 1032` | `gcompat` was used; the real glibc chroot is required |
-| touch behaves like a mouse: a cursor, drags, taps in the wrong place | weston died or restarted and rawlink is on the XTest fallback. check `journalctl -u livi-weston` for an abort; building `weston-touch.so` without `-DLIVI_WESTON_MAJOR=16` (weston 16) aborts weston on the first touch. rawlink retries the socket every 2 s, so it also recovers from a weston restart |
-| no touch at all after a reboot (not even the mouse fallback), while the car link works | rawlink won the boot race and opened the display before xvnc/weston existed; older rawlink builds then disabled injection for the whole process. update `/opt/livi/rawlink` (`make -C rawplay rawlink` on the phone, or re-run `install.sh`) and `systemctl restart rawlink`; the fixed build enables injection regardless and retries both the weston-touch socket and the display on use |
+| no touch, and panel keys do nothing, while the video works | the `weston-touch` module did not load, or weston restarted: check `journalctl -u livi-weston` for `livi-touch: touch device ready on ...` and for a module load error. building `weston-touch.so` without `-DLIVI_WESTON_MAJOR=16` on weston 16 aborts weston on the first touch. rawlink retries the socket every 2 s, so it also recovers from a weston restart |
+| no touch at all after a reboot, while the car link works | rawlink won the boot race before weston existed; an old `/opt/livi/rawlink` disabled injection at startup. the current build keeps injection enabled and retries the weston-touch socket on use; update it (`make -C rawplay rawlink` on the phone or re-run `install.sh`) and `systemctl restart rawlink` |
 | weston core-dumps on restart | weston 16 asserts the touch device list is empty at shutdown; `weston-touch.c` destroys its device in the compositor destroy listener |
 | phone screen never blanks / stays lit | the phone UI's idle blanking is not applied: `systemctl is-active console-blank`, then `systemctl restart console-blank` puts `setterm --blank 2 --powerdown 2` on `tty1` (edit the unit's interval to change it). a desktop's idle handling never blanked this panel; the console path is what reaches the WLED backlight |
 | fbkeyboard missing / no on-screen keys | the unit or its uinput module is down: `systemctl status fbkeyboard`, `ls -l /dev/uinput`, `journalctl -u fbkeyboard`; reinstall `postmarketos-ui-fbkeyboard` (step 8) if the unit is gone. a desktop UI still holding `tty1` (`systemctl is-active tinydm`) draws over the console too |

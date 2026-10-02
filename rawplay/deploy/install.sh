@@ -48,13 +48,17 @@ say() { printf 'install: %s\n' "$*"; }
 # ---- packages ---------------------------------------------------------------------------
 
 say "packages"
-# ffmpeg is rawlink's capture source (x11grab): it is exec'd off PATH, and a missing
-# one is only visible as "capture pipe closed, restarting ffmpeg" in the unit's log.
+# weston is the headless wayland session the app and the sender run on; its headless
+# backend and the kiosk shell are separate subpackages (without the backend weston fails
+# with "failed to create compositor backend"). weston-dev is for the weston-touch.so
+# module and wayland-dev carries the libwayland-client headers and wayland-scanner
+# rawlink's capture needs. xkeyboard-config provides the evdev keymap weston's keyboard
+# and the panel key taps use. there is no X server and no ffmpeg on this stack any more.
 # postmarketos-ui-fbkeyboard is the phone's own UI (the preferred console UI, see the
 # README): it is installed here, before any desktop UI is retired, so the shared
 # postmarketos-base-ui package is not orphaned in between.
-$SUDO apk add --quiet build-base bash ffmpeg weston weston-dev weston-backend-x11 \
-    weston-shell-kiosk tigervnc fuse3 xkeyboard-config postmarketos-ui-fbkeyboard
+$SUDO apk add --quiet build-base bash weston weston-backend-headless weston-shell-kiosk \
+    weston-dev wayland-dev fuse3 xkeyboard-config postmarketos-ui-fbkeyboard
 
 # ---- phone ui (the preferred console UI) -------------------------------------------------
 
@@ -109,6 +113,8 @@ fi
 # ---- build ------------------------------------------------------------------------------
 
 say "building rawlink, weston-touch.so and livi-cmd"
+# rawlink generates and links the weston_capture_v1 client protocol (wayland-scanner and
+# libwayland-client come from wayland-dev)
 ( cd "$LIVI_DIR" && make -s rawlink livi-cmd )
 WESTON_PC=$(pkg-config --list-all 2>/dev/null | awk '/^libweston-[0-9]+ /{print $1}' | sort | tail -1)
 [ -n "$WESTON_PC" ] || { echo "no libweston pkg-config file (install weston-dev)" >&2; exit 1; }
@@ -299,13 +305,20 @@ say "systemd units"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 # livi-wakelock was replaced by livi-link (the charger/rawlink power state machine); retire
-# it on an upgrade so only one unit writes the wake lock and the sxmo flag
+# it on an upgrade so only one unit writes the wake lock and the sxmo flag. livi-xvnc is the
+# retired X server: the stack is wayland-only now (the headless weston session), so the
+# unit, its X socket and tigervnc are gone.
 if $SUDO systemctl cat livi-wakelock >/dev/null 2>&1; then
     say "retiring the old livi-wakelock unit"
     $SUDO systemctl disable --now livi-wakelock >/dev/null 2>&1 || true
     $SUDO rm -f /etc/systemd/system/livi-wakelock.service
 fi
-for u in livi-link livi-xvnc livi-weston livi rawlink; do
+if $SUDO systemctl cat livi-xvnc >/dev/null 2>&1; then
+    say "retiring the old livi-xvnc unit (wayland-only now)"
+    $SUDO systemctl disable --now livi-xvnc >/dev/null 2>&1 || true
+    $SUDO rm -f /etc/systemd/system/livi-xvnc.service
+fi
+for u in livi-link livi-weston livi rawlink; do
     sed -e "s|/home/user|$LIVI_HOME|g" -e "s|^User=user$|User=$LIVI_USER|" \
         -e "s|chown -R user:user|chown -R $LIVI_USER:$LIVI_USER|" \
         "$HERE/$u.service" > "$tmp/$u.service"
@@ -319,9 +332,9 @@ fi
 $SUDO install -m 644 "$HERE/console-blank.service" /etc/systemd/system/console-blank.service
 
 $SUDO systemctl daemon-reload
-$SUDO systemctl enable --quiet livi-link livi-xvnc livi-weston livi rawlink console-blank
-$SUDO systemctl start --no-block livi-link livi-xvnc livi-weston livi rawlink
+$SUDO systemctl enable --quiet livi-link livi-weston livi rawlink console-blank
+$SUDO systemctl start --no-block livi-link livi-weston livi rawlink
 $SUDO systemctl start console-blank.service
 
-say "done; check: systemctl is-active livi-link livi-xvnc livi-weston livi rawlink fbkeyboard console-blank"
-say "logs: journalctl -u livi -f   |   screen: DISPLAY=:9 ffmpeg ..."
+say "done; check: systemctl is-active livi-link livi-weston livi rawlink fbkeyboard console-blank"
+say "logs: journalctl -u livi -f   |   journalctl -u rawlink -f"

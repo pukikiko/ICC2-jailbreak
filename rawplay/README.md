@@ -264,32 +264,52 @@ configfs/FunctionFS bridge) and `run` (both, the real-car appliance mode). It sp
 wire protocol byte for byte (MODE/FRAME fields and framing, `LI` parsing, window/ready/ack
 handling).
 
-* Source set: `--test` (moving red box + static blue box at `(20,380)`), `--motion`,
-  `--file`, `--display`. ffmpeg outputs `-pix_fmt rgb565le -f rawvideo -` at the requested
-  fps; frames are read whole (768 000 B).
+* Source set: `--wayland` (the live headless weston session, the appliance source),
+  `--test` (moving red box + static blue box at `(20,380)`), `--motion`, `--file`. The
+  synthetic sources are ffmpeg, which outputs `-pix_fmt rgb565le -f rawvideo -` at the
+  requested fps; frames are read whole (768 000 B). `--wayland` needs no ffmpeg, no X
+  server and no window capture: see the capture note below.
+* **Wayland capture**: `--wayland NAME` connects to weston's socket and creates a
+  `weston_capture_v1` source for the output (the protocol's framebuffer source). The
+  compositor captures into a client `wl_shm` buffer on every repaint, and a capture thread
+  converts the XRGB8888/ARGB8888 pixels to the panel's RGB565LE and pushes whole frames
+  into the same pipe the ffmpeg sources use, so the sender loop is unchanged. The weston
+  output is run with `--refresh-rate 0`, which makes it repaint *only* when a capture is
+  requested; the thread paces captures at `--fps`, so no compositor cpu is spent on frames
+  the unit cannot take. `weston_capture_v1` is a privileged protocol: weston refuses every
+  shot with `unauthorized` unless an authority allows it, and the appliance's weston runs
+  with `--debug` (its allow-all screenshot authority; a single-user kiosk). The connection
+  is retried and the source rebuilt if weston restarts, and a size other than the wire
+  geometry, an unsupported format or a disappearing output all log and retry visibly.
+  A GL-rendered session can deliver bottom-up frames on drivers without
+  `GL_ANGLE_pack_reverse_row_order` (weston's async capture path flips based on that
+  extension, not on the real y orientation; NVIDIA is the common case), so `--flip`
+  reverses the rows in the conversion. Pixman sessions never need it.
+  The repo carries the vendored `weston-output-capture.xml` (`rawplay/protocol/`) and
+  generates the client glue with `wayland-scanner` at build time.
 * Sends `MODE` at start (and again whenever a reader heartbeat arrives), then one `FRAME`
   per captured frame with `--fps` pacing; a window of `--window 2` frames is kept unacked
   (keeps one frame on the wire while one displays). Open loop `--window 0` is available
   for the drop-stale test.
-* Parses `LI` upstream: touch and the panel buttons are injected into the host session
-  in-process (the weston-touch socket when it is live, XTest otherwise; libX11/libXtst are
-  dlopened, so there is no build-time x11 dependency). Injection is enabled even when the
-  socket and the display are not there yet (the appliance boots rawlink before xvnc/weston)
-  and both are retried on use, so a touch that arrives after weston comes up still lands.
-  Knob messages are consumed and left alone: livi has no default binding for
-  them. The panel buttons that livi has default key bindings for are tapped on the press
-  edge as their keys, from the ipc channel 6 bit the unit sends
-  (docs/v850-ipc-protocol.md, `iccbuttons/iccbuttons.c`): **back / home (25) → `Backspace`
-  back**, **menu (28) → `H` home**, **seek down (29) → `B` previous**, **seek up (30) →
-  `N` next**, **swc phone (46) → `V` voice assistant**, **swc seek (48) → `N` next**. The
-  press edge only: a release is the other half of the same tap, and tapping it again would
-  fire the livi action twice. Buttons with no binding are ignored, and nothing in the
-  unit's own handling changes (it sees the same bitmap it always has). Type 8 feeds the
-  window and the latency statistics.
+* Parses `LI` upstream: touch and the panel keys are injected into the host session
+  through the `weston-touch` module's unix socket, so they are real `wl_touch`/wayland
+  keyboard events with no X server and no XTest (`weston-touch.c` 'd/m/u/c' and 'k').
+  Injection is enabled even when the socket is not there yet (the appliance boots rawlink
+  before weston) and the connect is retried on use, so a touch that arrives after weston
+  comes up still lands. Knob messages are consumed and left alone: livi has no default
+  binding for them. The panel buttons that livi has default key bindings for are tapped on
+  the press edge as **linux evdev key codes**, from the ipc channel 6 bit the unit sends
+  (docs/v850-ipc-protocol.md, `iccbuttons/iccbuttons.c`): **back / home (25) → evdev 14
+  `Backspace` back**, **menu (28) → evdev 35 `H` home**, **seek down (29) → evdev 48 `B`
+  previous**, **seek up (30) → evdev 49 `N` next**, **swc phone (46) → evdev 47 `V` voice
+  assistant**, **swc seek (48) → evdev 49 `N` next**. The press edge only: a release is
+  the other half of the same tap, and tapping it again would fire the livi action twice.
+  Buttons with no binding are ignored, and nothing in the unit's own handling changes (it
+  sees the same bitmap it always has). Type 8 feeds the window and the latency statistics.
   `--events` writes a machine-readable log for the benchmark harness: `touch`, `button`
-  (with the `key 0x...` a mapped press taps), and `drawn` lines. A stale
-  `/tmp/livi-touch.sock` (weston gone, file left behind) falls back to the XTest mouse
-  instead of disabling injection.
+  (with the `key N` an evdev-coded press taps), and `drawn` lines. A stale
+  `/tmp/livi-touch.sock` (weston gone, file left behind) is reconnected on use rather than
+  disabling injection.
 * **The socket is written non-blocking, newest-wins.** A slow guest must never sit the
   read loop in a 768 KB `sendall` while acks and touches wait behind it: at most the
   window's frames are buffered, and a frame captured while that is full is dropped at the
@@ -310,10 +330,13 @@ handling).
   the driver's once-a-millisecond stream can no longer move the host pointer through stale
   positions and presses. `rawplay/rawlink.c` (`touch_flush`) implements that policy and
   `rawplay/test_rawlink.py` checks it.
-* **The capture itself must not buffer.** ffmpeg's device input queues ~8 frames by
-  default (`thread_queue_size`) and frame threading holds another, which is half a second
-  of pure lag at 15 fps before a screen change even reaches the sender. x11grab runs with
-  `-fflags nobuffer -threads 1` and the source defaults to 30 fps.
+* **The capture itself must not buffer.** the wayland source always has at most one frame
+  in the in-flight capture task and one in the pipe: the thread waits for `complete`,
+  converts and writes it, and only then asks for the next repaint, so there is no queue to
+  build lag. The weston session is run with `--refresh-rate 0` (repaint only on capture),
+  which is what makes the capture the sole clock: no compositor work happens between
+  frames, and `--fps` paces the whole chain. The synthetic ffmpeg sources are paced by
+  ffmpeg (`-re`, `-framerate`/`-r`) and default to 30 fps.
 * No encoding, no bitrate, no VBV, no keyframes: the host writes each captured frame once.
 * **A host that does not fall over**: a lost unix socket is retried, a dead ffmpeg pipe is
   respawned, malformed `LI` messages are skipped, and the gadget is rebound if functionfs
@@ -476,6 +499,38 @@ the icount clock and host load; rawplay's stats print the source cadence next to
 rate that still looks low is the source's, not the pipeline's: 768 KB/frame at 15 fps is
 92 Mbit/s.
 
+### The wayland-capture change (2026-10)
+
+The sender's capture source changed from ffmpeg `x11grab` on an Xvnc-backed weston to the
+in-process `weston_capture_v1` client on a headless weston. Nothing on the unit changed
+(`rawplay.c` was not touched), so the two checks are the unit-side `bench.py` A/B and a
+host-only capture A/B.
+
+`bench.py --boot --icount 2 --seconds 10 --source motion --fps 60 --direct`, one fresh
+boot per build, old = the pre-change rawlink, new = this one:
+
+| build | frames | guest fps | ms/frame | latency avg/p95/max | touch |
+|---|---|---|---|---|---|
+| old (x11grab) | 1061 | 106.1 | 1.6 | 4.9 / 6.9 / 32.1 ms | 59.9 ms |
+| new (wayland) | 1103 | 110.2 | 1.5 | 5.1 / 7.7 / 37.1 ms | 66.7 ms |
+
+The differences are run-to-run host noise (the README table's `after` row, measured on the
+same harness in an earlier session, shows the same spread); the per-frame guest work is
+identical (1.5 vs 1.6 ms).
+
+The host capture A/B fixes the content (an animating `weston-simple-shm` in a kiosk
+session) and the sink (a fake unit that acks every frame), and measures a 10 s / 8 s run
+at 30 / 60 fps:
+
+| chain | source fps held | latency avg/p95 | rawlink cpu | weston cpu | xvnc cpu |
+|---|---|---|---|---|---|
+| old: Xvnc + weston x11 + x11grab | 27.9 / 57.7 | 0.45 / 0.85 ms | 0.41 / 0.61 s | 0.20 / 0.17 s | 0.11 / 0.10 s |
+| new: headless weston + capture | 30.0 / 60.0 | 0.40 / 1.05 ms | 0.37 / 0.59 s | 0.14 / 0.20 s | - |
+
+The new path holds the requested cadence (x11grab tops out just under it on this host),
+drops the X server's cpu entirely, and has the same or slightly lower total chain cost;
+latency is unchanged within the ack loop's resolution.
+
 The emulator's numbers are an upper bound: it is high speed with no wire cost, while a
 stock unit's `force_fs` port cannot carry 768 KB/frame at all, and real hardware has
 cache/sdram stalls qemu does not model.
@@ -488,9 +543,11 @@ cache/sdram stalls qemu does not model.
 * C host: `make -C rawplay rawlink` (`rawplay/out/rawlink`), then
   `python3 rawplay/test_rawlink.py`
   (descriptors against the frozen device bytes, protocol bytes vs ffmpeg, hostile `LI`,
-  reconnects, a dead ffmpeg, SIGTERM, and the gadget bridge `rawplay/test_gadget.c` against
-  fifos, which needs no usb device controller). No extra headers needed: input injection
-  dlopens libX11/libXtst at runtime.
+  reconnects, a dead ffmpeg, SIGTERM, the gadget bridge `rawplay/test_gadget.c` against
+  fifos, and the `weston_capture_v1` path against a real headless weston when it is
+  installed). Needs wayland-client and `wayland-scanner` at build time (`wayland-dev`);
+  there is no X11 dependency anywhere. `make -C rawplay` also builds the
+  `weston-touch.so` module the session loads (weston-devel).
 * Phone deployment state machine: `make -C rawplay livi-cmd` then
   `python3 rawplay/test_livi_link.py`. It drives `deploy/livi-link-monitor` with a fake
   journal, `/sys`, `/dev`, power supply, rfkill, systemctl and helper socket and checks
@@ -505,14 +562,22 @@ cache/sdram stalls qemu does not model.
 
 ### Emulator
 
-The display end is LIVI on :9 (`rawplay/livi.sh`); qemu's `usb-livi` uses request-sized bulk
-transfers (`chunked=on`), which is what makes the zero-copy path work:
+The display end is LIVI in the virtual wayland session (`rawplay/livi.sh`): weston's
+headless backend, kiosk shell, repaint-on-capture, no X server. qemu's `usb-livi` uses
+request-sized bulk transfers (`chunked=on`), which is what makes the zero-copy path work.
+The default renderer is pixman (what the phone runs, and what LIVI 8.3.0 needs); LIVI
+9.0.0 forces its inner app to Wayland and its GPU process needs a dmabuf-capable parent,
+so on a GPU host run it as `LIVI_WESTON_RENDERER=gl ./livi.sh start` and pass rawlink
+`--flip` (a pixman session makes Electron die with `create_immed ... invalid wl_buffer`
+and the panel stays black; NVIDIA's GL capture is bottom-up):
 
     rawplay/livi.sh
     make -C rawplay rawlink
     cd qemu && ./hmi.py --livi-usb              # --icount 2: fresh boot, no --loadvm
-    # host, in another shell (hmi.py prints the exact socket path):
-    rawplay/out/rawlink stream qemu/usb.<pid>.sock --usb --display :9 --stats
+    # host, in another shell (hmi.py prints the exact socket path; $XDG_RUNTIME_DIR is
+    # where livi.sh put wayland-livi):
+    rawplay/out/rawlink stream qemu/usb.<pid>.sock --usb \
+        --wayland "$XDG_RUNTIME_DIR/wayland-livi" --stats
     # at the car prompt (start the sender first, rawplay waits 15 s for video):
     upload ../out/rawplay ../rawplay/rawplay.sh
     sh /tmp/rawplay.sh 0 --stats --direct
@@ -548,18 +613,19 @@ Constraints and pitfalls:
 
 ### Real car
 
-Put the player on the stick image the gadget carries, then stream :9 to the unit; the
-unit runs it off `/fs/usb0`, nothing is written to it. The port must be high speed (the
-jailbroken `io-usb` restart, `usb/homebrew/apps/usbhs.sh`): the stock `force_fs`
-port cannot carry 768 KB/frame.
+Put the player on the stick image the gadget carries, then stream the virtual wayland
+session to the unit; the unit runs it off `/fs/usb0`, nothing is written to it. The port
+must be high speed (the jailbroken `io-usb` restart,
+`usb/homebrew/apps/usbhs.sh`): the stock `force_fs` port cannot carry 768 KB/frame.
 
     make -C rawplay rawlink
     make stick                  # copies the player into usb/ and packs usb.img
     rawplay/livi.sh
-    sudo rawplay/out/rawlink run --display :9 --stats   # gadget + sender, needs root
+    sudo rawplay/out/rawlink run --wayland "$XDG_RUNTIME_DIR/wayland-livi" --stats
     # or the two-process split (the gadget needs root for configfs):
     sudo rawplay/out/rawlink gadget --stick usb.img --sock /tmp/livi-raw.sock
-    rawplay/out/rawlink stream /tmp/livi-raw.sock --usb --display :9 --stats
+    rawplay/out/rawlink stream /tmp/livi-raw.sock --usb \
+        --wayland "$XDG_RUNTIME_DIR/wayland-livi" --stats
 
     # on the unit
     /fs/usb0/homebrew/apps/rawplay.sh 0 --stats

@@ -21,7 +21,7 @@
 [Unit]
 Description=rawplay link: charger-driven radios and LIVI, rawlink-driven CPU idle depth
 After=sysinit.target systemd-journald.service
-Before=livi-xvnc.service livi-weston.service livi.service rawlink.service
+Before=livi-weston.service livi.service rawlink.service
 StartLimitIntervalSec=0
 
 [Service]

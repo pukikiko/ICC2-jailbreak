@@ -1,6 +1,7 @@
 # rawlink in appliance mode: the functionfs gadget (vendor video interface + the homebrew
-# stick as mass storage) plus the sender that captures the Xvnc display and streams it to
-# the head unit, taking touch/knob/button back. root for configfs and the functionfs mount.
+# stick as mass storage) plus the sender that captures the headless weston session over
+# the wayland socket (weston_capture_v1) and streams it to the head unit, taking
+# touch/knob/button back. root for configfs and the functionfs mount.
 #
 # rawlink-wait forces the usb role to device, waits for the udc, unbinds the initramfs NCM
 # gadget (g1) and clears any functionfs mount left behind by a hard kill, then execs

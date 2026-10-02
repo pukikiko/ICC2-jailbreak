@@ -12,10 +12,13 @@
 #   * hostile input cannot kill it: garbage and truncated LI, a unit that goes away
 #     mid-stream and comes back, a socket that appears late, an ffmpeg that dies, a huge
 #     burst of junk, and SIGTERM (which should end it cleanly);
-#   * the icc/swc buttons with a livi binding tap their x11 key on the press edge only,
-#     and unmapped buttons are left alone.
+#   * the icc/swc buttons with a livi binding tap their evdev key on the press edge only,
+#     and unmapped buttons are left alone;
+#   * against a real headless weston (when it is installed), --wayland captures the
+#     compositor's output over weston_capture_v1 into the same rgb565 frames.
 import os
 import random
+import shutil
 import signal
 import socket
 import struct
@@ -423,8 +426,8 @@ def test_events():
 def test_button_keys():
     print('panel buttons tap their livi keys')
     # the icc/swc bits with a livi binding, plus one that has none: the mapped bits log the
-    # x11 keysym they tap on the press edge, the release and the unmapped bit must not
-    keys = {25: '0xff08', 28: '0x068', 29: '0x062', 30: '0x06e', 46: '0x076', 48: '0x06e'}
+    # evdev key code they tap on the press edge, the release and the unmapped bit must not
+    keys = {25: '14', 28: '35', 29: '48', 30: '49', 46: '47', 48: '49'}
     seq = []
     for bit in list(keys) + [27]:
         seq += [(bit, 1), (bit, 0)]
@@ -450,9 +453,9 @@ def test_button_keys():
 
 def test_injection_retry():
     print('input injection retries what appears after startup')
-    # the appliance boot race: rawlink binds the gadget before xvnc/weston exist, so the
-    # x11 display and the weston-touch socket can both be missing at init. injection must
-    # stay enabled and find the socket when it appears, not stay dead for the process.
+    # the appliance boot race: rawlink binds the gadget before weston exists, so the
+    # weston-touch socket can be missing at init. injection must stay enabled and find the
+    # socket when it appears, not stay dead for the process.
     sock = os.path.join(TMP, 'inj.sock')
     tsock = os.path.join(TMP, 'inj-touch.sock')
     if os.path.exists(tsock):
@@ -460,7 +463,7 @@ def test_injection_retry():
     open(tsock, 'w').close()            # stale file: access() sees it, connect cannot
     unit = FakeUnit(sock, touch=(123, 45, 1), touch_after=0.8)
     unit.start_server()
-    p = subprocess.Popen([RAWLINK, 'stream', sock, '--display', ':997', '--width', '32',
+    p = subprocess.Popen([RAWLINK, 'stream', sock, '--test', '--width', '32',
                           '--height', '24', '--fps', '15', '--seconds', '2.5'],
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          env=dict(os.environ, LIVI_TOUCH_SOCK=tsock))
@@ -517,6 +520,54 @@ def test_touch_replay():
           f'rc={rc} timedout={timedout} touches={touches[:3]}')
 
 
+def test_wayland_capture():
+    print('wayland capture (headless weston)')
+    weston = shutil.which('weston')
+    if not weston:
+        print('  SKIP weston is not installed')
+        return
+    rt = tempfile.mkdtemp(prefix='livi-wl-')
+    wsock = 'wayland-test'
+    wlog = os.path.join(TMP, 'weston-cap.log')
+    w = subprocess.Popen([weston, '--backend=headless', '--renderer=pixman',
+                          '--width', '64', '--height', '48', '--refresh-rate', '0',
+                          '--fake-seat', '--debug', '--shell=kiosk',
+                          '--socket', wsock, '-i', '0'],
+                         stdout=open(wlog, 'w'), stderr=subprocess.STDOUT,
+                         env=dict(os.environ, XDG_RUNTIME_DIR=rt), start_new_session=True)
+    try:
+        deadline = time.time() + 8
+        while time.time() < deadline and not os.path.exists(os.path.join(rt, wsock)):
+            if w.poll() is not None:
+                break
+            time.sleep(0.1)
+        if w.poll() is not None or not os.path.exists(os.path.join(rt, wsock)):
+            print('  SKIP weston headless cannot start on this host')
+            return
+        sock = os.path.join(TMP, 'wl.sock')
+        unit = FakeUnit(sock)
+        unit.start_server()
+        rc, out, err, timedout = run_c([sock, '--wayland', wsock, '--width', '64',
+                                        '--height', '48', '--fps', '20', '--seconds', '2',
+                                        '--no-inject'],
+                                       env={'XDG_RUNTIME_DIR': rt}, timeout=12)
+        unit.stop()
+        check('captures frames over weston_capture_v1',
+              rc == 0 and not timedout and unit.frames >= 10,
+              f'rc={rc} timedout={timedout} frames={unit.frames} err={err[-300:]!r}')
+        check('frames are the requested size',
+              all(len(v) == 64 * 48 * 2 for v in unit.frame_payloads().values()),
+              'a frame has the wrong length')
+    finally:
+        w.terminate()
+        try:
+            w.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            w.kill()
+            w.wait()
+        shutil.rmtree(rt, ignore_errors=True)
+
+
 def test_junk_flood():
     print('junk flood')
     sock = os.path.join(TMP, 'flood.sock')
@@ -560,6 +611,7 @@ def main():
     test_button_keys()
     test_injection_retry()
     test_touch_replay()
+    test_wayland_capture()
     test_junk_flood()
     print(f'\n{len(PASS)} passed, {len(FAIL)} failed')
     return 1 if FAIL else 0

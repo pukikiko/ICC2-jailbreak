@@ -1,9 +1,22 @@
-# Weston (x11 backend, kiosk, pixman) on the Xvnc display: composites LIVI's video plane
-# into the framebuffer and provides the wayland socket the app and the touch module use.
+# Weston (headless backend, kiosk, pixman): the LIVI stack's virtual 800x480 wayland
+# session - there is no X server anywhere. weston composites LIVI's video plane into the
+# headless framebuffer and provides the wayland socket the app, the touch module and
+# rawlink's capture use.
+#
+# --refresh-rate 0 makes the output repaint only when a capture is requested, so the
+# compositor costs nothing between frames; rawlink's --fps then paces the whole chain.
+# --fake-seat gives headless weston a seat (pointer+keyboard) the weston-touch module can
+# add a touchscreen to; electron wants a wl_seat anyway.
+# --debug is what authorizes weston_capture_v1 captures: the protocol is privileged and
+# weston refuses every shot without an authority, and --debug installs the allow-all one.
+# the appliance is single-user, so every local client is trusted with the panel.
+#
+# pixman matches the appliance's LIVI 8.3.0 (CPU-rendered). LIVI 9.0.0 forces its inner
+# app to Wayland and its GPU process hands the nested compositor dmabufs, which software
+# EGL cannot import (Electron dies, panel black); on a GPU machine use --renderer=gl.
 [Unit]
-Description=Weston kiosk compositor on Xvnc :9 (LIVI stack)
-After=livi-xvnc.service
-Wants=livi-xvnc.service
+Description=Weston headless kiosk session 800x480 (LIVI stack)
+After=local-fs.target
 StartLimitIntervalSec=0
 
 [Service]
@@ -11,12 +24,17 @@ Type=simple
 User=user
 Environment=HOME=/home/user
 Environment=XDG_RUNTIME_DIR=/run/livi
-Environment=DISPLAY=:9
 ExecStartPre=-/bin/sh -c 'rm -f /run/livi/wayland-livi /run/livi/wayland-livi.lock'
-ExecStart=/usr/bin/weston --backend=x11 --width 800 --height 480 --shell=kiosk \
-    --socket=wayland-livi --renderer=pixman -i 0 --modules=/opt/livi/weston-touch.so
+ExecStart=/usr/bin/weston --backend=headless --renderer=pixman --width 800 --height 480 \
+    --refresh-rate 0 --fake-seat --debug --shell=kiosk \
+    --socket=wayland-livi -i 0 --modules=/opt/livi/weston-touch.so
 Restart=always
 RestartSec=1
+# the wayland socket lives in /run/livi; keep it across restarts so a rebouncing weston
+# never takes the runtime dir away from the units using it
+RuntimeDirectory=livi
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 
 [Install]
 WantedBy=multi-user.target

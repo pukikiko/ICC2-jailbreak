@@ -19,4 +19,4 @@ while ! ls /sys/class/udc/* >/dev/null 2>&1; do
 done
 echo "" > /sys/kernel/config/usb_gadget/g1/UDC 2>/dev/null
 umount /dev/ffs-liviraw 2>/dev/null
-exec /opt/livi/rawlink run --display :9 --stick /opt/livi/usb.img --stats
+exec /opt/livi/rawlink run --wayland /run/livi/wayland-livi --stick /opt/livi/usb.img --stats

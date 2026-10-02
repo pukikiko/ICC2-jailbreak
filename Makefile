@@ -115,7 +115,7 @@ $(FFBUILD)/.libs:
 
 out/mediaplayer: out/obj/mediaplayer.o out/obj/menu.o out/obj/menufont.o out/obj/compat.o \
                  $(SDKBASE) $(FFBUILD)/.libs $(LIBC) $(SDK)/stub/libm.so.2
-	$(CC) $(LDFLAGS) -o $@ $(SDKBASE) out/obj/menu.o out/obj/menufont.o \
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(SDKBASE) out/obj/menu.o out/obj/menufont.o \
 	      out/obj/mediaplayer.o out/obj/compat.o $(FFLIBS) $(LIBC) $(SDK)/stub/libm.so.2
 
 # ---------------------------------------------------------------- host tools ---

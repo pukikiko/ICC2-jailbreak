@@ -1,25 +1,24 @@
 /*
- * weston-touch - a weston module that gives the compositor a touchscreen it can be driven
- * from, so the raw video host can inject real wl_touch events instead of an x11 pointer.
+ * weston-touch - a weston module that gives the compositor a touchscreen and a way to
+ * inject the unit's panel keys, so the raw video host can drive the app with real wayland
+ * input and no X server anywhere.
  *
- * the x11 backend weston runs on for the livi stack only speaks core X input: an XTest
- * "touch" is a mouse, so the app under it gets pointer events, the compositor draws a
- * cursor, and drags behave like a mouse drag. XInput2 touch cannot be injected by a client
- * either, so there is no way to get touch into weston through X at all.
- *
- * this module runs inside weston instead: it adds a touch device to the first seat (the
- * x11 backend's default seat) and listens on a unix socket for one-line commands from
- * rawplay/rawlink:
+ * this module runs inside weston: it adds a touch device to the first seat (the headless
+ * backend's fake seat, or whichever seat the backend creates) and listens on a unix socket
+ * for one-line commands from rawplay/rawlink:
  *
  *     d X Y     touch down at panel pixels
  *     m X Y     touch move while down
  *     u         touch up
  *     c         touch cancel (the client went away mid touch)
+ *     k CODE    tap the linux evdev key code CODE (press and release)
  *
  * a touch device created with no ops is exactly what weston's own test plugin does, so the
- * core routes the events the way it routes a real panel's.
+ * core routes the events the way it routes a real panel's; the key tap goes through
+ * weston_keyboard_send_key, the same path a physical keyboard takes.
  *
- * loaded with weston --modules=livi-touch.so, built by `make -C rawplay` against weston-devel.
+ * loaded with weston --modules=/opt/livi/weston-touch.so, built by `make -C rawplay`
+ * against weston-devel.
  */
 #include <errno.h>
 #include <stdio.h>
@@ -137,6 +136,40 @@ static void touch_emit(struct livi_touch *t, int type, double x, double y)
     notify_touch_frame(t->device);
 }
 
+/* tap a linux evdev key code: press and release through the seat's keyboard, which the
+ * focused client receives with the compositor's normal keymap. the panel buttons livi has
+ * bindings for arrive here as codes from rawplay/rawlink.c; there is no XTest path. */
+static void key_emit(struct livi_touch *t, uint32_t code)
+{
+    struct weston_keyboard *keyboard;
+    struct timespec ts;
+
+    if (!t->seat) {
+        return;
+    }
+    keyboard = weston_seat_get_keyboard(t->seat);
+    if (!keyboard) {
+        weston_log("livi-touch: seat has no keyboard, key %u dropped\n", code);
+        return;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#if LIVI_WESTON_MAJOR >= 16
+    {
+        struct weston_key_event ev;
+
+        weston_key_event_init(&ev, &ts, t->seat, code,
+                              WL_KEYBOARD_KEY_STATE_PRESSED, STATE_UPDATE_NONE);
+        weston_keyboard_send_key(keyboard, &ev);
+        weston_key_event_init(&ev, &ts, t->seat, code,
+                              WL_KEYBOARD_KEY_STATE_RELEASED, STATE_UPDATE_NONE);
+        weston_keyboard_send_key(keyboard, &ev);
+    }
+#else
+    weston_keyboard_send_key(keyboard, &ts, code, WL_KEYBOARD_KEY_STATE_PRESSED);
+    weston_keyboard_send_key(keyboard, &ts, code, WL_KEYBOARD_KEY_STATE_RELEASED);
+#endif
+}
+
 static void handle_line(struct livi_touch *t, const char *line)
 {
     double x, y;
@@ -156,6 +189,14 @@ static void handle_line(struct livi_touch *t, const char *line)
         break;
     case 'c':
         touch_emit(t, WL_TOUCH_CANCEL, 0, 0);
+        break;
+    case 'k':
+        {
+            unsigned code;
+
+            if (sscanf(line + 1, "%u", &code) == 1)
+                key_emit(t, code);
+        }
         break;
     }
 }
@@ -336,8 +377,8 @@ wet_module_init(struct weston_compositor *compositor, int *argc, char *argv[])
     t->destroy_listener.notify = compositor_destroyed;
     wl_list_init(&t->seat_listener.link);
 
-    /* the x11 backend's seat already exists by module load time; a backend that creates
-     * it later is caught by the signal */
+    /* the headless backend's fake seat (and every other backend's) already exists by
+     * module load time; a backend that creates it later is caught by the signal */
     wl_list_for_each(seat, &compositor->seat_list, link) {
         seat_created(&t->seat_listener, seat);
         break;
@@ -345,8 +386,8 @@ wet_module_init(struct weston_compositor *compositor, int *argc, char *argv[])
     if (!t->seat) {
         wl_signal_add(&compositor->seat_created_signal, &t->seat_listener);
     }
-    /* a module that cannot offer touch still leaves weston usable: the host falls back to
-     * xtest mouse events when the socket is not there */
+    /* a module that cannot offer touch still leaves weston usable: the sender logs the
+     * missing socket and touch is simply absent */
     if (touch_socket(t) < 0) {
         weston_log("livi-touch: touch injection disabled\n");
         return 0;

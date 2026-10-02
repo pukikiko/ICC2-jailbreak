@@ -1,7 +1,7 @@
-# LIVI itself (the CarPlay/Android Auto head unit UI) on the Weston kiosk display. the
-# release AppImage is a glibc/electron aarch64 build and postmarketos is musl, so it is
+# LIVI itself (the CarPlay/Android Auto head unit UI) on the Weston headless kiosk session.
+# the release AppImage is a glibc/electron aarch64 build and postmarketos is musl, so it is
 # started through /opt/livi/livi-chroot, which runs it in the ubuntu base rootfs with the
-# host's x11/wayland sockets bound in. stopping is staged through that supervisor (see
+# host's wayland runtime dir bound in. stopping is staged through that supervisor (see
 # KillMode= below), because the app's detached nested compositor and the app itself must
 # not be killed at the same instant.
 [Unit]
@@ -12,7 +12,6 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-Environment=DISPLAY=:9
 Environment=WAYLAND_DISPLAY=wayland-livi
 Environment=XDG_RUNTIME_DIR=/run/livi
 Environment=HOME=/home/user

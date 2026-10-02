@@ -11,7 +11,8 @@
  *   * a disable/re-enable generation change reopens the endpoints and keeps working;
  *   * the client going away ends the bridge instead of spinning.
  *
- *     cc -O1 -g -pthread -o out/test_gadget test_gadget.c -ldl && out/test_gadget
+ * build with `make -C rawplay test-gadget` (it needs the generated capture protocol and
+ * libwayland-client, like rawlink), then run out/test_gadget.
  */
 #define main rawlink_main
 #include "rawlink.c"

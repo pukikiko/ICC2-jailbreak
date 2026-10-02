@@ -5,24 +5,26 @@
  * livi/rawgadget.py and livi/usbgadget.py, since removed) and can run either role alone
  * or both in one process:
  *
- *     rawlink stream /tmp/livi-raw.sock --usb --display :9 --stats
+ *     rawlink stream /tmp/livi-raw.sock --usb --wayland wayland-livi --stats
  *     rawlink gadget --stick usb.img --sock /tmp/livi-raw.sock
- *     sudo rawlink run --display :9 --stats        # gadget + sender, the appliance mode
+ *     sudo rawlink run --wayland wayland-livi --stats   # gadget + sender, the appliance mode
  *
- * the wire protocol is LR MODE/FRAME downstream, LI touch/knob/ready/ack upstream
- * (rawplay/README.md section 2.2). the gadget descriptors and the configfs shape are the
- * bytes the unit has always enumerated, so it sees the same device it always has. the
- * protocol and design rationale are in rawplay/README.md; the unit end is rawplay/rawplay.c.
+ * the video source is the headless weston session: `--wayland` captures its output over
+ * the wayland socket with the weston_capture_v1 protocol (shm buffer, converted to the
+ * panel's rgb565 in-process), so there is no X server, no x11grab and no ffmpeg on that
+ * path. `--test`, `--motion` and `--file` remain the synthetic sources (ffmpeg) for tests
+ * and benchmarks. the wire protocol is LR MODE/FRAME downstream, LI touch/knob/ready/ack
+ * upstream (rawplay/README.md section 2.2); the unit end is rawplay/rawplay.c.
  *
  * it is meant to sit on an orange pi wired to the car and not fall over: bad LI messages
- * are skipped, a lost client or a unix socket that disappears is retried, ffmpeg is
- * respawned if its pipe closes, the gadget is rebound if functionfs unbinds, SIGPIPE is
- * ignored and SIGHUP (a closed terminal) does not stop it; only SIGINT/SIGTERM exit
- * cleanly, and a real setup failure (no configfs, no udc) returns nonzero.
+ * are skipped, a lost client or a unix socket that disappears is retried, the wayland
+ * capture reconnects when weston restarts, ffmpeg is respawned if its pipe closes (the
+ * synthetic sources), the gadget is rebound if functionfs unbinds, SIGPIPE is ignored and
+ * SIGHUP (a closed terminal) does not stop it; only SIGINT/SIGTERM exit cleanly, and a
+ * real setup failure (no configfs, no udc) returns nonzero.
  */
 #define _GNU_SOURCE
 #include <dirent.h>
-#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -34,6 +36,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -42,6 +45,10 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+#include <wayland-client.h>
+
+#include "weston-output-capture-client-protocol.h"
 
 /* ---- wire protocol, rawplay/README.md section 2.2 -------------------------------------- */
 
@@ -61,11 +68,14 @@
 #define LI_READY      5
 #define LI_RAW        8
 
-#define XK_BACKSPACE  0xff08
-#define XK_B          0x0062
-#define XK_H          0x0068
-#define XK_N          0x006e
-#define XK_V          0x0076
+/* linux evdev key codes (input-event-codes.h). the panel buttons with a livi binding are
+ * tapped through the weston-touch module, which hands the compositor a real key event
+ * (no x11 and no xtest anywhere on this path). */
+#define KEY_BACKSPACE 14
+#define KEY_H         35
+#define KEY_V         47
+#define KEY_B         48
+#define KEY_N         49
 
 /* functionfs abi, include/uapi/linux/usb/functionfs.h */
 #define FFS_DESCRIPTORS_MAGIC 1
@@ -298,8 +308,8 @@ static void build_hdr(unsigned char *h, int type, unsigned len, unsigned seq, un
 
 struct cfg {
     const char *path;                /* stream: the unix socket (gadget or qemu chardev) */
-    const char *file, *display, *events;
-    int usb, use_test, use_motion, no_chunked, no_inject, stats;
+    const char *file, *wayland, *events;
+    int usb, use_test, use_motion, no_chunked, no_inject, stats, flip;
     int width, height, fps, window;
     double seconds;
     char stick[PATH_MAX], sock[PATH_MAX], name[64], udc[64], ffs[PATH_MAX];
@@ -346,9 +356,9 @@ static const char *opt_arg(int argc, char **argv, int *i, const char *name)
 
 static const char *stream_usage(void)
 {
-    return "usage: rawlink stream PATH [--usb] [--test|--motion|--file F|--display D]\n"
+    return "usage: rawlink stream PATH [--usb] [--wayland W|--test|--motion|--file F]\n"
            "       [--width N] [--height N] [--fps N] [--window N] [--seconds S]\n"
-           "       [--events FILE] [--stats] [--no-inject] [--no-chunked]\n";
+           "       [--events FILE] [--stats] [--no-inject] [--no-chunked] [--flip]\n";
 }
 
 static const char *gadget_usage(void)
@@ -361,33 +371,18 @@ static const char *run_usage(void)
 {
     return "usage: rawlink run [gadget options] [stream options]\n"
            "       [--stick IMG] [--sock PATH] [--udc NAME] [--name NAME] [--rw]\n"
-           "       [--display D|--file F|--test|--motion] [--width N] [--height N]\n"
+           "       [--wayland W|--file F|--test|--motion] [--width N] [--height N]\n"
            "       [--fps N] [--window N] [--seconds S] [--events FILE] [--stats]\n"
-           "       [--no-inject] [--no-chunked] [--dry-run] [--dump-descriptors]\n";
+           "       [--no-inject] [--no-chunked] [--flip] [--dry-run] [--dump-descriptors]\n";
 }
 
-/* ---- input injection (livi/inject.py in c, x11 via dlopen so there is no hard dep) ------- */
-
-typedef void Display;
-typedef unsigned char KeyCode;
-typedef unsigned long KeySym;
+/* ---- input injection: the weston-touch module's socket (wayland, no x11) ----------------- */
 
 struct inject {
     int enabled;
     int touch_fd;
     int touch_down;
     double touch_retry_at;
-    double x_retry_at;
-    Display *dpy;
-    char display[64];
-    void *x11, *xtst;
-    Display *(*XOpenDisplay)(const char *);
-    int (*XFlush)(Display *);
-    KeyCode (*XKeysymToKeycode)(Display *, KeySym);
-    int (*XTestFakeMotionEvent)(Display *, int, int, int, unsigned long);
-    int (*XTestFakeButtonEvent)(Display *, unsigned int, int, unsigned long);
-    int (*XTestFakeKeyEvent)(Display *, unsigned int, int, unsigned long);
-    int x_down;
 };
 
 static const char *touch_path(void)
@@ -446,98 +441,72 @@ static int touch_write(struct inject *in, const char *cmd)
     return 0;
 }
 
-/* reconnect the x11 display the xtest fallback and the panel buttons use. on the appliance
- * rawlink binds the gadget before xvnc exists, so this is retried on use instead of being
- * decided once at startup. */
-static int x_connect(struct inject *in)
+/* reconnect the weston-touch socket on use. the module is loaded by weston, which is a
+ * unit of its own and can restart (boot races, crashes), and its socket file can outlive
+ * the listener; deciding at startup would leave touch dead for the whole process when
+ * rawlink wins the boot race. */
+static int touch_ensure(struct inject *in)
 {
-    if (in->dpy) {
+    if (in->touch_fd >= 0) {
         return 0;
     }
-    if (!in->XOpenDisplay || !in->display[0]) {
+    if (in->touch_retry_at > now_sec()) {
         return -1;
     }
-    if (in->x_retry_at > now_sec()) {
-        return -1;
+    in->touch_retry_at = now_sec() + 2.0;
+    if (access(touch_path(), F_OK) == 0 && touch_connect(in) == 0) {
+        slogf("inject: touch/key injection on %s", touch_path());
+        return 0;
     }
-    in->x_retry_at = now_sec() + 2.0;
-    in->dpy = in->XOpenDisplay(in->display);
-    if (in->dpy) {
-        slogf("inject: x11 input injection on %s", in->display);
-    }
-    return in->dpy ? 0 : -1;
+    return -1;
 }
 
-static void inject_init(struct inject *in, const char *display, int no_inject)
+static void inject_init(struct inject *in, int no_inject)
 {
-    void *x11, *xtst;
-
     memset(in, 0, sizeof *in);
     in->touch_fd = -1;
-    if (!display || no_inject) {
+    if (no_inject) {
         return;
     }
-    /* the weston-touch socket and the x11 display are independent, and both can appear
-     * after rawlink does: on the appliance the gadget binds before xvnc/weston. keep
-     * injection enabled and let each path retry (the socket in inject_touch, x11 here and
-     * in inject_tap) - deciding it once at startup left touch dead for the whole process
-     * when rawlink won that boot race. */
+    /* injection stays enabled even when the socket is not there yet; touch_ensure retries
+     * on use, so a weston that comes up after rawlink still gets its input */
     in->enabled = 1;
-    snprintf(in->display, sizeof in->display, "%s", display);
     if (access(touch_path(), F_OK) == 0) {
         if (touch_connect(in) < 0) {
-            slogf("rawstream: weston-touch socket unusable (%s), mouse fallback",
-                 strerror(errno));
+            slogf("rawstream: weston-touch socket unusable (%s), will retry",
+                  strerror(errno));
         } else {
-            slogf("inject: touch injection on %s", touch_path());
+            slogf("inject: touch/key injection on %s", touch_path());
         }
-    }
-    x11 = dlopen("libX11.so.6", RTLD_NOW | RTLD_LOCAL);
-    xtst = dlopen("libXtst.so.6", RTLD_NOW | RTLD_LOCAL);
-    if (!x11 || !xtst) {
-        slogf("rawstream: no x11 input injection (libX11/libXtst missing)");
-        return;
-    }
-    *(void **)&in->XOpenDisplay = dlsym(x11, "XOpenDisplay");
-    *(void **)&in->XFlush = dlsym(x11, "XFlush");
-    *(void **)&in->XKeysymToKeycode = dlsym(x11, "XKeysymToKeycode");
-    *(void **)&in->XTestFakeMotionEvent = dlsym(xtst, "XTestFakeMotionEvent");
-    *(void **)&in->XTestFakeButtonEvent = dlsym(xtst, "XTestFakeButtonEvent");
-    *(void **)&in->XTestFakeKeyEvent = dlsym(xtst, "XTestFakeKeyEvent");
-    if (!in->XOpenDisplay || !in->XFlush || !in->XKeysymToKeycode
-        || !in->XTestFakeMotionEvent || !in->XTestFakeButtonEvent
-        || !in->XTestFakeKeyEvent) {
-        slogf("rawstream: no x11 input injection (libX11/libXtst symbols missing)");
-        return;
-    }
-    in->x11 = x11;
-    in->xtst = xtst;
-    if (x_connect(in) < 0) {
-        slogf("rawstream: display %s not up yet, x11 injection will retry", display);
     }
 }
 
 static void inject_touch(struct inject *in, int down, int x, int y)
 {
-    /* weston is a systemd unit of its own and restarts (boot races, crashes, an xvnc
-     * reset); its socket file can outlive the listener. without a retry here every touch
-     * after that would stay on the xtest mouse for the life of this process */
-    if (in->touch_fd < 0 && in->touch_retry_at <= now_sec()) {
-        in->touch_retry_at = now_sec() + 2.0;
-        if (access(touch_path(), F_OK) == 0 && touch_connect(in) == 0) {
-            slogf("inject: touch injection on %s", touch_path());
-        }
-    }
-    if (in->touch_fd >= 0) {
-        char cmd[64];
-        int have_cmd = 1;
+    char cmd[64];
 
-        if (down) {
-            snprintf(cmd, sizeof cmd, "%c %d %d\n", in->touch_down ? 'm' : 'd', x, y);
-        } else if (in->touch_down) {
-            snprintf(cmd, sizeof cmd, "u\n");
-        } else {
-            return;
+    if (!in->enabled || touch_ensure(in) < 0) {
+        return;
+    }
+    if (down) {
+        snprintf(cmd, sizeof cmd, "%c %d %d\n", in->touch_down ? 'm' : 'd', x, y);
+    } else if (in->touch_down) {
+        snprintf(cmd, sizeof cmd, "u\n");
+    } else {
+        return;
+    }
+    if (touch_write(in, cmd) == 0) {
+        in->touch_down = down;
+        return;
+    }
+    /* the listener went away under the socket (a weston restart): reconnect and resend
+     * the sample on the fresh connection, where a move was never a press */
+    close(in->touch_fd);
+    in->touch_fd = -1;
+    in->touch_down = 0;
+    if (touch_connect(in) == 0) {
+        if (cmd[0] == 'm') {
+            cmd[0] = 'd';
         }
         if (touch_write(in, cmd) == 0) {
             in->touch_down = down;
@@ -545,74 +514,53 @@ static void inject_touch(struct inject *in, int down, int x, int y)
         }
         close(in->touch_fd);
         in->touch_fd = -1;
-        in->touch_down = 0;
-        if (touch_connect(in) == 0) {
-            if (have_cmd && cmd[0] == 'm') {
-                cmd[0] = 'd';       /* the new connection has no touch down yet */
-            }
-            if (touch_write(in, cmd) == 0) {
-                in->touch_down = down;
-                return;
-            }
-        }
-        slogf("inject: touch socket lost (%s)", strerror(errno));
+    }
+    slogf("inject: touch socket lost (%s)", strerror(errno));
+}
+
+/* the panel keys are tapped on the weston-touch socket as evdev codes; the module injects
+ * a real key press/release into the compositor (weston-touch.c 'k'), so the focused app
+ * gets it with no XTest and no X server in the path. */
+static void inject_key(struct inject *in, unsigned code)
+{
+    char cmd[32];
+
+    if (!in->enabled || touch_ensure(in) < 0) {
+        return;
+    }
+    snprintf(cmd, sizeof cmd, "k %u\n", code);
+    if (touch_write(in, cmd) < 0) {
+        close(in->touch_fd);
         in->touch_fd = -1;
         in->touch_down = 0;
+        slogf("inject: touch socket lost (%s)", strerror(errno));
     }
-    if (!in->dpy && x_connect(in) < 0) {
-        return;
-    }
-    in->XTestFakeMotionEvent(in->dpy, -1, x, y, 0);
-    /* a press only on the 0->1 edge: the guest repeats samples while a finger is held,
-     * and pressing an already pressed button reads as a double click to the app */
-    if (down != in->x_down) {
-        in->XTestFakeButtonEvent(in->dpy, 1, down, 0);
-        in->x_down = down;
-    }
-    in->XFlush(in->dpy);
 }
 
-static void inject_tap(struct inject *in, unsigned keysym)
-{
-    KeyCode code;
-
-    if (!in->dpy && x_connect(in) < 0) {
-        return;
-    }
-    code = in->XKeysymToKeycode(in->dpy, keysym);
-    if (!code) {
-        return;
-    }
-    in->XTestFakeKeyEvent(in->dpy, code, 1, 0);
-    in->XFlush(in->dpy);
-    in->XTestFakeKeyEvent(in->dpy, code, 0, 0);
-    in->XFlush(in->dpy);
-}
-
-/* the icc audio panel and steering wheel buttons livi has default bindings for, as x11
- * keysyms. the unit sends every panel button as LI_BUTTON (rawplay/rawplay.c send_input) and
- * the bit is the ipc channel 6 bitmap bit (docs/v850-ipc-protocol.md, iccbuttons/iccbuttons.c).
- * the key is tapped on the press edge only: the release is the other half of the same
- * tap, and tapping it again would fire the livi action twice. */
+/* the icc audio panel and steering wheel buttons livi has default bindings for, as evdev
+ * key codes. the unit sends every panel button as LI_BUTTON (rawplay/rawplay.c send_input)
+ * and the bit is the ipc channel 6 bitmap bit (docs/v850-ipc-protocol.md,
+ * iccbuttons/iccbuttons.c). the key is tapped on the press edge only: the release is the
+ * other half of the same tap, and tapping it again would fire the livi action twice. */
 static const struct button_key {
     unsigned char bit;
-    unsigned keysym;
+    unsigned code;
 } button_keys[] = {
-    { 25, XK_BACKSPACE },       /* back / home -> back */
-    { 28, XK_H },               /* menu -> home */
-    { 29, XK_B },               /* seek down -> previous */
-    { 30, XK_N },               /* seek up -> next */
-    { 46, XK_V },               /* swc phone -> voice assistant */
-    { 48, XK_N },               /* swc seek -> next */
+    { 25, KEY_BACKSPACE },      /* back / home -> back */
+    { 28, KEY_H },              /* menu -> home */
+    { 29, KEY_B },              /* seek down -> previous */
+    { 30, KEY_N },              /* seek up -> next */
+    { 46, KEY_V },              /* swc phone -> voice assistant */
+    { 48, KEY_N },              /* swc seek -> next */
 };
 
-static unsigned button_keysym(unsigned bit)
+static unsigned button_code(unsigned bit)
 {
     size_t i;
 
     for (i = 0; i < sizeof button_keys / sizeof button_keys[0]; i++) {
         if (button_keys[i].bit == bit) {
-            return button_keys[i].keysym;
+            return button_keys[i].code;
         }
     }
     return 0;
@@ -633,6 +581,20 @@ struct outlink {
     int is_pipe;
     double next_try;
     int announced_down;
+};
+
+/* --wayland: the capture thread owns the wayland connection and writes rgb565 frames into
+ * the pipe whose read end is stream.ff_fd, so the sender treats it exactly like the ffmpeg
+ * pipe. the thread never exits on a weston restart: it reconnects and keeps the pipe open,
+ * so no respawn logic is needed for it. */
+struct wlcap {
+    pthread_t tid;
+    int running;
+    int out_fd;                 /* write end of the frame pipe (thread side) */
+    int stop_r, stop_w;         /* wakes the thread out of poll/dispatch */
+    volatile int stop;
+    char display[128];
+    unsigned char *dst;         /* rgb565 staging for one frame */
 };
 
 struct stream {
@@ -661,6 +623,7 @@ struct stream {
     pid_t ff_pid;
     int ff_fd;
     double ff_retry_at;
+    struct wlcap cap;
 };
 
 static void tx_free(struct txmsg *m)
@@ -878,17 +841,17 @@ static void handle_li(struct stream *s, const unsigned char *m, size_t n)
         /* the panel buttons: the mapped ones are tapped, the rest are logged and left
          * alone (the unit's own services see the same bitmap regardless) */
         unsigned bit = m[3], down = m[4];
-        unsigned keysym = button_keysym(bit);
+        unsigned code = button_code(bit);
 
         if (s->events) {
-            if (down && keysym) {
-                fprintf(s->events, "%.3f button %u %u key 0x%03x\n", now, bit, down, keysym);
+            if (down && code) {
+                fprintf(s->events, "%.3f button %u %u key %u\n", now, bit, down, code);
             } else {
                 fprintf(s->events, "%.3f button %u %u\n", now, bit, down);
             }
         }
-        if (down && keysym) {
-            inject_tap(&s->inj, keysym);
+        if (down && code) {
+            inject_key(&s->inj, code);
         }
     } else if (t == LI_READY) {
         if (s->last_ready == 0.0 || now - s->last_ready > 3.0) {
@@ -1109,8 +1072,13 @@ static int try_connect(struct outlink *o, const char *path)
     return 0;
 }
 
+static void wlcap_stop(struct stream *s);
+
 static void ff_reap(struct stream *s)
 {
+    if (s->cap.running) {
+        wlcap_stop(s);
+    }
     if (s->ff_fd >= 0) {
         close(s->ff_fd);
         s->ff_fd = -1;
@@ -1151,24 +1119,6 @@ static int ff_spawn(struct stream *s)
         ARG("-an");
         ARG("-i");
         ARG("%s", c->file);
-    } else if (c->display) {
-        /* a device input buffers ~8 frames by default and frame threading holds another,
-         * which is half a second of pure capture lag at 15 fps before anything reaches
-         * the panel; x11grab runs unbuffered and single threaded instead */
-        ARG("-fflags");
-        ARG("nobuffer");
-        ARG("-threads");
-        ARG("1");
-        ARG("-f");
-        ARG("x11grab");
-        ARG("-framerate");
-        ARG("%d", c->fps);
-        ARG("-draw_mouse");
-        ARG("0");
-        ARG("-video_size");
-        ARG("%s", size);
-        ARG("-i");
-        ARG("%s", c->display);
     } else if (c->use_motion) {
         ARG("-f");
         ARG("lavfi");
@@ -1213,6 +1163,502 @@ static int ff_spawn(struct stream *s)
     s->ff_pid = pid;
     s->pending_len = 0;
     return 0;
+}
+
+/* ---- wayland capture: weston_capture_v1 + wl_shm ----------------------------------------- */
+
+/* the capture protocol hands the client pixels in the renderer's own format. headless
+ * weston with the pixman renderer captures XRGB8888 (an ARGB8888 output is possible too);
+ * both are 4 bytes per pixel with the same rgb byte order, and the sender converts them to
+ * the panel's rgb565le. no X server, no x11grab and no ffmpeg on this path. */
+#define DRM_FORMAT_ARGB8888 0x34325241u
+#define DRM_FORMAT_XRGB8888 0x34325258u
+/* wl_shm takes the enum values, not the fourccs the capture source announces */
+#define WL_SHM_FORMAT_ARGB8888 0
+#define WL_SHM_FORMAT_XRGB8888 1
+
+struct wlcap_state {
+    struct wl_display *dpy;
+    struct wl_registry *registry;
+    struct wl_shm *shm;
+    struct weston_capture_v1 *factory;
+    struct wl_output *output;
+    struct weston_capture_source_v1 *source;
+    struct wl_shm_pool *pool;
+    struct wl_buffer *buffer;
+    unsigned char *map;
+    size_t map_len;
+    int fd;
+    int have_format, have_size, complete, retry;
+    uint32_t format;
+    int width, height;
+};
+
+/* sleep up to ms, waking early when the stream stops; returns -1 when stopping */
+static int wlcap_pause(struct wlcap *cap, int ms)
+{
+    struct pollfd p = { cap->stop_r, POLLIN, 0 };
+
+    if (g_stop || cap->stop) {
+        return -1;
+    }
+    if (ms <= 0) {
+        return 0;
+    }
+    return poll(&p, 1, ms) > 0 ? -1 : 0;
+}
+
+/* dispatch queued and pending wayland events, waiting up to timeout_ms for more. returns
+ * -1 on a display error or when the stream is stopping. */
+static int wlcap_dispatch_wait(struct wlcap *cap, struct wl_display *dpy, int timeout_ms)
+{
+    struct pollfd pf[2];
+    int r;
+
+    if (g_stop || cap->stop) {
+        return -1;
+    }
+    if (wl_display_prepare_read(dpy) != 0) {
+        return wl_display_dispatch_pending(dpy) < 0 ? -1 : 0;
+    }
+    pf[0].fd = wl_display_get_fd(dpy);
+    pf[0].events = POLLIN;
+    pf[0].revents = 0;
+    pf[1].fd = cap->stop_r;
+    pf[1].events = POLLIN;
+    pf[1].revents = 0;
+    r = poll(pf, 2, timeout_ms);
+    if (r < 0) {
+        wl_display_cancel_read(dpy);
+        return errno == EINTR ? 0 : -1;
+    }
+    if (pf[1].revents & POLLIN) {
+        wl_display_cancel_read(dpy);
+        return -1;
+    }
+    if (r == 0 || !(pf[0].revents & (POLLIN | POLLERR | POLLHUP))) {
+        wl_display_cancel_read(dpy);
+        return 0;
+    }
+    if (wl_display_read_events(dpy) < 0) {
+        return -1;
+    }
+    return wl_display_dispatch_pending(dpy) < 0 ? -1 : 0;
+}
+
+static int wlcap_flush(struct wl_display *dpy)
+{
+    for (;;) {
+        if (wl_display_flush(dpy) == 0) {
+            return 0;
+        }
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            return -1;
+        }
+        {
+            struct pollfd p = { wl_display_get_fd(dpy), POLLOUT, 0 };
+
+            poll(&p, 1, 100);
+        }
+    }
+}
+
+static void wlcap_registry_global(void *data, struct wl_registry *reg, uint32_t name,
+                                  const char *iface, uint32_t version)
+{
+    struct wlcap_state *st = data;
+
+    if (strcmp(iface, wl_shm_interface.name) == 0) {
+        st->shm = wl_registry_bind(reg, name, &wl_shm_interface, 1);
+    } else if (strcmp(iface, weston_capture_v1_interface.name) == 0) {
+        st->factory = wl_registry_bind(reg, name, &weston_capture_v1_interface,
+                                       version < 2 ? version : 2);
+    } else if (strcmp(iface, wl_output_interface.name) == 0 && !st->output) {
+        st->output = wl_registry_bind(reg, name, &wl_output_interface, 1);
+    }
+}
+
+static void wlcap_registry_remove(void *data, struct wl_registry *reg, uint32_t name)
+{
+    (void)data;
+    (void)reg;
+    (void)name;
+}
+
+static const struct wl_registry_listener wlcap_registry_listener = {
+    .global = wlcap_registry_global,
+    .global_remove = wlcap_registry_remove,
+};
+
+static void wlcap_source_format(void *data, struct weston_capture_source_v1 *src,
+                                uint32_t drm_format)
+{
+    struct wlcap_state *st = data;
+
+    (void)src;
+    if (drm_format == DRM_FORMAT_XRGB8888 || drm_format == DRM_FORMAT_ARGB8888) {
+        st->format = drm_format;
+        st->have_format = 1;
+    }
+}
+
+static void wlcap_source_size(void *data, struct weston_capture_source_v1 *src,
+                              int32_t width, int32_t height)
+{
+    struct wlcap_state *st = data;
+
+    (void)src;
+    st->width = width;
+    st->height = height;
+    st->have_size = 1;
+}
+
+static void wlcap_source_formats_done(void *data, struct weston_capture_source_v1 *src)
+{
+    (void)data;
+    (void)src;
+    /* the first compatible format is enough; this only marks the end of the list, and the
+     * listener entry must not be NULL (libwayland refuses to dispatch to it) */
+}
+
+static void wlcap_source_complete(void *data, struct weston_capture_source_v1 *src)
+{
+    struct wlcap_state *st = data;
+
+    (void)src;
+    st->complete = 1;
+}
+
+static void wlcap_source_retry(void *data, struct weston_capture_source_v1 *src)
+{
+    struct wlcap_state *st = data;
+
+    (void)src;
+    st->retry = 1;
+}
+
+static void wlcap_source_failed(void *data, struct weston_capture_source_v1 *src,
+                                const char *msg)
+{
+    struct wlcap_state *st = data;
+
+    (void)src;
+    (void)st;
+    slogf("rawstream: wayland capture failed: %s", msg ? msg : "unknown");
+}
+
+static const struct weston_capture_source_v1_listener wlcap_source_listener = {
+    .format = wlcap_source_format,
+    .formats_done = wlcap_source_formats_done,
+    .size = wlcap_source_size,
+    .complete = wlcap_source_complete,
+    .retry = wlcap_source_retry,
+    .failed = wlcap_source_failed,
+};
+
+static void wlcap_release(struct wlcap_state *st)
+{
+    if (st->source) {
+        weston_capture_source_v1_destroy(st->source);
+        st->source = NULL;
+    }
+    if (st->buffer) {
+        wl_buffer_destroy(st->buffer);
+        st->buffer = NULL;
+    }
+    if (st->pool) {
+        wl_shm_pool_destroy(st->pool);
+        st->pool = NULL;
+    }
+    if (st->map) {
+        munmap(st->map, st->map_len);
+        st->map = NULL;
+    }
+    if (st->fd >= 0) {
+        close(st->fd);
+        st->fd = -1;
+    }
+    if (st->output) {
+        wl_output_destroy(st->output);
+        st->output = NULL;
+    }
+    if (st->factory) {
+        weston_capture_v1_destroy(st->factory);
+        st->factory = NULL;
+    }
+    if (st->shm) {
+        wl_shm_destroy(st->shm);
+        st->shm = NULL;
+    }
+    if (st->registry) {
+        wl_registry_destroy(st->registry);
+        st->registry = NULL;
+    }
+    if (st->dpy) {
+        wl_display_disconnect(st->dpy);
+        st->dpy = NULL;
+    }
+}
+
+static int wlcap_make_buffer(struct wlcap_state *st)
+{
+    int stride = st->width * 4;
+    size_t len = (size_t)stride * (size_t)st->height;
+
+    if (st->format != DRM_FORMAT_XRGB8888 && st->format != DRM_FORMAT_ARGB8888) {
+        slogf("rawstream: unsupported wayland capture format 0x%x", st->format);
+        return -1;
+    }
+    if (st->fd >= 0) {
+        if (st->map) {
+            munmap(st->map, st->map_len);
+            st->map = NULL;
+        }
+        if (st->buffer) {
+            wl_buffer_destroy(st->buffer);
+            st->buffer = NULL;
+        }
+        if (st->pool) {
+            wl_shm_pool_destroy(st->pool);
+            st->pool = NULL;
+        }
+        close(st->fd);
+        st->fd = -1;
+    }
+    st->fd = memfd_create("livi-capture", MFD_CLOEXEC);
+    if (st->fd < 0 || ftruncate(st->fd, (off_t)len) < 0) {
+        slogf("rawstream: wayland capture buffer: %s", strerror(errno));
+        if (st->fd >= 0) {
+            close(st->fd);
+            st->fd = -1;
+        }
+        return -1;
+    }
+    st->map = mmap(NULL, len, PROT_READ, MAP_SHARED, st->fd, 0);
+    if (st->map == MAP_FAILED) {
+        st->map = NULL;
+        slogf("rawstream: wayland capture mmap: %s", strerror(errno));
+        return -1;
+    }
+    st->map_len = len;
+    st->pool = wl_shm_create_pool(st->shm, st->fd, (int32_t)len);
+    st->buffer = wl_shm_pool_create_buffer(st->pool, 0, st->width, st->height, stride,
+                                           st->format == DRM_FORMAT_XRGB8888
+                                               ? WL_SHM_FORMAT_XRGB8888
+                                               : WL_SHM_FORMAT_ARGB8888);
+    if (!st->pool || !st->buffer) {
+        slogf("rawstream: wayland capture cannot create the shm buffer");
+        return -1;
+    }
+    return 0;
+}
+
+static int wlcap_setup(struct stream *s, struct wlcap_state *st)
+{
+    st->registry = wl_display_get_registry(st->dpy);
+    wl_registry_add_listener(st->registry, &wlcap_registry_listener, st);
+    if (wl_display_roundtrip(st->dpy) < 0) {
+        return -1;
+    }
+    if (!st->shm || !st->factory || !st->output) {
+        slogf("rawstream: no weston_capture_v1/wl_shm/output on this display");
+        return -1;
+    }
+    st->source = weston_capture_v1_create(st->factory, st->output,
+                                          WESTON_CAPTURE_V1_SOURCE_FRAMEBUFFER);
+    if (!st->source) {
+        return -1;
+    }
+    weston_capture_source_v1_add_listener(st->source, &wlcap_source_listener, st);
+    if (wlcap_flush(st->dpy) < 0) {
+        return -1;
+    }
+    /* the source delivers format and size right after creation; wait for both (a compositor
+     * can send several format events, so one roundtrip is not enough) */
+    while (!(st->have_size && st->have_format)) {
+        if (wlcap_dispatch_wait(&s->cap, st->dpy, 2000) < 0) {
+            return -1;
+        }
+    }
+    return wlcap_make_buffer(st);
+}
+
+/* convert one captured XRGB8888/ARGB8888 frame (bytes B,G,R,X) to the panel's rgb565le.
+ * --flip reverses the row order: weston's asynchronous GL capture path flips whenever the
+ * GL_ANGLE_pack_reverse_row_order extension is missing (NVIDIA), regardless of the
+ * renderer's real y orientation, so a GL session on such a driver delivers bottom-up
+ * frames. pixman sessions are always top-down and never need it. */
+static void wlcap_convert(struct stream *s, const struct wlcap_state *st)
+{
+    unsigned char *dst = s->cap.dst;
+    int x, y;
+
+    for (y = 0; y < st->height; y++) {
+        int sy = s->cfg->flip ? st->height - 1 - y : y;
+        const unsigned char *p = st->map + (size_t)sy * (size_t)st->width * 4;
+
+        for (x = 0; x < st->width; x++, p += 4, dst += 2) {
+            dst[0] = (unsigned char)((p[1] << 5) | (p[0] >> 3));
+            dst[1] = (unsigned char)((p[2] & 0xf8) | (p[1] >> 5));
+        }
+    }
+}
+
+static void *wlcap_thread(void *arg)
+{
+    struct stream *s = arg;
+    struct wlcap *cap = &s->cap;
+    struct cfg *c = s->cfg;
+
+    while (!g_stop && !cap->stop) {
+        unsigned long long n = 0;
+        double start = now_sec();
+        struct wlcap_state st;
+
+        memset(&st, 0, sizeof st);
+        st.fd = -1;
+        st.dpy = wl_display_connect(cap->display);
+        if (!st.dpy) {
+            slogf("rawstream: wayland %s not up (%s), retrying", cap->display,
+                  strerror(errno));
+            if (wlcap_pause(cap, 1000) < 0) {
+                break;
+            }
+            continue;
+        }
+        if (wlcap_setup(s, &st) < 0
+            || st.width != c->width || st.height != c->height) {
+            if (st.have_size) {
+                slogf("rawstream: weston output is %dx%d, expected %dx%d", st.width,
+                      st.height, c->width, c->height);
+            }
+            wlcap_release(&st);
+            if (wlcap_pause(cap, 1000) < 0) {
+                break;
+            }
+            continue;
+        }
+        slogf("rawstream: wayland capture on %s, %dx%d", cap->display, st.width, st.height);
+        for (;;) {
+            if (g_stop || cap->stop) {
+                break;
+            }
+            st.complete = 0;
+            if (st.retry) {
+                st.retry = 0;
+                if (wlcap_make_buffer(&st) < 0) {
+                    break;
+                }
+            }
+            weston_capture_source_v1_capture(st.source, st.buffer);
+            if (wlcap_flush(st.dpy) < 0) {
+                break;
+            }
+            while (!st.complete && !st.retry) {
+                if (wlcap_dispatch_wait(cap, st.dpy, 1000) < 0) {
+                    break;      /* display error; stop is checked below */
+                }
+            }
+            if (g_stop || cap->stop) {
+                break;
+            }
+            if (st.retry) {
+                continue;
+            }
+            wlcap_convert(s, &st);
+            if (fd_write_all(cap->out_fd, cap->dst, (size_t)s->frame_len) < 0) {
+                break;          /* the sender is gone */
+            }
+            n++;
+            /* the headless output repaints on capture only, so the rate is ours to set:
+             * pace to --fps like the ffmpeg sources, instead of burning the phone cpu on
+             * repaints and conversions the unit cannot take anyway */
+            if (c->fps > 0) {
+                double due = start + (double)n / (double)c->fps;
+                double now = now_sec();
+
+                if (due > now && wlcap_pause(cap, (int)((due - now) * 1000.0)) < 0) {
+                    break;
+                }
+            }
+        }
+        wlcap_release(&st);
+        if (g_stop || cap->stop) {
+            break;
+        }
+        slogf("rawstream: wayland capture reconnecting");
+        if (wlcap_pause(cap, 500) < 0) {
+            break;
+        }
+    }
+    return NULL;
+}
+
+static int wlcap_spawn(struct stream *s)
+{
+    struct wlcap *cap = &s->cap;
+    int p[2], q[2];
+
+    if (pipe2(p, O_CLOEXEC) < 0) {
+        return -1;
+    }
+    if (pipe2(q, O_CLOEXEC) < 0) {
+        close(p[0]);
+        close(p[1]);
+        return -1;
+    }
+    cap->dst = malloc((size_t)s->frame_len);
+    if (!cap->dst) {
+        close(p[0]);
+        close(p[1]);
+        close(q[0]);
+        close(q[1]);
+        return -1;
+    }
+    s_copy(cap->display, sizeof cap->display, s->cfg->wayland);
+    cap->out_fd = p[1];
+    cap->stop_r = q[0];
+    cap->stop_w = q[1];
+    cap->stop = 0;
+    s->ff_fd = p[0];
+    set_nonblock(s->ff_fd);
+    if (pthread_create(&cap->tid, NULL, wlcap_thread, s) != 0) {
+        close(p[0]);
+        close(p[1]);
+        close(q[0]);
+        close(q[1]);
+        free(cap->dst);
+        cap->dst = NULL;
+        s->ff_fd = -1;
+        errno = EAGAIN;
+        return -1;
+    }
+    cap->running = 1;
+    return 0;
+}
+
+static void wlcap_stop(struct stream *s)
+{
+    struct wlcap *cap = &s->cap;
+
+    if (!cap->running) {
+        return;
+    }
+    cap->stop = 1;
+    (void)!write(cap->stop_w, "x", 1);
+    if (s->ff_fd >= 0) {
+        /* close the read end so a thread blocked writing a full pipe sees EPIPE and
+         * exits; the stop pipe alone cannot wake a write */
+        close(s->ff_fd);
+        s->ff_fd = -1;
+    }
+    pthread_join(cap->tid, NULL);
+    close(cap->stop_r);
+    close(cap->stop_w);
+    close(cap->out_fd);
+    free(cap->dst);
+    cap->dst = NULL;
+    cap->running = 0;
 }
 
 static int stream_init(struct stream *s, struct cfg *c)
@@ -1267,8 +1713,13 @@ static int stream_init(struct stream *s, struct cfg *c)
             slogf("rawstream: cannot open %s: %s", c->events, strerror(errno));
         }
     }
-    inject_init(&s->inj, c->display, c->no_inject);
-    if (ff_spawn(s) < 0) {
+    inject_init(&s->inj, c->no_inject);
+    if (c->wayland) {
+        if (wlcap_spawn(s) < 0) {
+            slogf("rawstream: cannot start the wayland capture: %s", strerror(errno));
+            s->ff_retry_at = now_sec() + 1.0;
+        }
+    } else if (ff_spawn(s) < 0) {
         slogf("rawstream: cannot start ffmpeg: %s", strerror(errno));
         s->ff_retry_at = now_sec() + 1.0;
     }
@@ -1375,8 +1826,10 @@ static void stream_loop(struct stream *s, struct outlink *o, int rx_fd)
                 }
             }
         }
-        if (s->ff_fd < 0 && now >= s->ff_retry_at) {
-            if (ff_spawn(s) < 0) {
+        if (s->ff_fd < 0 && !s->cap.running && now >= s->ff_retry_at) {
+            int rc = s->cfg->wayland ? wlcap_spawn(s) : ff_spawn(s);
+
+            if (rc < 0) {
                 s->ff_retry_at = now + 1.0;
             }
         }
@@ -2574,10 +3027,12 @@ static int parse_args(int argc, char **argv, struct cfg *c, int allow_gadget)
             c->no_inject = 1;
         } else if (!strcmp(argv[i], "--no-chunked")) {
             c->no_chunked = 1;
+        } else if (!strcmp(argv[i], "--flip")) {
+            c->flip = 1;
         } else if ((v = opt_arg(argc, argv, &i, "--file"))) {
             c->file = v;
-        } else if ((v = opt_arg(argc, argv, &i, "--display"))) {
-            c->display = v;
+        } else if ((v = opt_arg(argc, argv, &i, "--wayland"))) {
+            c->wayland = v;
         } else if ((v = opt_arg(argc, argv, &i, "--events"))) {
             c->events = v;
         } else if ((v = opt_arg(argc, argv, &i, "--width"))) {

@@ -1,7 +1,7 @@
 #!/bin/sh
 # run the glibc LIVI AppImage inside the ubuntu chroot. the release build is an aarch64
 # glibc/electron binary; postmarketos is musl, so it runs in /opt/livi/rootfs with the
-# host's x11 and wayland sockets and runtime dir bound in. the binds are idempotent, so a
+# host's wayland runtime dir and audio sockets bound in. the binds are idempotent, so a
 # supervisor can restart this freely. needs root (chroot + mount).
 #
 # usage: livi-chroot [LIVI args...]  (same argv livi.sh passes to the AppImage)
@@ -78,7 +78,7 @@ stop_app() {
 }
 trap stop_app TERM INT
 
-mkdir -p "$R$RUNDIR" "$R/tmp/.X11-unix" "$R/dev" "$R/proc" "$R/sys" \
+mkdir -p "$R$RUNDIR" "$R/dev" "$R/proc" "$R/sys" \
          "$R/run/dbus" "$R/run/pulse" "$R/run/pulse-cookie" \
          "$R/home/user" "$R/root/.config"
 
@@ -93,7 +93,6 @@ while [ ! -S "$PULSE_SERVER_DIR/native" ] && [ "$i" -lt 30 ]; do
 done
 
 mountpoint -q "$R$RUNDIR" || mount --bind "$RUNDIR" "$R$RUNDIR"
-mountpoint -q "$R/tmp/.X11-unix" || mount --bind /tmp/.X11-unix "$R/tmp/.X11-unix"
 mountpoint -q "$R/dev" || mount --bind /dev "$R/dev"
 mountpoint -q "$R/proc" || mount -t proc proc "$R/proc"
 mountpoint -q "$R/sys" || mount -t sysfs sys "$R/sys"
