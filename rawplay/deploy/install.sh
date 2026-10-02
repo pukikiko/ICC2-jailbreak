@@ -333,7 +333,10 @@ $SUDO install -m 644 "$HERE/console-blank.service" /etc/systemd/system/console-b
 
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable --quiet livi-link livi-weston livi rawlink console-blank
-$SUDO systemctl start --no-block livi-link livi-weston livi rawlink
+# restart, not start: on an in-place upgrade the old processes are still running and
+# `systemctl start` on an active unit is a no-op, so the new binaries and the new
+# livi-weston backend would never take effect. restart starts them on a fresh install too.
+$SUDO systemctl restart --no-block livi-link livi-weston livi rawlink
 $SUDO systemctl start console-blank.service
 
 say "done; check: systemctl is-active livi-link livi-weston livi rawlink fbkeyboard console-blank"
