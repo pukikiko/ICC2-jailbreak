@@ -1,0 +1,11 @@
+# the launcher's footer button commands, one name|command a line. the plates are painted into
+# the theme frames, so only the commands can change. the launcher wraps each in
+# "slay -s SIGSTOP hmi; ...; slay -s SIGCONT hmi" and closes the touch device while it runs,
+# so the command must not stop the hmi itself.
+#
+# carplay  the raw rgb565 player off the stick (rawplay/README.md). it reads
+#          the composite livi gadget's vendor interface, so the host must have the gadget up
+#          and `rawplay/out/rawlink stream` sending (`rawplay/out/rawlink run` on a real car).
+# apps     the homebrew menu above
+carplay|/fs/usb0/homebrew/apps/rawplay.sh 0
+apps|/fs/usb0/homebrew/main

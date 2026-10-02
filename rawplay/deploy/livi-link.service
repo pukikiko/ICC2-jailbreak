@@ -1,0 +1,34 @@
+# the rawplay-link power state machine (deploy/livi-link-monitor): it follows rawlink's
+# journal and holds the phone's CPU idle depth to match. a rawplay client on the link
+# pins /dev/cpu_dma_latency at 0; with no client it releases it so the soc deep-idles
+# into cpu-power-collapse.
+#
+# wireless Android Auto is parked on in LIVI's config (livi-config.json,
+# wirelessAaEnabled) and deliberately not touched here: toggling it under the running app
+# upsets LIVI's helper, so the monitor never talks to the helper's control socket. wlan0
+# therefore stays on LIVI's AP while the appliance runs.
+#
+# the kernel wake lock and sxmo.nosuspend are held in both states, so the usb gadget and
+# wifi stay enumerated and a later rawplay client can always be seen. stopping the unit
+# (ExecStop below) hands the phone back to sxmo; sxmo may then suspend it, which takes
+# the gadget down with it until the phone is woken by hand.
+[Unit]
+Description=rawplay link: CPU idle depth from rawlink's log
+After=sysinit.target systemd-journald.service
+Before=livi-xvnc.service livi-weston.service livi.service rawlink.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+RuntimeDirectory=livi-link
+Environment=LIVI_LINK_HOME=/home/user
+EnvironmentFile=-/etc/default/livi-link
+ExecStart=/opt/livi/livi-link-monitor
+Restart=always
+RestartSec=1
+# leaving the appliance: release the two brakes so the phone can suspend again
+ExecStop=-/bin/sh -c 'echo livi > /sys/power/wake_unlock; rm -f /home/user/.cache/sxmo/sxmo.nosuspend'
+TimeoutStopSec=5
+
+[Install]
+WantedBy=multi-user.target

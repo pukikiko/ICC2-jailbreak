@@ -1,0 +1,22 @@
+# Weston (x11 backend, kiosk, pixman) on the Xvnc display: composites LIVI's video plane
+# into the framebuffer and provides the wayland socket the app and the touch module use.
+[Unit]
+Description=Weston kiosk compositor on Xvnc :9 (LIVI stack)
+After=livi-xvnc.service
+Wants=livi-xvnc.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=user
+Environment=HOME=/home/user
+Environment=XDG_RUNTIME_DIR=/run/livi
+Environment=DISPLAY=:9
+ExecStartPre=-/bin/sh -c 'rm -f /run/livi/wayland-livi /run/livi/wayland-livi.lock'
+ExecStart=/usr/bin/weston --backend=x11 --width 800 --height 480 --shell=kiosk \
+    --socket=wayland-livi --renderer=pixman -i 0 --modules=/opt/livi/weston-touch.so
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

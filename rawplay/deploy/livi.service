@@ -1,0 +1,44 @@
+# LIVI itself (the CarPlay/Android Auto head unit UI) on the Weston kiosk display. the
+# release AppImage is a glibc/electron aarch64 build and postmarketos is musl, so it is
+# started through /opt/livi/livi-chroot, which runs it in the ubuntu base rootfs with the
+# host's x11/wayland sockets bound in. stopping is staged through that supervisor (see
+# KillMode= below), because the app's detached nested compositor and the app itself must
+# not be killed at the same instant.
+[Unit]
+Description=LIVI head unit UI on the Weston kiosk display
+After=livi-weston.service
+Wants=livi-weston.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Environment=DISPLAY=:9
+Environment=WAYLAND_DISPLAY=wayland-livi
+Environment=XDG_RUNTIME_DIR=/run/livi
+Environment=HOME=/home/user
+# audio goes to the host's pipewire; livi-chroot binds its pulse socket and cookie here.
+# the bundled gstreamer only ships pulsesink and chromium's audio is pulse too.
+Environment=PULSE_SERVER=unix:/run/pulse/native
+Environment=PULSE_COOKIE=/run/pulse-cookie/cookie
+Environment=LIVI_KIOSK=1
+Environment=APPIMAGE_EXTRACT_AND_RUN=1
+# waylandsink hands the compositor the caps stride while the frame memory is
+# row-padded; the shim corrects it (see livistride.c)
+Environment=LIVI_GST_PRELOAD=/opt/livi/livi-stride-fix.so
+EnvironmentFile=-/etc/default/livi
+ExecStart=/opt/livi/livi-chroot --user-data-dir=/home/user/.config/LIVI-vnc --no-sandbox
+Restart=always
+RestartSec=2
+# the detached nested compositor and the electron app both live in this cgroup. the
+# default control-group stop SIGTERMs them at the same instant: the compositor dies first
+# and the app's own quit path (before-quit tears down wireless sessions; it can also wedge
+# on the now-dead wayland connection) is left racing it, so a stop could sit in
+# stop-sigterm for the default 90 s and make `systemctl restart livi` look hung.
+# mixed TERMs only livi-chroot: it forwards the signal to the app, waits up to
+# LIVI_STOP_GRACE (10 s) for it to quit, then closes the compositor. TimeoutStopSec is
+# the backstop for an app the supervisor cannot stop.
+KillMode=mixed
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

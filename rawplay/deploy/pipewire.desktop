@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=PipeWire (disabled: systemd user services own it)
+Comment=Hides the desktop's pipewire-launcher; it races the systemd user units for pipewire-0 and the loser leaves a dead socket. See rawplay/deploy/README.md, "Audio".
+Hidden=true

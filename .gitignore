@@ -1,0 +1,24 @@
+# build output
+/out/
+/rawplay/out/
+/rawplay/weston-touch.so
+
+# the assembled stick output (build.sh / `make stick`); the tracked base is stick/
+/usb/
+
+# stick and installer images (mkusb.py, syncsploit/mkexploit.py --image)
+*.img
+
+# keys extracted from the firmware dump (syncsploit/findkeys.py --write keys/)
+/keys/
+
+# generated at build time from the ICC2 firmware dump; never stored in the repo
+/common/menufont.c
+/common/menufont.h
+
+# the built synctool ui (make synctool fills in syncsploit/synctool/)
+/syncsploit/synctool/syncsploit
+
+__pycache__/
+*.py[cod]
+*.log

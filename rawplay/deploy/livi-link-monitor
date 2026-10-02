@@ -1,0 +1,187 @@
+#!/bin/bash
+# livi-link-monitor - set the phone's CPU idle depth from rawlink's own log, so the
+# appliance is shallow while a rawplay client is on the link and saves power when none
+# is. nothing in rawlink or rawplay is changed: the whole state is derived from the
+# lines the running rawlink already writes (stdout + stderr, which systemd puts in its
+# journal).
+#
+#   connected   the unit's rawplay player is on the link and reading:
+#               "rawstream: reader ready at seq N" (rawplay's first LI_READY),
+#               an LI input forward ("usbgadget: unit touch/knob/msg"),
+#               or the 5 s stats line with a nonzero ack latency
+#               ("rawstream: ... latency A/B ms avg/max"; B=0.0 means nobody is acking).
+#               holds /dev/cpu_dma_latency at 0, so the cpus stay shallow and the 256 KB
+#               functionfs writes and pipewire periods do not pay the ~270 us
+#               cpu-power-collapse exit latency.
+#
+#   idle        no player: rawlink's own reader-silent watchdog
+#               ("rawstream: no acks for 5 s, resending mode and resetting the window"),
+#               a usb teardown line ("unit disabled", "function unbound", "video write
+#               failed", "ack/touch read failed"), a stream client disconnecting, or
+#               rawlink (re)starting or dying ("bound to", systemd's Started/Stopped).
+#               releases /dev/cpu_dma_latency so the soc idles into cpu-power-collapse.
+#
+# wireless Android Auto is not this unit's business. toggling it under the running app
+# upsets LIVI's helper, so it is parked on in LIVI's config (livi-config.json,
+# wirelessAaEnabled) and left alone: no helper control socket, no set-aa at runtime. the
+# cost is that wlan0 stays on LIVI's AP for as long as the appliance runs; bring it down
+# by hand (/opt/livi/livi-cmd ... "set-aa 0") if the phone's own wifi is needed.
+#
+# the kernel wake lock and sxmo.nosuspend are held in *both* states on purpose: a suspend
+# takes the usb gadget and wifi down with it, and a suspended phone could never see a
+# later rawplay client. "idle" is therefore the deepest state that keeps the link
+# connectable - screen off, deep cpu idle - not suspend. stopping this unit hands the
+# phone back to sxmo (ExecStop releases the wake lock), which is how a full suspend is
+# opted into; the link then stays down until the phone is woken by hand.
+#
+# the journal command comes from LIVI_LINK_JOURNAL (default: follow rawlink's unit);
+# "-" reads stdin instead, which is how test_livi_link.py drives it. the other knobs
+# (LIVI_LINK_SYS, _DEV, _HOME, _ACTIVE_CMD, _IDLE_SECS, _WAKE_REASSERT, _STATE) all have
+# production defaults; /etc/default/livi-link can override them through the unit's
+# EnvironmentFile.
+set -u
+
+SYS=${LIVI_LINK_SYS:-/sys}
+DEV=${LIVI_LINK_DEV:-/dev}
+LIVI_HOME=${LIVI_LINK_HOME:-/home/user}
+JOURNAL=${LIVI_LINK_JOURNAL:-journalctl -u rawlink.service -f -o cat --no-pager}
+ACTIVE=${LIVI_LINK_ACTIVE_CMD:-systemctl is-active --quiet rawlink.service}
+IDLE_SECS=${LIVI_LINK_IDLE_SECS:-20}
+WAKE_REASSERT=${LIVI_LINK_WAKE_REASSERT:-60}
+STATE=${LIVI_LINK_STATE:-/run/livi-link/state}
+
+state=idle
+lat_open=
+last_wake=0
+last_line=$(date +%s)
+
+log() { printf 'livi-link: %s\n' "$*"; }
+
+write_state() {
+    mkdir -p "$(dirname "$STATE")" 2>/dev/null
+    printf '%s %s\n' "$state" "$(date '+%Y-%m-%dT%H:%M:%S%z')" > "$STATE" 2>/dev/null
+}
+
+# the wake lock and the sxmo flag are what keep the gadget and wifi enumerated; they are
+# (re-)asserted once a minute so nothing else can quietly suspend the appliance
+reachable_base() {
+    echo livi > "$SYS/power/wake_lock" 2>/dev/null \
+        || log "cannot write $SYS/power/wake_lock"
+    d="$LIVI_HOME/.cache/sxmo"
+    if [ ! -e "$d/sxmo.nosuspend" ]; then
+        mkdir -p "$d" 2>/dev/null
+        : > "$d/sxmo.nosuspend" 2>/dev/null
+        owner=$(stat -c '%u:%g' "$LIVI_HOME" 2>/dev/null)
+        [ -n "$owner" ] && chown -R "$owner" "$d" 2>/dev/null
+    fi
+}
+
+# the PM QoS request lives in the open fd: closing fd 8 drops it again
+latency_on() {
+    [ -n "$lat_open" ] && return 0
+    if exec 8<>"$DEV/cpu_dma_latency" 2>/dev/null; then
+        dd if=/dev/zero bs=4 count=1 >&8 2>/dev/null
+        lat_open=1
+    else
+        log "cannot open $DEV/cpu_dma_latency; the cpus may idle deeply"
+    fi
+}
+
+latency_off() {
+    [ -n "$lat_open" ] || return 0
+    exec 8>&- 2>/dev/null
+    lat_open=
+}
+
+set_state() {
+    [ "$1" = "$state" ] && return 0
+    state=$1
+    case "$state" in
+        connected)
+            log "rawplay client connected: holding cpu_dma_latency at 0"
+            latency_on
+            ;;
+        idle)
+            log "rawplay idle: releasing cpu_dma_latency"
+            latency_off
+            ;;
+    esac
+    write_state
+}
+
+handle_line() {
+    case "$1" in
+        "rawstream: reader ready at seq "*|\
+        "usbgadget: unit touch "*|\
+        "usbgadget: unit knob "*|\
+        "usbgadget: unit msg "*)
+            set_state connected
+            ;;
+        "rawstream: no acks for 5 s"*|\
+        "rawstream: "*" went away, reconnecting"|\
+        "rawstream: waiting for "*|\
+        "usbgadget: unit disabled the gadget"|\
+        "usbgadget: function unbound"*|\
+        "usbgadget: video write failed"*|\
+        "usbgadget: ack/touch read failed"*|\
+        "usbgadget: stream client gone"|\
+        "usbgadget: rebinding"|\
+        "usbgadget: bound to "*|\
+        "Started rawlink.service"*|\
+        "Stopped rawlink.service"*|\
+        "rawlink.service: Main process exited"*|\
+        "rawlink.service: Scheduled restart"*)
+            set_state idle
+            ;;
+        "rawstream: "*)
+            # the 5 s stats line: a reader that is acking keeps the latency nonzero. this
+            # is also what recovers "connected" after a monitor restart mid-session, when
+            # no fresh reader-ready line will be written.
+            case "$1" in
+                *"latency 0.0/0.0 ms avg/max"*) ;;
+                *"latency "*" ms avg/max"*) set_state connected ;;
+            esac
+            ;;
+    esac
+}
+
+tick() {
+    now=$(date +%s)
+    if [ $((now - last_wake)) -ge "$WAKE_REASSERT" ]; then
+        last_wake=$now
+        reachable_base
+    fi
+    if [ "$state" = connected ] && [ $((now - last_line)) -ge "$IDLE_SECS" ]; then
+        if ! $ACTIVE 2>/dev/null; then
+            log "rawlink is not running"
+            set_state idle
+        fi
+    fi
+}
+
+reachable_base
+write_state
+log "watching rawlink (idle until a rawplay client shows up)"
+
+if [ "$JOURNAL" = "-" ]; then
+    exec 3<&0
+else
+    exec 3< <($JOURNAL 2>/dev/null)
+fi
+
+while :; do
+    if IFS= read -t 1 -r line <&3; then
+        last_line=$(date +%s)
+        handle_line "$line"
+    else
+        rc=$?
+        if [ "$rc" -le 128 ]; then
+            log "rawlink journal stream ended"
+            break
+        fi
+    fi
+    tick
+done
+
+set_state idle
+exit 0

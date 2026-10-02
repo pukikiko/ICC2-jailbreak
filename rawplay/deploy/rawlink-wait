@@ -1,0 +1,22 @@
+#!/bin/sh
+# start rawlink on the phone once the usb port can be a gadget. this is the service's
+# main process (Type=simple), not an ExecStartPre: a synchronous `systemctl restart
+# rawlink` would otherwise sit in start-pre for as long as the car is unplugged, because
+# /sys/class/udc only exists while a usb host is attached.
+#
+# 1. the soc's dwc3 role switch sits at "host" and does not follow the cable; force device
+#    so a udc exists at all. to use the port as a host (a wired dongle, say), stop the
+#    unit and write "host" back into the role file.
+# 2. wait for the udc; the role write brings it up in a moment, the loop only covers the
+#    race (and a host that has not been plugged in yet).
+# 3. unbind the initramfs postmarketos NCM gadget and clear a functionfs mount left by a
+#    hard kill, then hand the process over to rawlink.
+for r in /sys/class/usb_role/*/role; do
+    [ -e "$r" ] && echo device > "$r" 2>/dev/null
+done
+while ! ls /sys/class/udc/* >/dev/null 2>&1; do
+    sleep 1
+done
+echo "" > /sys/kernel/config/usb_gadget/g1/UDC 2>/dev/null
+umount /dev/ffs-liviraw 2>/dev/null
+exec /opt/livi/rawlink run --display :9 --stick /opt/livi/usb.img --stats

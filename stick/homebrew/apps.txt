@@ -1,0 +1,9 @@
+# label|command, one an app. the launcher stops the hmi around the menu, so the screen is free
+rawplay|/fs/usb0/homebrew/apps/rawplay.sh 0
+usb high speed|/fs/usb0/homebrew/apps/usbhs.sh
+media player|/fs/usb0/homebrew/apps/mediaplayer.sh /fs/usb0
+doom|/fs/usb0/homebrew/apps/doom
+bus watch|/fs/usb0/homebrew/apps/buswatch
+iccbuttons|/fs/usb0/homebrew/apps/iccbuttons
+framebuffer demo|/fs/usb0/homebrew/apps/fbdemo 400
+rawplay direct|/fs/usb0/homebrew/apps/rawplay.sh 0 --direct

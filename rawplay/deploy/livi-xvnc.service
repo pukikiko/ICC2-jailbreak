@@ -1,0 +1,25 @@
+# TigerVNC X server that is the LIVI stack's 800x480 screen. everything else in the
+# stack (weston, ffmpeg capture, the app) sits on this display.
+[Unit]
+Description=TigerVNC X server :9 (LIVI 800x480 screen)
+After=local-fs.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=user
+Environment=HOME=/home/user
+ExecStartPre=-/bin/sh -c 'rm -f /tmp/.X9-lock /tmp/.X11-unix/X9'
+ExecStart=/usr/bin/Xvnc :9 -geometry 800x480 -depth 16 -rfbport 5909 \
+    -SecurityTypes None -Protocol3.3 -AcceptSetDesktopSize=0 -AlwaysShared=1 \
+    -localhost=0 -noreset -br -ac
+Restart=always
+RestartSec=1
+# /run/livi is the XDG_RUNTIME_DIR the weston wayland socket lives in; keep it across
+# restarts so a rebouncing X server never takes the socket away from the units using it
+RuntimeDirectory=livi
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+
+[Install]
+WantedBy=multi-user.target
