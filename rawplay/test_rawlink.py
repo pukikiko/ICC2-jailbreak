@@ -53,7 +53,8 @@ class FakeUnit(threading.Thread):
     frames, and can misbehave in the ways the tests need."""
 
     def __init__(self, path, ack=True, ready=True, garbage=b'', close_every=0,
-                 touch=None, touch_burst=b'', knob=None, buttons=(), junk_after=0):
+                 touch=None, touch_burst=b'', knob=None, buttons=(), junk_after=0,
+                 touch_after=0.0):
         super().__init__(daemon=True)
         self.path = path
         self.ack = ack
@@ -65,6 +66,7 @@ class FakeUnit(threading.Thread):
         self.knob = knob
         self.buttons = buttons
         self.junk_after = junk_after
+        self.touch_after = touch_after
         self.messages = []              # (type, seq, len, ts, payload)
         self.frames = 0
         self.conns = 0
@@ -107,6 +109,8 @@ class FakeUnit(threading.Thread):
                 if self.ready:
                     conn.sendall(b'LI\x05')
                 if self.touch:
+                    if self.touch_after:
+                        time.sleep(self.touch_after)
                     conn.sendall(b'LI\x01' + struct.pack('<HHB', *self.touch))
                 if self.touch_burst:
                     conn.sendall(self.touch_burst)
@@ -444,6 +448,51 @@ def test_button_keys():
           f'rc={rc} timedout={timedout} events={text!r}')
 
 
+def test_injection_retry():
+    print('input injection retries what appears after startup')
+    # the appliance boot race: rawlink binds the gadget before xvnc/weston exist, so the
+    # x11 display and the weston-touch socket can both be missing at init. injection must
+    # stay enabled and find the socket when it appears, not stay dead for the process.
+    sock = os.path.join(TMP, 'inj.sock')
+    tsock = os.path.join(TMP, 'inj-touch.sock')
+    if os.path.exists(tsock):
+        os.unlink(tsock)
+    open(tsock, 'w').close()            # stale file: access() sees it, connect cannot
+    unit = FakeUnit(sock, touch=(123, 45, 1), touch_after=0.8)
+    unit.start_server()
+    p = subprocess.Popen([RAWLINK, 'stream', sock, '--display', ':997', '--width', '32',
+                          '--height', '24', '--fps', '15', '--seconds', '2.5'],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         env=dict(os.environ, LIVI_TOUCH_SOCK=tsock))
+    time.sleep(0.3)
+    os.unlink(tsock)
+    srv = socket.socket(socket.AF_UNIX)
+    srv.bind(tsock)
+    srv.listen(1)
+    srv.settimeout(5)
+    cmds = b''
+    try:
+        conn, _ = srv.accept()
+        conn.settimeout(2)
+        while b'u' not in cmds:
+            chunk = conn.recv(256)
+            if not chunk:
+                break
+            cmds += chunk
+        conn.close()
+    except (socket.timeout, OSError):
+        pass
+    srv.close()
+    try:
+        out, err = p.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        out, err = p.communicate()
+    unit.stop()
+    check('touch lands on the weston-touch socket that appeared after startup',
+          b'd 123 45\n' in cmds, f'cmds={cmds!r} err={err[-200:]!r}')
+
+
 def test_touch_replay():
     print('queued touch burst coalesced')
     # the touch driver hands a fresh reader the samples from before it opened as one run,
@@ -509,6 +558,7 @@ def main():
     test_signals()
     test_events()
     test_button_keys()
+    test_injection_retry()
     test_touch_replay()
     test_junk_flood()
     print(f'\n{len(PASS)} passed, {len(FAIL)} failed')

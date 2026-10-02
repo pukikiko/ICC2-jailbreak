@@ -82,10 +82,10 @@ mkdir -p "$R$RUNDIR" "$R/tmp/.X11-unix" "$R/dev" "$R/proc" "$R/sys" \
          "$R/run/dbus" "$R/run/pulse" "$R/run/pulse-cookie" \
          "$R/home/user" "$R/root/.config"
 
-# the user systemd manager (and with it pipewire-pulse.socket) comes up after this unit
-# at boot, so /run/user/<uid>/pulse may not exist yet: the bind below would fail and livi
-# would come up mute. wait for the pulse socket, capped so a phone with no audio stack
-# still gets the video.
+# the user systemd manager (and with it pipewire-pulse.socket) can come up after this unit
+# at boot - install.sh sets linger, but a hand-started livi may still race it: the bind
+# below would fail and livi would come up mute. wait for the pulse socket, capped so a
+# phone with no audio stack still gets the video.
 i=0
 while [ ! -S "$PULSE_SERVER_DIR/native" ] && [ "$i" -lt 30 ]; do
     sleep 1

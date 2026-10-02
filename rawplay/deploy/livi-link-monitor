@@ -1,44 +1,66 @@
 #!/bin/bash
-# livi-link-monitor - set the phone's CPU idle depth from rawlink's own log, so the
-# appliance is shallow while a rawplay client is on the link and saves power when none
-# is. nothing in rawlink or rawplay is changed: the whole state is derived from the
-# lines the running rawlink already writes (stdout + stderr, which systemd puts in its
+# livi-link-monitor - the appliance power state machine. two inputs decide the state:
+# the charger, and rawlink's own log (stdout + stderr, which systemd puts in its
 # journal).
 #
-#   connected   the unit's rawplay player is on the link and reading:
-#               "rawstream: reader ready at seq N" (rawplay's first LI_READY),
-#               an LI input forward ("usbgadget: unit touch/knob/msg"),
-#               or the 5 s stats line with a nonzero ack latency
-#               ("rawstream: ... latency A/B ms avg/max"; B=0.0 means nobody is acking).
-#               holds /dev/cpu_dma_latency at 0, so the cpus stay shallow and the 256 KB
-#               functionfs writes and pipewire periods do not pay the ~270 us
-#               cpu-power-collapse exit latency.
+# the charger (the power supply's online flag) says whether the car's usb port is
+# alive. no charger means the car is off:
 #
-#   idle        no player: rawlink's own reader-silent watchdog
-#               ("rawstream: no acks for 5 s, resending mode and resetting the window"),
-#               a usb teardown line ("unit disabled", "function unbound", "video write
-#               failed", "ack/touch read failed"), a stream client disconnecting, or
-#               rawlink (re)starting or dying ("bound to", systemd's Started/Stopped).
-#               releases /dev/cpu_dma_latency so the soc idles into cpu-power-collapse.
+#   unplugged   no charger: radios off, livi stopped and /dev/cpu_dma_latency released so
+#               the soc sits in cpu-power-collapse. this is the car-off standby state. the
+#               radios are not just rfkill-blocked: on this port the wcn36xx firmware
+#               crashes on a plain rfkill unblock (the wcnss remoteproc takes a Data
+#               Abort and SMD commands then time out), so unplugging soft-blocks and
+#               unloads the radio drivers, and charging reloads them. suspend is
+#               deliberately NOT used either: s2idle hangs in device suspend (the same
+#               wcn36xx teardown plus dpu vblank timeouts), no wake source fires and
+#               the pmic watchdog resets the phone minutes later. deep idle with the
+#               radios unloaded is the deepest state that is actually reliable here.
+#
+# with a charger, the rawplay link sets the cpu idle depth:
+#
+#   idle        no player on the link: radios on, /dev/cpu_dma_latency released so the
+#               soc deep-idles while it waits for a client.
+#
+#   connected   a player is on the link and reading: radios on and /dev/cpu_dma_latency
+#               pinned at 0, so the 256 KB functionfs writes and pipewire periods do not
+#               pay the ~270 us cpu-power-collapse exit latency (otherwise the panel
+#               paints frame by frame and LIVI's audio stutters).
+#
+# the link state comes from lines rawlink already writes:
+#
+#   connect   "rawstream: reader ready at seq N" (rawplay's first LI_READY), an LI input
+#             forward ("usbgadget: unit touch/knob/msg"), or the 5 s stats line with a
+#             nonzero ack latency ("rawstream: ... latency A/B ms avg/max"; B=0.0 means
+#             nobody is acking). the stats line is also how the monitor recovers
+#             "connected" after it is restarted mid-session, when no fresh reader-ready
+#             line will be written - rawlink-wait therefore keeps passing --stats.
+#   idle      rawlink's reader-silent watchdog ("rawstream: no acks for 5 s, resending
+#             mode and resetting the window"), a usb teardown line ("unit disabled",
+#             "function unbound", "video write failed", "ack/touch read failed"), a
+#             disconnected stream client, or rawlink (re)starting or dying ("bound to",
+#             systemd's Started/Stopped / Main process exited / Scheduled restart).
+#
+# livi itself is tied to the radios: the unplugged state stops livi.service (the staged
+# stop livi-chroot documents), and the charger starts it again only after radios_on has
+# confirmed the driver reload and the rfkill unblock. both directions are re-checked
+# every tick, so a livi the multi-user boot job or a manual start brings up behind the
+# monitor is taken down while the car is off, and one stopped by hand is started again
+# while it charges.
 #
 # wireless Android Auto is not this unit's business. toggling it under the running app
 # upsets LIVI's helper, so it is parked on in LIVI's config (livi-config.json,
-# wirelessAaEnabled) and left alone: no helper control socket, no set-aa at runtime. the
-# cost is that wlan0 stays on LIVI's AP for as long as the appliance runs; bring it down
-# by hand (/opt/livi/livi-cmd ... "set-aa 0") if the phone's own wifi is needed.
+# wirelessAaEnabled) and left alone: no helper control socket, no set-aa at runtime.
 #
-# the kernel wake lock and sxmo.nosuspend are held in *both* states on purpose: a suspend
-# takes the usb gadget and wifi down with it, and a suspended phone could never see a
-# later rawplay client. "idle" is therefore the deepest state that keeps the link
-# connectable - screen off, deep cpu idle - not suspend. stopping this unit hands the
-# phone back to sxmo (ExecStop releases the wake lock), which is how a full suspend is
-# opted into; the link then stays down until the phone is woken by hand.
+# the kernel wake lock and sxmo.nosuspend are held in every state: they keep anything
+# else from attempting the broken suspend, and they are re-asserted once a minute.
+# stopping the unit (ExecStop) releases them.
 #
 # the journal command comes from LIVI_LINK_JOURNAL (default: follow rawlink's unit);
 # "-" reads stdin instead, which is how test_livi_link.py drives it. the other knobs
-# (LIVI_LINK_SYS, _DEV, _HOME, _ACTIVE_CMD, _IDLE_SECS, _WAKE_REASSERT, _STATE) all have
-# production defaults; /etc/default/livi-link can override them through the unit's
-# EnvironmentFile.
+# (LIVI_LINK_SYS, _DEV, _HOME, _ACTIVE_CMD, _IDLE_SECS, _WAKE_REASSERT, _STATE,
+# _POWER_SUPPLY, _RFKILL, _MODPROBE, _SYSTEMCTL, _RADIO_MODULES) all have production
+# defaults; /etc/default/livi-link can override them through the unit's EnvironmentFile.
 set -u
 
 SYS=${LIVI_LINK_SYS:-/sys}
@@ -49,11 +71,21 @@ ACTIVE=${LIVI_LINK_ACTIVE_CMD:-systemctl is-active --quiet rawlink.service}
 IDLE_SECS=${LIVI_LINK_IDLE_SECS:-20}
 WAKE_REASSERT=${LIVI_LINK_WAKE_REASSERT:-60}
 STATE=${LIVI_LINK_STATE:-/run/livi-link/state}
+POWER_SUPPLY=${LIVI_LINK_POWER_SUPPLY:-/sys/class/power_supply/qcom-smbchg-usb}
+RFKILL=${LIVI_LINK_RFKILL:-rfkill}
+MODPROBE=${LIVI_LINK_MODPROBE:-modprobe}
+SYSTEMCTL=${LIVI_LINK_SYSTEMCTL:-systemctl}
+RADIO_MODULES=${LIVI_LINK_RADIO_MODULES:-btqcomsmd wcn36xx}
 
-state=idle
+state=
+link=idle
+radios=unknown
+radios_up=
+livi=
 lat_open=
 last_wake=0
 last_line=$(date +%s)
+power_warned=
 
 log() { printf 'livi-link: %s\n' "$*"; }
 
@@ -62,8 +94,8 @@ write_state() {
     printf '%s %s\n' "$state" "$(date '+%Y-%m-%dT%H:%M:%S%z')" > "$STATE" 2>/dev/null
 }
 
-# the wake lock and the sxmo flag are what keep the gadget and wifi enumerated; they are
-# (re-)asserted once a minute so nothing else can quietly suspend the appliance
+# the wake lock and the sxmo flag are held in every state, so nothing tries the broken
+# suspend; they are (re-)asserted once a minute
 reachable_base() {
     echo livi > "$SYS/power/wake_lock" 2>/dev/null \
         || log "cannot write $SYS/power/wake_lock"
@@ -73,6 +105,94 @@ reachable_base() {
         : > "$d/sxmo.nosuspend" 2>/dev/null
         owner=$(stat -c '%u:%g' "$LIVI_HOME" 2>/dev/null)
         [ -n "$owner" ] && chown -R "$owner" "$d" 2>/dev/null
+    fi
+}
+
+# the charger: online=1 (or status Charging/Full) means the car's usb port is powered.
+# a missing supply assumes "on" so a different phone is never left with dead radios.
+charging() {
+    if [ -r "$POWER_SUPPLY/online" ]; then
+        [ "$(cat "$POWER_SUPPLY/online" 2>/dev/null)" = 1 ]
+    elif [ -r "$POWER_SUPPLY/status" ]; then
+        case "$(cat "$POWER_SUPPLY/status" 2>/dev/null)" in
+            Charging|Full) return 0 ;;
+            *) return 1 ;;
+        esac
+    else
+        [ -z "$power_warned" ] && {
+            log "no charger state at $POWER_SUPPLY; assuming on"
+            power_warned=1
+        }
+        return 0
+    fi
+}
+
+# radios: rfkill alone is not enough on this port. the wcn36xx firmware crashes on a
+# plain rfkill unblock (the wcnss remoteproc takes a Data Abort, then SMD commands time
+# out and wifi never comes back), so the drivers are unloaded while soft-blocked and
+# reloaded when the charger returns. "up" is only claimed once the reload and the unblock
+# both succeeded (radios_up): a half-up radio stack must not bring livi back.
+radios_on() {
+    [ "$radios" = on ] && return 0
+    radios=on
+    radios_up=1
+    $MODPROBE $RADIO_MODULES 2>/dev/null \
+        || { log "cannot reload radio drivers ($MODPROBE $RADIO_MODULES)"; radios_up=; }
+    $SYSTEMCTL start bluetooth 2>/dev/null \
+        || log "cannot start bluetooth"
+    $RFKILL unblock all 2>/dev/null \
+        || { log "cannot unblock radios ($RFKILL)"; radios_up=; }
+    if [ -n "$radios_up" ]; then
+        log "charger present: radios on"
+    else
+        log "charger present: radios not confirmed up; livi stays off"
+    fi
+}
+
+radios_off() {
+    [ "$radios" = off ] && return 0
+    radios=off
+    radios_up=
+    $RFKILL block all 2>/dev/null \
+        || log "cannot block radios ($RFKILL)"
+    $SYSTEMCTL stop bluetooth 2>/dev/null \
+        || log "cannot stop bluetooth"
+    $MODPROBE -r $RADIO_MODULES 2>/dev/null \
+        || log "cannot unload radio drivers; rfkill block stands"
+    log "no charger: radios off, deep idle"
+}
+
+# livi only runs while the radios are up: it owns the wireless helper and the screen, and
+# the unplugged state is the car-off power state. both directions are re-checked every
+# tick (not only on a transition): a livi that comes up behind the monitor - the
+# multi-user boot job racing the first tick, or a manual start - is taken down while
+# unplugged, and one stopped by hand (or failed) is started again while charging. the
+# cached state only dedupes the log lines, the is-active probe is the truth.
+livi_start() {
+    if $SYSTEMCTL is-active --quiet livi.service 2>/dev/null; then
+        livi=on
+        return 0
+    fi
+    if $SYSTEMCTL start livi.service 2>/dev/null; then
+        livi=on
+        log "radios confirmed up: starting livi"
+    elif [ "$livi" != failed ]; then
+        livi=failed
+        log "cannot start livi"
+    fi
+}
+
+livi_stop() {
+    if ! $SYSTEMCTL is-active --quiet livi.service 2>/dev/null; then
+        livi=off
+        return 0
+    fi
+    if $SYSTEMCTL stop livi.service 2>/dev/null; then
+        livi=off
+        log "radios off: stopping livi"
+    elif [ "$livi" != stuck ]; then
+        livi=stuck
+        log "cannot stop livi"
     fi
 }
 
@@ -105,6 +225,10 @@ set_state() {
             log "rawplay idle: releasing cpu_dma_latency"
             latency_off
             ;;
+        unplugged)
+            log "no charger: releasing cpu_dma_latency"
+            latency_off
+            ;;
     esac
     write_state
 }
@@ -115,7 +239,7 @@ handle_line() {
         "usbgadget: unit touch "*|\
         "usbgadget: unit knob "*|\
         "usbgadget: unit msg "*)
-            set_state connected
+            link=connected
             ;;
         "rawstream: no acks for 5 s"*|\
         "rawstream: "*" went away, reconnecting"|\
@@ -131,15 +255,15 @@ handle_line() {
         "Stopped rawlink.service"*|\
         "rawlink.service: Main process exited"*|\
         "rawlink.service: Scheduled restart"*)
-            set_state idle
+            link=idle
             ;;
         "rawstream: "*)
-            # the 5 s stats line: a reader that is acking keeps the latency nonzero. this
+            # the 5 s stats line: a reader that is acking keeps the link connected. this
             # is also what recovers "connected" after a monitor restart mid-session, when
             # no fresh reader-ready line will be written.
             case "$1" in
                 *"latency 0.0/0.0 ms avg/max"*) ;;
-                *"latency "*" ms avg/max"*) set_state connected ;;
+                *"latency "*" ms avg/max"*) link=connected ;;
             esac
             ;;
     esac
@@ -151,17 +275,30 @@ tick() {
         last_wake=$now
         reachable_base
     fi
+    if charging; then
+        radios_on
+        [ -n "$radios_up" ] && livi_start
+        if [ "$link" = connected ]; then
+            set_state connected
+        else
+            set_state idle
+        fi
+    else
+        radios_off
+        livi_stop
+        set_state unplugged
+    fi
     if [ "$state" = connected ] && [ $((now - last_line)) -ge "$IDLE_SECS" ]; then
         if ! $ACTIVE 2>/dev/null; then
             log "rawlink is not running"
-            set_state idle
+            link=idle
         fi
     fi
 }
 
 reachable_base
-write_state
-log "watching rawlink (idle until a rawplay client shows up)"
+tick
+log "watching rawlink and the charger"
 
 if [ "$JOURNAL" = "-" ]; then
     exec 3<&0
@@ -183,5 +320,5 @@ while :; do
     tick
 done
 
-set_state idle
+set_state unplugged
 exit 0

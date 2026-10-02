@@ -1,0 +1,17 @@
+# the phone's own UI is the framebuffer console with fbkeyboard (the preferred UI, see
+# deploy/README.md): this is its idle blanking. the kernel console blank calls fb_blank,
+# which the panel driver turns into a WLED backlight disable (bl_power reads 4), and any
+# input - including fbkeyboard's injected key events - unblanks again. setterm's interval
+# is in minutes; edit the two ExecStart values to change the timeout.
+[Unit]
+Description=Console blanking: phone screen and backlight off when idle
+After=getty@tty1.service fbkeyboard.service
+Wants=getty@tty1.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'TERM=linux setterm --blank 2 --powerdown 2 > /dev/tty1'
+
+[Install]
+WantedBy=multi-user.target

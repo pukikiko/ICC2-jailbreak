@@ -15,6 +15,9 @@ Where the pieces live:
 * the ICC2 SDK's `fb.c` / the ICC2 SDK's `input.c` — the shared panel mapping and touch input.
 * `rawplay/bench.py` — the benchmark harness; `rawplay/test_rawlink.py` tests the host, and
   `rawplay/test_livi_link.py` the phone deployment's link state machine (`deploy/`).
+* `rawplay/deploy/` — the postmarketOS phone appliance: the LIVI + rawlink systemd units,
+  and the phone's own `fbkeyboard` console UI, the preferred UI for the phone
+  (`rawplay/deploy/README.md`).
 
 Everything claimed here was verified in this repo, on the emulated i.MX31, under
 `--icount 2` where performance is concerned.
@@ -270,8 +273,10 @@ handling).
   for the drop-stale test.
 * Parses `LI` upstream: touch and the panel buttons are injected into the host session
   in-process (the weston-touch socket when it is live, XTest otherwise; libX11/libXtst are
-  dlopened, so a missing display just disables injection and there is no build-time x11
-  dependency). Knob messages are consumed and left alone: livi has no default binding for
+  dlopened, so there is no build-time x11 dependency). Injection is enabled even when the
+  socket and the display are not there yet (the appliance boots rawlink before xvnc/weston)
+  and both are retried on use, so a touch that arrives after weston comes up still lands.
+  Knob messages are consumed and left alone: livi has no default binding for
   them. The panel buttons that livi has default key bindings for are tapped on the press
   edge as their keys, from the ipc channel 6 bit the unit sends
   (docs/v850-ipc-protocol.md, `iccbuttons/iccbuttons.c`): **back / home (25) → `Backspace`
@@ -488,9 +493,11 @@ cache/sdram stalls qemu does not model.
   dlopens libX11/libXtst at runtime.
 * Phone deployment state machine: `make -C rawplay livi-cmd` then
   `python3 rawplay/test_livi_link.py`. It drives `deploy/livi-link-monitor` with a fake
-  journal, `/sys`, `/dev` and helper socket and checks the connected/idle transitions,
-  the latency fd hold, that the helper socket is never touched (wireless AA is parked on
-  in LIVI's config) and `livi-cmd` itself.
+  journal, `/sys`, `/dev`, power supply, rfkill, systemctl and helper socket and checks
+  the charger/radio transitions (unplugged/idle/connected), the latency fd hold, the
+  `livi.service` stop on unplug / start once the radios are confirmed (including a
+  failed reload and a livi started behind the monitor), that the helper socket is never
+  touched (wireless AA is parked on in LIVI's config) and `livi-cmd` itself.
 * qemu is prebuilt at `qemu/qemu/build/qemu-system-arm`; a rebuild is only needed after
   touching `qemu/qemu`.
 * Real-car gadget runs need the homebrew stick image: `python3 mkusb.py` ->

@@ -377,8 +377,11 @@ struct inject {
     int touch_fd;
     int touch_down;
     double touch_retry_at;
+    double x_retry_at;
     Display *dpy;
+    char display[64];
     void *x11, *xtst;
+    Display *(*XOpenDisplay)(const char *);
     int (*XFlush)(Display *);
     KeyCode (*XKeysymToKeycode)(Display *, KeySym);
     int (*XTestFakeMotionEvent)(Display *, int, int, int, unsigned long);
@@ -443,9 +446,30 @@ static int touch_write(struct inject *in, const char *cmd)
     return 0;
 }
 
+/* reconnect the x11 display the xtest fallback and the panel buttons use. on the appliance
+ * rawlink binds the gadget before xvnc exists, so this is retried on use instead of being
+ * decided once at startup. */
+static int x_connect(struct inject *in)
+{
+    if (in->dpy) {
+        return 0;
+    }
+    if (!in->XOpenDisplay || !in->display[0]) {
+        return -1;
+    }
+    if (in->x_retry_at > now_sec()) {
+        return -1;
+    }
+    in->x_retry_at = now_sec() + 2.0;
+    in->dpy = in->XOpenDisplay(in->display);
+    if (in->dpy) {
+        slogf("inject: x11 input injection on %s", in->display);
+    }
+    return in->dpy ? 0 : -1;
+}
+
 static void inject_init(struct inject *in, const char *display, int no_inject)
 {
-    Display *(*XOpenDisplay)(const char *) = NULL;
     void *x11, *xtst;
 
     memset(in, 0, sizeof *in);
@@ -453,6 +477,13 @@ static void inject_init(struct inject *in, const char *display, int no_inject)
     if (!display || no_inject) {
         return;
     }
+    /* the weston-touch socket and the x11 display are independent, and both can appear
+     * after rawlink does: on the appliance the gadget binds before xvnc/weston. keep
+     * injection enabled and let each path retry (the socket in inject_touch, x11 here and
+     * in inject_tap) - deciding it once at startup left touch dead for the whole process
+     * when rawlink won that boot race. */
+    in->enabled = 1;
+    snprintf(in->display, sizeof in->display, "%s", display);
     if (access(touch_path(), F_OK) == 0) {
         if (touch_connect(in) < 0) {
             slogf("rawstream: weston-touch socket unusable (%s), mouse fallback",
@@ -464,36 +495,25 @@ static void inject_init(struct inject *in, const char *display, int no_inject)
     x11 = dlopen("libX11.so.6", RTLD_NOW | RTLD_LOCAL);
     xtst = dlopen("libXtst.so.6", RTLD_NOW | RTLD_LOCAL);
     if (!x11 || !xtst) {
-        slogf("rawstream: no input injection (libX11/libXtst missing)");
-        goto fail;
+        slogf("rawstream: no x11 input injection (libX11/libXtst missing)");
+        return;
     }
-    *(void **)&XOpenDisplay = dlsym(x11, "XOpenDisplay");
+    *(void **)&in->XOpenDisplay = dlsym(x11, "XOpenDisplay");
     *(void **)&in->XFlush = dlsym(x11, "XFlush");
     *(void **)&in->XKeysymToKeycode = dlsym(x11, "XKeysymToKeycode");
     *(void **)&in->XTestFakeMotionEvent = dlsym(xtst, "XTestFakeMotionEvent");
     *(void **)&in->XTestFakeButtonEvent = dlsym(xtst, "XTestFakeButtonEvent");
     *(void **)&in->XTestFakeKeyEvent = dlsym(xtst, "XTestFakeKeyEvent");
-    if (!XOpenDisplay || !in->XFlush || !in->XKeysymToKeycode
+    if (!in->XOpenDisplay || !in->XFlush || !in->XKeysymToKeycode
         || !in->XTestFakeMotionEvent || !in->XTestFakeButtonEvent
         || !in->XTestFakeKeyEvent) {
-        slogf("rawstream: no input injection (libX11/libXtst symbols missing)");
-        goto fail;
-    }
-    in->dpy = XOpenDisplay(display);
-    if (!in->dpy) {
-        slogf("rawstream: no input injection (cannot open display %s)", display);
-        goto fail;
+        slogf("rawstream: no x11 input injection (libX11/libXtst symbols missing)");
+        return;
     }
     in->x11 = x11;
     in->xtst = xtst;
-    in->enabled = 1;
-    slogf("inject: input injection on %s%s", display,
-         in->touch_fd >= 0 ? "" : " (mouse: weston-touch module not running)");
-    return;
-fail:
-    if (in->touch_fd >= 0) {
-        close(in->touch_fd);
-        in->touch_fd = -1;
+    if (x_connect(in) < 0) {
+        slogf("rawstream: display %s not up yet, x11 injection will retry", display);
     }
 }
 
@@ -539,7 +559,7 @@ static void inject_touch(struct inject *in, int down, int x, int y)
         in->touch_fd = -1;
         in->touch_down = 0;
     }
-    if (!in->dpy) {
+    if (!in->dpy && x_connect(in) < 0) {
         return;
     }
     in->XTestFakeMotionEvent(in->dpy, -1, x, y, 0);
@@ -556,7 +576,7 @@ static void inject_tap(struct inject *in, unsigned keysym)
 {
     KeyCode code;
 
-    if (!in->dpy) {
+    if (!in->dpy && x_connect(in) < 0) {
         return;
     }
     code = in->XKeysymToKeycode(in->dpy, keysym);

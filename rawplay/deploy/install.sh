@@ -7,9 +7,10 @@
 # --assets is a directory holding the aarch64 LIVI release AppImage and (optionally)
 # usb.img; usb.img is built from the repo when absent. everything needs sudo.
 #
-# steps: apk packages, build rawlink + weston-touch.so + livi-cmd, /opt/livi, the ubuntu
-# glibc chroot, LIVI config, user audio stack, systemd units, enable + start. idempotent;
-# re-run after updates (it also retires the old livi-wakelock unit).
+# steps: apk packages + the phone ui (fbkeyboard console, idle blanking), build rawlink +
+# weston-touch.so + livi-cmd, /opt/livi, the ubuntu glibc chroot, LIVI config, user audio
+# stack, systemd units, enable + start. idempotent; re-run after updates (it also retires
+# the old livi-wakelock unit).
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -48,9 +49,43 @@ say() { printf 'install: %s\n' "$*"; }
 
 say "packages"
 # ffmpeg is rawlink's capture source (x11grab): it is exec'd off PATH, and a missing
-# one is only visible as "capture pipe closed, restarting ffmpeg" in the unit's log
+# one is only visible as "capture pipe closed, restarting ffmpeg" in the unit's log.
+# postmarketos-ui-fbkeyboard is the phone's own UI (the preferred console UI, see the
+# README): it is installed here, before any desktop UI is retired, so the shared
+# postmarketos-base-ui package is not orphaned in between.
 $SUDO apk add --quiet build-base bash ffmpeg weston weston-dev weston-backend-x11 \
-    weston-shell-kiosk tigervnc fuse3 xkeyboard-config
+    weston-shell-kiosk tigervnc fuse3 xkeyboard-config postmarketos-ui-fbkeyboard
+
+# ---- phone ui (the preferred console UI) -------------------------------------------------
+
+# the phone's own screen is not part of the livi pipeline, so it runs the plain framebuffer
+# console with fbkeyboard rather than a desktop: a desktop session holds tty1 through
+# tinydm, its session manager races the systemd user audio stack, and its idle handling
+# never turned this panel's backlight off. retire any desktop UI the image had; the shared
+# postmarketos-base-ui stays because fbkeyboard was installed above.
+ui_old=""
+for pkg in postmarketos-ui-xfce4 xfce4 xfce4-terminal xfce4-whiskermenu-plugin \
+           xfce4-pulseaudio-plugin onboard \
+           postmarketos-ui-sxmo-de-sway postmarketos-ui-sxmo-de-dwm \
+           postmarketos-ui-sxmo-de-i3 postmarketos-ui-sxmo-de-river \
+           postmarketos-ui-phosh postmarketos-ui-gnome postmarketos-ui-gnome-mobile \
+           postmarketos-ui-plasma-mobile postmarketos-ui-sway postmarketos-ui-weston \
+           postmarketos-ui-mate postmarketos-ui-lxqt; do
+    if $SUDO apk info -e "$pkg" >/dev/null 2>&1; then
+        ui_old="$ui_old $pkg"
+    fi
+done
+if [ -n "$ui_old" ]; then
+    say "phone ui: retiring the desktop UIs:$ui_old"
+    $SUDO apk del --quiet $ui_old
+fi
+
+# getty owns the console, not the desktop display manager; fbkeyboard draws over it.
+# note: this ends a local desktop session - run the script over ssh if you are on one.
+say "phone ui: fbkeyboard console on tty1"
+$SUDO systemctl disable --now tinydm >/dev/null 2>&1 || true
+$SUDO systemctl enable --now getty@tty1.service
+$SUDO systemctl enable --now fbkeyboard.service
 
 # ---- assets -----------------------------------------------------------------------------
 
@@ -217,12 +252,30 @@ if [ -e /etc/xdg/autostart/pipewire.desktop ]; then
     $SUDO chown -R "$LIVI_USER:$LIVI_USER" "$LIVI_HOME/.config/autostart"
 fi
 
-# bring that stack up now if the user manager is reachable; a session that has not
-# started yet gets the units at its next login. killing the launcher's orphan processes
-# first is what makes this repair an already-broken install: they hold the pipewire-0
-# lock the systemd service needs, and pipewire does not remove a stale socket path while
-# a live process still has the socket bound.
 LIVI_UID=$(id -u "$LIVI_USER" 2>/dev/null || true)
+
+# the appliance has no desktop and no auto-login any more (fbkeyboard console, see step 8),
+# so nothing starts the user manager at boot: without lingering, /run/user/<uid> only
+# appears when somebody logs in on tty1 or over ssh, livi-chroot finds no pulse socket and
+# the app comes up mute. linger keeps user@<uid> and its enabled pipewire units running
+# from boot with no session.
+if [ -n "$LIVI_UID" ]; then
+    say "user audio stack: linger for $LIVI_USER (pipewire without a login session)"
+    $SUDO loginctl enable-linger "$LIVI_USER" || true
+    # enable-linger takes effect at the next boot; start the manager now too, so a headless
+    # install (nobody has logged in) gets the stack for the running livi
+    $SUDO systemctl start "user@$LIVI_UID.service" 2>/dev/null || true
+    i=0
+    while [ ! -S "/run/user/$LIVI_UID/bus" ] && [ "$i" -lt 10 ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+fi
+
+# bring that stack up now if the user manager is reachable (linger starts it if it is not);
+# killing the launcher's orphan processes first is what makes this repair an already-broken
+# install: they hold the pipewire-0 lock the systemd service needs, and pipewire does not
+# remove a stale socket path while a live process still has the socket bound.
 if [ -n "$LIVI_UID" ] && [ -S "/run/user/$LIVI_UID/bus" ]; then
     say "user audio stack: systemd user units own pipewire/pulse/wireplumber"
     $SUDO pkill -u "$LIVI_USER" -fx /usr/bin/pipewire-pulse || true
@@ -245,8 +298,8 @@ fi
 say "systemd units"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-# livi-wakelock was replaced by livi-link (the rawlink log state machine); retire it on
-# an upgrade so only one unit writes the wake lock and the sxmo flag
+# livi-wakelock was replaced by livi-link (the charger/rawlink power state machine); retire
+# it on an upgrade so only one unit writes the wake lock and the sxmo flag
 if $SUDO systemctl cat livi-wakelock >/dev/null 2>&1; then
     say "retiring the old livi-wakelock unit"
     $SUDO systemctl disable --now livi-wakelock >/dev/null 2>&1 || true
@@ -262,10 +315,13 @@ if [ "$LIVI_USER" != "user" ]; then
     sed "s|/home/user|$LIVI_HOME|g" "$HERE/livi-chroot" > "$tmp/livi-chroot"
     $SUDO install -m 755 "$tmp/livi-chroot" "$OPT/livi-chroot"
 fi
+# the phone ui's idle blanking: console blank on tty1 after 2 min (screen + backlight off)
+$SUDO install -m 644 "$HERE/console-blank.service" /etc/systemd/system/console-blank.service
 
 $SUDO systemctl daemon-reload
-$SUDO systemctl enable --quiet livi-link livi-xvnc livi-weston livi rawlink
+$SUDO systemctl enable --quiet livi-link livi-xvnc livi-weston livi rawlink console-blank
 $SUDO systemctl start --no-block livi-link livi-xvnc livi-weston livi rawlink
+$SUDO systemctl start console-blank.service
 
-say "done; check: systemctl is-active livi-link livi-xvnc livi-weston livi rawlink"
+say "done; check: systemctl is-active livi-link livi-xvnc livi-weston livi rawlink fbkeyboard console-blank"
 say "logs: journalctl -u livi -f   |   screen: DISPLAY=:9 ffmpeg ..."
