@@ -15,6 +15,17 @@ plain fat32 stick:
 
 so a stick that passes the check gets a root shell script. two ways to pass it, below.
 
+> **disclaimer:** this is a hobby project, shared as-is, and you run it at your own risk. I'm
+> not responsible for bricked ICCs, flat batteries, a Falcon stranded on the side of the
+> Princes Highway, thermonuclear war, or anything else that goes wrong along the way. You're
+> choosing to modify your car's ICC, so you take on the risk. If something goes wrong, please
+> don't hold me responsible - I'm happy to help where I can, but I can't fix or cover damage.
+> Modifying your car or its software may void your warranty and may affect your insurance;
+> check with your dealer or insurer first if that matters to you. Please don't use this while
+> driving, and don't let it distract you from the road; follow the road rules where you live.
+> The driver is always responsible for the car. **Back up the entire ICC before you start.**
+> see the [root README](../README.md#disclaimer) for the full text.
+
 ## the two ways
 
 ### shadow, no password, works on any firmware

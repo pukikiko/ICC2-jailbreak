@@ -16,6 +16,21 @@ else is written to the unit and the whole stack is editable by pulling the stick
 - [syncsploit](syncsploit/README.md) - the navi map update path that writes the hook
 - [rawplay](rawplay/README.md) - the raw rgb565 video + touch link
 
+## disclaimer
+
+this is a hobby project, shared as-is, and you run it at your own risk:
+
+- I'm not responsible for bricked ICCs, flat batteries, a Falcon stranded on the side of the
+  Princes Highway, thermonuclear war, or anything else that goes wrong along the way.
+- You're choosing to modify your car's ICC, so you take on the risk. If something goes wrong,
+  please don't hold me responsible. I'm happy to help where I can, but I can't fix or cover
+  damage.
+- Modifying your car or its software may void your warranty, and may affect your insurance.
+  Check with your dealer or insurer first if that matters to you.
+- Please don't use this while driving, and don't let it distract you from the road. Follow the
+  road rules where you live. The driver is always responsible for the car.
+- Back up the entire ICC before you start.
+
 ## building
 
 **building is not required in general: complete usb stick trees (`usb/`) and images
@@ -24,7 +39,10 @@ or to bake the ui font/button art from your own firmware dump.
 
 the SDK (clang shims, stub libraries) and the emulator stay in the ICC2 SDK, referenced
 through `ICC2_DIR` (found automatically next to this repo or in `~/ICC2`, or set the
-environment variable / pass `ICC2_DIR=...` to make). one script builds everything:
+environment variable / pass `ICC2_DIR=...` to make). **the ICC2 SDK is not currently
+available to the public**, so most of the code in this repo cannot be built without it;
+the released stick trees and images are built by the author against a private copy of the
+SDK. one script builds everything:
 
     git clone <this repo> ICC2-jailbreak
     cd ICC2-jailbreak
@@ -97,3 +115,20 @@ none of this would exist without the work of these people:
   could be done to begin with.
 - **[Charlie - ch4rdotnet](https://github.com/ch4rdotnet)** - for digging even further into the ICC2's
   software, and creating the ICC2 SDK/emulator this project was built off of.
+
+## license
+
+Copyright (C) 2026 Charlie (pukikiko).
+
+this project is licensed under the GNU General Public License, version 3 or later
+(GPL-3.0-or-later); the full text is in [LICENSE](LICENSE).
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
