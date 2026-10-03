@@ -226,26 +226,32 @@ sample (displayed frames only). At 30 fps it costs 240 B/s.
   quits it. The same replay is why the input thread only forwards the newest sample of a
   pass. Status/errors print to the console and are drawn on the panel only while no
   frames are flowing. `rawplay.sh` stops/restarts the HMI around the run.
-* **Climate keys with `--hmi`**: the hvac state changes on the v850's own side when a
-  fascia key is pressed, but the only place it is shown is the HMI's climate bar, and the
-  HMI is stopped behind the video. The player watches the same button bitmap the HMI's
-  `buttons` service does (ipc channel 6); on one of the thirteen climate keys it stops
-  reading (a stale ack makes the host drop what its two-frame window holds), resumes the
-  HMI, and stops it again 2 s after the last key, so the bar is up while the panel is
-  being used and the video comes back on its own. A held key holds the window open. The
-  bar is raised by a `buttons` event, so the player brings the frozen `buttons` service
-  back for the window the way the session resume does: SIGKILL it and let `ham` start a
-  clean one, never a SIGCONT (which would replay every panel event queued during the video
-  as one burst), then SIGSTOP the fresh process when the window closes, before the HMI
-  stops, so nothing it generates queues. The main loop owns every stop/resume so no
-  in-flight bulk-in can land in the panel buffer while the HMI draws. `rawplay.sh` always
-  passes the flag: it or its caller has stopped the HMI by then.
-* **The button reader is self-healing**: `/dev/ipc/0` is a monitor connection that can go
-  quiet or fail after an HMI stop/resume, and the panel then stays deaf for the rest of the
-  run while the `buttons` service and the HMI keep working. the panel reader in the ICC2 SDK's
-  `input.c` reopens the monitor after a read error or 5 s without a frame (the climate window pauses
-  the player for about 2.5 s, so that is not a live link) and keeps the previous bitmap, so
-  the first frame after the gap still reports what changed.
+* **HMI windows with `--hmi`**: the HMI is stopped behind the video, so anything whose only
+  display is the HMI has to bring it back. Three things do, all through the same window: a
+  climate fascia key (`HMI_WINDOW_MS` = 1 s after the last key, a held key holds it open),
+  a day/night switch (`vehicle.config`, ipc channel 4 msg 6: the night bit the HMI themes
+  on opens the same 1 s window), and reverse gear, which is a state rather than an edge,
+  so the window stays up for as long as the gear is engaged and closes when it is not (a
+  brief shift through reverse still gets the minimum 1 s). While the window is open
+  the player stops reading (a stale ack makes the host drop what its two-frame window
+  holds), so the video comes back on its own. The climate bar is raised by a `buttons`
+  event, so the player brings the frozen `buttons` service back for the window the way the
+  session resume does: SIGKILL it and let `ham` start a clean one, never a SIGCONT (which
+  would replay every panel event queued during the video as one burst), then SIGSTOP the
+  fresh process when the window closes, before the HMI stops, so nothing it generates
+  queues. The main loop owns every stop/resume so no in-flight bulk-in can land in the
+  panel buffer while the HMI draws. `rawplay.sh` always passes the flag: it or its caller
+  has stopped the HMI by then.
+* **The button and vehicle readers are self-healing**: `/dev/ipc/0` is a monitor
+  connection that can go quiet or fail after an HMI stop/resume, and the panel then stays
+  deaf for the rest of the run while the `buttons` service and the HMI keep working. the
+  panel reader in the ICC2 SDK's `input.c` reopens the monitor after a read error or 5 s
+  without a frame and keeps the previous bitmap, so the first frame after the gap still
+  reports what changed (the climate/day-night/reverse windows pause the player for about
+  1-2.5 s, so that is not a live link). the player's own `vehicle.state`/`vehicle.config`
+  reader does the same 5 s reopen, and asks for the current state when the monitor opens
+  so a player started while reverse is already engaged knows without waiting for a gear
+  change.
 * **Whoever stops the HMI stops `buttons` with it**: with the HMI frozen every panel event
   `buttons` sends blocks in its queue and the whole backlog replays as one burst when the
   HMI resumes (volume jumps, menus open by themselves). `rawplay.sh` and the launcher/menu
@@ -433,7 +439,11 @@ QMP clicks for touch, and can record the panel to a video. `--climate` (snapshot
 not `--boot`) presses a climate key while the video runs and checks the HMI window: one
 open/close pair on the console for the HMI and one for the restarted/stopped `buttons`
 service (the climate bar is raised by a buttons event), a displayed-frame ack gap of about
-two seconds, the panel changing to the HMI and back, and no window for a non-climate key.
+a second, the panel changing to the HMI and back, and no window for a non-climate key.
+`--vehicle` (also snapshot resume) drives day/night and gear through the emulator's v850
+and checks the same window: a day/night switch opens and closes the 1 s window, a gear
+change to reverse brings the HMI back and it stays past the window's deadline until the
+gear leaves reverse, and the video resumes after each.
 `--direct` runs the zero-copy path the table above was measured on; without it the
 benchmark runs the staged default, which is what a real unit uses, so compare builds under
 the same flags. A

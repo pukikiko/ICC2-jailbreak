@@ -61,10 +61,34 @@
  * shown is the hmi's climate bar, and the hmi sits stopped behind the video. so a press
  * opens a window with --hmi: streaming pauses, the hmi runs long enough to draw the bar,
  * and a fresh press keeps the window open. a held key holds it open too. */
-#define HMI_WINDOW_MS    2000
+#define HMI_WINDOW_MS    1000
 #define HMI_WINDOW_STR_(x) #x
 #define HMI_WINDOW_STR(x)  HMI_WINDOW_STR_(x)
 static const unsigned char climate_keys[] = { 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 20 };
+
+/* the rest of the car that has to be shown: vehicle.state (ipc ch 4, msg 0 v7) says when
+ * the gear is reverse, and vehicle.config (ipc ch 4, msg 6 v5) carries the day/night bit
+ * the HMI themes on (the offsets bussignals.h/buswatch decode). a day/night switch gets
+ * the same HMI_WINDOW_MS a climate key gets; reverse gear is a state, not an edge, so it
+ * holds the window open from the gear engaging until it leaves reverse. the reader asks
+ * for the current vehicle state when it connects, like hmictl.c's car guard, so a player
+ * started while reverse is already engaged does not miss it. */
+#define IPC_MONITOR      "/dev/ipc/0"
+#define VEHICLE_CH       4
+#define VSTATE_MSG       0x00
+#define VSTATE_VER       7
+#define VSTATE_GEAR      1      /* data byte 1 */
+#define VSTATE_LEN       7      /* msg id + version + 5 data bytes */
+#define VCONFIG_MSG      0x06
+#define VCONFIG_VER      5
+#define VCONFIG_NIGHT    6      /* data byte 0, bit 6 */
+#define GEAR_REVERSE     11
+#define VEHICLE_SILENT   500    /* 5 s of quiet reads reopens the monitor, like input.c */
+
+/* what last extended the window, for the log only */
+#define HMI_FROM_CLIMATE 0
+#define HMI_FROM_NIGHT   1
+#define HMI_FROM_REVERSE 2
 
 int pthread_create(unsigned *thread, const void *attr, void *(*fn)(void *), void *arg);
 
@@ -88,6 +112,8 @@ static int opt_hmi;
 static volatile unsigned long hmi_until_ms;
 static volatile unsigned hmi_gen;
 static volatile int climate_held;
+static volatile int reverse_hold;   /* vehicle.state gear is reverse: keep the window open */
+static volatile int hmi_from;       /* HMI_FROM_*: what last extended the window, for the log */
 static int hmi_active;
 static int hmi_buttons;     /* buttons was restarted for the window and has to be stopped again */
 
@@ -155,6 +181,17 @@ static int is_climate_key(int bit)
     return 0;
 }
 
+/* raise or extend the hmi window: the input thread and the vehicle reader both call this,
+ * and the main loop notices between frames. hmi_gen restarts a window that is already
+ * closing, so the event is never missed; hmi_until_ms moves the deadline forward. */
+static void note_hmi_window(int from)
+{
+    hmi_from = from;
+    __sync_synchronize();
+    hmi_gen++;
+    hmi_until_ms = now_ms() + HMI_WINDOW_MS;
+}
+
 /* every panel event the input thread sees passes through here. a climate key extends the
  * window; the main loop notices after the frame it is on and brings the hmi back. */
 static void note_climate(const struct input_event *ev)
@@ -167,9 +204,89 @@ static void note_climate(const struct input_event *ev)
     } else if (climate_held > 0) {
         climate_held--;
     }
-    __sync_synchronize();
-    hmi_gen++;
-    hmi_until_ms = now_ms() + HMI_WINDOW_MS;
+    note_hmi_window(HMI_FROM_CLIMATE);
+}
+
+/* ask the v850 for the current vehicle state, the flow message hmictl.c's car guard sends
+ * when a watcher starts mid-session: without it a player started while reverse is already
+ * engaged would not know until the gear moves again. */
+static void vehicle_request_state(void)
+{
+    static const unsigned char flow[] = { 0x03, 0x02, 0x02 };
+    int fd = open("/dev/ipc/4", O_WRONLY);
+
+    if (fd >= 0) {
+        write(fd, flow, sizeof flow);
+        close(fd);
+    }
+}
+
+/* the car's side of the window: a day/night switch opens one, reverse holds it open. only
+ * rx frames matter (direction byte 1 set is the guest's own tx), and only the two fields
+ * the window reacts to are extracted. the monitor can go quiet after a stopped hmi's
+ * resume, so a read error or 5 s without a frame reopens it, the same self-healing the
+ * SDK's input.c panel reader uses. the first night value seen is a baseline, not a
+ * switch; a first frame that already says reverse does open the window. */
+static void *vehicle_thread(void *arg)
+{
+    static unsigned char buf[1002];
+    int fd = -1, have_night = 0, night = 0;
+    unsigned silent = 0;
+    ssize_t n;
+
+    (void)arg;
+    for (;;) {
+        if (fd < 0) {
+            fd = open(IPC_MONITOR, O_RDONLY);
+            if (fd < 0) {
+                usleep(250000);
+                continue;
+            }
+            silent = 0;
+            vehicle_request_state();
+        }
+        n = read(fd, buf, sizeof buf);
+        if (n < 0) {
+            close(fd);
+            fd = -1;
+            usleep(100000);
+            continue;
+        }
+        if (n < 5) {
+            if (++silent >= VEHICLE_SILENT) {
+                close(fd);
+                fd = -1;
+            } else {
+                usleep(10000);
+            }
+            continue;
+        }
+        silent = 0;
+        if (buf[1] || buf[0] != VEHICLE_CH) {
+            continue;
+        }
+        if (buf[2] == VSTATE_MSG && buf[3] == VSTATE_VER && (int)n - 2 >= VSTATE_LEN) {
+            if (buf[4 + VSTATE_GEAR] == GEAR_REVERSE) {
+                if (!reverse_hold) {
+                    reverse_hold = 1;
+                    note_hmi_window(HMI_FROM_REVERSE);
+                }
+            } else if (reverse_hold) {
+                reverse_hold = 0;
+            }
+        } else if (buf[2] == VCONFIG_MSG && buf[3] == VCONFIG_VER) {
+            int v = (buf[4] >> VCONFIG_NIGHT) & 1;
+
+            if (!have_night) {
+                have_night = 1;
+                night = v;
+            } else if (v != night) {
+                night = v;
+                note_hmi_window(HMI_FROM_NIGHT);
+            }
+        }
+    }
+    return arg;
 }
 
 static void push_input(const unsigned char *m, int n)
@@ -732,14 +849,24 @@ static void hmi_window_close(void)
     }
     hmi_signal(HMI_SIGSTOP);
     hmi_active = 0;
-    printf("rawplay: climate window closed, hmi stopped\n");
-    jlog("rawplay: climate window closed, hmi stopped");
+    if (hmi_from == HMI_FROM_REVERSE) {
+        printf("rawplay: reverse window closed, hmi stopped\n");
+        jlog("rawplay: reverse window closed, hmi stopped");
+    } else if (hmi_from == HMI_FROM_NIGHT) {
+        printf("rawplay: day/night window closed, hmi stopped\n");
+        jlog("rawplay: day/night window closed, hmi stopped");
+    } else {
+        printf("rawplay: climate window closed, hmi stopped\n");
+        jlog("rawplay: climate window closed, hmi stopped");
+    }
 }
 
-/* while a climate window is open the main loop does not read: a frame would paint over the
- * bar the hmi is drawing (in direct mode the urbs land in the panel mapping itself). the
- * host is not acked, so it keeps only what its window holds and drops the rest, and after
- * the window the link picks up with the next frame it is given. */
+/* while a window is open the main loop does not read: a frame would paint over the bar the
+ * hmi is drawing (in direct mode the urbs land in the panel mapping itself). the host is
+ * not acked, so it keeps only what its window holds and drops the rest, and after the
+ * window the link picks up with the next frame it is given. a day/night window closes
+ * HMI_WINDOW_MS after the switch; reverse holds it open for as long as the gear stays
+ * engaged, however long that is. */
 static void hmi_window(void)
 {
     unsigned gen = hmi_gen;
@@ -752,8 +879,16 @@ static void hmi_window(void)
         hmi_buttons = hmi_events_window_open();
         hmi_signal(HMI_SIGCONT);
         hmi_active = 1;
-        printf("rawplay: climate key, hmi back for %d ms\n", HMI_WINDOW_MS);
-        jlog("rawplay: climate key, hmi back for %d ms", HMI_WINDOW_MS);
+        if (hmi_from == HMI_FROM_REVERSE) {
+            printf("rawplay: reverse gear, hmi back\n");
+            jlog("rawplay: reverse gear, hmi back");
+        } else if (hmi_from == HMI_FROM_NIGHT) {
+            printf("rawplay: day/night switch, hmi back for %d ms\n", HMI_WINDOW_MS);
+            jlog("rawplay: day/night switch, hmi back for %d ms", HMI_WINDOW_MS);
+        } else {
+            printf("rawplay: climate key, hmi back for %d ms\n", HMI_WINDOW_MS);
+            jlog("rawplay: climate key, hmi back for %d ms", HMI_WINDOW_MS);
+        }
         if (hmi_buttons) {
             printf("rawplay: buttons restarted for the hmi\n");
             jlog("rawplay: buttons restarted for the hmi");
@@ -761,7 +896,8 @@ static void hmi_window(void)
     }
     for (;;) {
         while (!ui_quit && hmi_gen == gen &&
-               !((long)(now_ms() - hmi_until_ms) >= 0 && !climate_held)) {
+               (reverse_hold ||
+                !((long)(now_ms() - hmi_until_ms) >= 0 && !climate_held))) {
             usleep(10000);
         }
         if (!ui_quit && hmi_gen != gen) {
@@ -786,7 +922,8 @@ static void usage(void)
            "  --hmi      the hmi is stopped behind the video: a climate panel key pauses the\n"
            "             stream, resumes the hmi and its buttons so the climate bar shows the\n"
            "             press, and stops them again " HMI_WINDOW_STR(HMI_WINDOW_MS) " ms after\n"
-           "             the last key\n"
+           "             the last key. a day/night switch opens the same window, and\n"
+           "             reverse gear holds it open for as long as the gear is engaged\n"
            "  --urb      bulk-in urb size in bytes (default 262144, min 512, max 1048576)\n"
            "  --poll-us  input wake timeout in microseconds, the lost-wakeup net for the\n"
            "             event driven input thread (default 100000, min 250)\n");
@@ -867,6 +1004,10 @@ int main(int argc, char **argv)
             printf("rawplay: can't start the writer thread\n");
             return 1;
         }
+        if (opt_hmi && pthread_create(&thread_id, 0, vehicle_thread, 0)) {
+            printf("rawplay: can't start the vehicle thread\n");
+            return 1;
+        }
     }
 
     while (running && !ui_quit) {
@@ -876,8 +1017,11 @@ int main(int argc, char **argv)
 
         /* only a deadline still in the future opens a window: after one closes its
          * deadline is stale and must not reopen it (races with the input thread are
-         * caught by hmi_gen, and a press that extends it moves the deadline forward) */
-        if (hmi_until_ms && !hmi_active && (long)(hmi_until_ms - now_ms()) > 0) {
+         * caught by hmi_gen, and a press that extends it moves the deadline forward).
+         * reverse is not an edge, so its hold reopens/keeps open while the gear is
+         * engaged even after the deadline its entry set. */
+        if (hmi_until_ms && !hmi_active &&
+            ((long)(hmi_until_ms - now_ms()) > 0 || reverse_hold)) {
             hmi_window();
             continue;
         }
