@@ -1,0 +1,25 @@
+#!/bin/sh
+# start rawlink once the usb port can be a gadget. this is the service's main
+# process (Type=simple), not an ExecStartPre: a synchronous `systemctl restart
+# rawlink` would otherwise sit in start-pre until the port came up.
+#
+# the H618's OTG controller is a Mentor MUSB driven by mainline's sunxi glue;
+# the board device tree pins it to peripheral mode (dr_mode = "peripheral"),
+# so unlike the phone there is no role switch to force. the loop is kept for
+# robustness (and for any board where a role file does exist): writing device
+# to it is harmless when the controller has no role switch.
+#
+# then wait for the udc, unbind a gadget left bound by a previous boot or a
+# hard kill, clear a stale functionfs mount, and hand the process to rawlink.
+for r in /sys/class/usb_role/*/role; do
+    [ -e "$r" ] && echo device > "$r" 2>/dev/null
+done
+while ! ls /sys/class/udc/* >/dev/null 2>&1; do
+    sleep 1
+done
+echo "" > /sys/kernel/config/usb_gadget/g1/UDC 2>/dev/null
+umount /dev/ffs-liviraw 2>/dev/null
+# --stats is what the boot-time harness reads for T5 (first frames) even when
+# no reader is attached yet
+exec /opt/livi/rawlink run --wayland /run/livi/wayland-livi \
+    --stick /opt/livi/usb.img --stats

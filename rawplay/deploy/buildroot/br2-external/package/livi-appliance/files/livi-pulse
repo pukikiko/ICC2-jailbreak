@@ -1,0 +1,46 @@
+#!/bin/sh
+# Run PulseAudio as a system daemon with the decided sink policy: the
+# PCM5102A I2S DAC when the board device tree provides it, and a null sink
+# otherwise (qemu, or a board without the DAC wired) so LIVI always has a
+# default sink for its pactl volume calls.
+#
+# the bundled GStreamer only ships pulsesink and Chromium's audio is pulse
+# too, so this one daemon is the whole audio stack: no PipeWire, whose
+# multiple processes would cost more boot time than the single daemon.
+set -eu
+
+# the service runs as the pulse user and systemd gives it /run/pulse; the
+# generated sink list has to live where that user can write it
+RUNDIR=/run/pulse
+mkdir -p "$RUNDIR"
+SINKS="$RUNDIR/livi-sinks.pa"
+
+# a null sink is always present; the name is what livi-default-sink selects
+# when no DAC card exists
+printf '%s\n' \
+    'load-module module-null-sink sink_name=livi-null sink_properties=device.description=LIVI-Null' \
+    > "$SINKS"
+
+# find the simple-audio-card bond to the PCM5102A. the codec has no control
+# bus, so the card is named by the machine driver; match the names the board
+# DT patch uses, and accept any card that mentions pcm5102 or livi
+card=""
+for f in /proc/asound/cards; do
+    [ -r "$f" ] || continue
+    card=$(awk '
+        BEGIN { IGNORECASE = 1 }
+        /^[[:space:]]*[0-9]+[[:space:]]*\[/ {
+            if ($0 ~ /pcm5102/ || $0 ~ /livi/) { print $1; exit }
+        }' "$f")
+done
+if [ -n "$card" ]; then
+    printf 'load-module module-alsa-sink sink_name=livi-dac device=hw:%s channels=2 sink_properties=device.description=LIVI-DAC\n' \
+        "$card" >> "$SINKS"
+    echo "livi-pulse: DAC card $card present, livi-dac sink added" >&2
+else
+    echo "livi-pulse: no I2S DAC card, null sink only" >&2
+fi
+
+# --disallow-exit keeps the daemon up for the appliance lifetime;
+# -F loads the generated sink list after the stock system.pa
+exec pulseaudio --system --daemonize=no --disallow-exit -F "$SINKS"

@@ -1,0 +1,40 @@
+# Weston (headless backend, kiosk, pixman): the LIVI stack's virtual 800x480
+# wayland session. weston composites LIVI's video plane into the headless
+# framebuffer and provides the socket the app, the touch module and rawlink's
+# capture use. no X server anywhere.
+#
+# --refresh-rate 0 makes the output repaint only when a capture is requested,
+# so the compositor costs nothing between frames; rawlink's --fps paces the
+# whole chain.
+# --fake-seat gives headless weston a seat (pointer+keyboard) the
+# weston-touch module can add a touchscreen to; Electron wants a wl_seat.
+# --debug authorises weston_capture_v1: the protocol is privileged and weston
+# refuses every shot without an authority. the appliance is single-user.
+#
+# Buildroot 2026.08 pins weston 15, the first release here with --fake-seat;
+# the 2026.02 LTS weston 14 headless backend has no seat at all, which breaks
+# weston-touch and Electron (see README.md).
+[Unit]
+Description=Weston headless kiosk session 800x480 (LIVI stack)
+After=livi-persist.service
+Wants=livi-persist.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Environment=HOME=/root
+Environment=XDG_RUNTIME_DIR=/run/livi
+ExecStartPre=-/bin/sh -c 'rm -f /run/livi/wayland-livi /run/livi/wayland-livi.lock'
+ExecStart=/usr/bin/weston --backend=headless --renderer=pixman --width 800 --height 480 \
+    --refresh-rate 0 --fake-seat --debug --shell=kiosk \
+    --socket=wayland-livi -i 0 --modules=/opt/livi/weston-touch.so
+Restart=always
+RestartSec=1
+# the wayland socket lives in /run/livi; keep it across restarts so a
+# rebouncing weston never takes the runtime dir away from the units using it
+RuntimeDirectory=livi
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+
+[Install]
+WantedBy=multi-user.target

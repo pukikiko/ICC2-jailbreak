@@ -1,0 +1,13 @@
+config BR2_PACKAGE_WESTON_TOUCH
+    bool "weston-touch module"
+    depends on BR2_USE_MMU
+    depends on BR2_TOOLCHAIN_HAS_THREADS
+    select BR2_PACKAGE_WESTON
+    select BR2_PACKAGE_WAYLAND
+    help
+      weston-touch.so, the weston module that adds a touch device and a key
+      injector to the compositor's seat. rawlink drives it over a unix socket
+      so touch and the panel keys reach the app as real wayland input.
+
+      The module is compiled with -DLIVI_WESTON_MAJOR matching the weston
+      package, because weston 16 changed the touch and keyboard APIs.

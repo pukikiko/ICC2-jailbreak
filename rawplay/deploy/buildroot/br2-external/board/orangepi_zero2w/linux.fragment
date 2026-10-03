@@ -1,0 +1,44 @@
+# Kernel config fragment for the appliance, applied on top of the arm64
+# defconfig. Everything the boot path needs is built in: there is no module
+# loading during boot. The defconfig already has most of the SoC, MMC, EXT4
+# and DRM support; this pins the gadget stack and the pieces it leaves out.
+#
+# VERIFY notes are in README.md ("Needs a decision"): the H618's Wi-Fi/BT
+# (Unisoc UWE5622) and its I2S DAC have no mainline drivers, so no wireless
+# or PCM5102A driver is enabled here.
+CONFIG_USB_GADGET=y
+CONFIG_USB_LIBCOMPOSITE=y
+CONFIG_USB_CONFIGFS=y
+CONFIG_USB_CONFIGFS_F_FS=y
+CONFIG_USB_CONFIGFS_MASS_STORAGE=y
+# the OTG port is a sunxi MUSB controller (allwinner,sun50i-h616-musb); the
+# gadget role matters because the car is the host. arm64 defconfig builds the
+# driver in but leaves the role at host.
+CONFIG_USB_MUSB_GADGET=y
+# CONFIG_USB_MUSB_HOST is not set
+# CONFIG_USB_MUSB_DUAL_ROLE is not set
+CONFIG_EXT4_FS=y
+CONFIG_SQUASHFS=y
+CONFIG_SQUASHFS_ZSTD=y
+CONFIG_NULL_TTY=y
+# Bluetooth core is on so bluetoothd can run once the UWE5622 driver lands
+CONFIG_BT=y
+CONFIG_BT_BREDR=y
+CONFIG_BT_LE=y
+CONFIG_CFG80211=y
+CONFIG_MAC80211=y
+# no tracing/debug in the boot path
+# CONFIG_FTRACE is not set
+# CONFIG_FUNCTION_TRACER is not set
+# CONFIG_DYNAMIC_FTRACE is not set
+# CONFIG_KPROBES is not set
+# CONFIG_UPROBES is not set
+# CONFIG_DEBUG_INFO is not set
+
+# the homebrew stick is a FAT partition served over mass storage; the unit
+# mounts it and so does unit-sim's smoke check
+CONFIG_FAT_FS=y
+CONFIG_VFAT_FS=y
+CONFIG_MSDOS_FS=y
+CONFIG_NLS_CODEPAGE_437=y
+CONFIG_NLS_ISO8859_1=y

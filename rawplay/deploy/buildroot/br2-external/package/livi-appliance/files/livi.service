@@ -1,0 +1,46 @@
+# LIVI itself (the CarPlay/Android Auto head unit UI) on the weston kiosk
+# session. The release AppImage is glibc, and this image is glibc, so it runs
+# directly: /opt/livi/livi-supervisor is the AppImage's launcher environment
+# plus the supervision the detached nested compositor needs (see the script).
+#
+# KillMode=mixed TERMs only the supervisor, which forwards the stop to the
+# app, waits for LIVI's own quit path while wayland is still up, and only
+# then closes the compositor. TimeoutStopSec is the backstop.
+[Unit]
+Description=LIVI head unit UI on the Weston kiosk display
+After=livi-weston.service livi-pulse.service
+Wants=livi-weston.service livi-pulse.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Environment=WAYLAND_DISPLAY=wayland-livi
+Environment=XDG_RUNTIME_DIR=/run/livi
+Environment=HOME=/home/user
+Environment=LIVI_KIOSK=1
+# the extracted AppImage is never mounted as an AppImage; AppRun's env is
+# replicated by the supervisor. this keeps the bundled gstreamer from trying
+# to mount anything at boot.
+Environment=APPIMAGE_EXTRACT_AND_RUN=1
+# the outer launcher spawns the inner Electron app from $APPIMAGE (or its own
+# execPath) with --ozone-platform=wayland. pointing APPIMAGE at the wrapper
+# gives the inner process the --no-sandbox the raw binary would otherwise
+# lack (Electron fatals as root); see files/livi-inner.
+Environment=APPIMAGE=/opt/livi/livi-inner
+# belt and braces for the outer process; Electron also reads this as the
+# no-sandbox switch
+Environment=ELECTRON_DISABLE_SANDBOX=1
+# audio is the system PulseAudio daemon
+Environment=PULSE_SERVER=unix:/run/pulse/native
+# waylandsink hands the compositor the caps stride while the frame memory is
+# row-padded; the shim corrects it (see livistride.c)
+Environment=LIVI_GST_PRELOAD=/opt/livi/livi-stride-fix.so
+EnvironmentFile=-/etc/default/livi
+ExecStart=/opt/livi/livi-supervisor --user-data-dir=/home/user/.config/LIVI-vnc --no-sandbox
+Restart=always
+RestartSec=2
+KillMode=mixed
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

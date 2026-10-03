@@ -1,0 +1,33 @@
+{
+  "mainScreenWidth": 800,
+  "mainScreenHeight": 480,
+  "mainScreenBounds": { "x": 0, "y": 0, "width": 800, "height": 480 },
+  "kiosk": { "main": true },
+  "wirelessAaEnabled": true,
+  "dismissedPackages": [
+    "bluez",
+    "libspa-0.2-bluetooth",
+    "hostapd",
+    "dnsmasq-base",
+    "iw",
+    "rfkill",
+    "python3-pip",
+    "pulseaudio-utils",
+    "python3-dbus",
+    "python3-gi",
+    "python3-smbus2",
+    "avahi-daemon",
+    "libva2",
+    "libva-drm2",
+    "libva-x11-2",
+    "libssh-4",
+    "cage",
+    "seatd",
+    "wlr-randr",
+    "pipewire",
+    "pipewire-pulse",
+    "wireplumber",
+    "xdg-user-dirs",
+    "curl"
+  ]
+}

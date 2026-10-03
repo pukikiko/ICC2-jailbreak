@@ -1,0 +1,9 @@
+# Buildroot's default BusyBox config leaves pgrep/pkill off. LIVI's python
+# helper calls pgrep at startup (_prepare_process) and pkill all over the
+# wireless AP path (through the sudo shim), and livi-supervisor uses pgrep to
+# find and stop the detached compositor. Without them the helper crashes
+# (FileNotFoundError: 'pgrep') and LIVI quits/restarts, and the supervisor
+# cannot see the compositor to do its staged stop.
+CONFIG_PGREP=y
+CONFIG_PKILL=y
+CONFIG_PIDOF=y

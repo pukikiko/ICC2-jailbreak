@@ -1,0 +1,15 @@
+#!/bin/sh
+# Tiny sudo stand-in. The appliance runs LIVI's python helper as root, and the
+# helper prefixes almost every hostapd/dnsmasq/ip/iw/rfkill call with `sudo`;
+# a missing sudo raises FileNotFoundError on the first AP call, so `sudo` has
+# to exist. Real sudo is a privilege-escalation surface with no purpose on a
+# system that is already root: this shim drops option words and execs the
+# rest. It deliberately does not implement -u or a shell.
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -*) shift ;;
+        *) break ;;
+    esac
+done
+[ $# -gt 0 ] || exit 0
+exec "$@"

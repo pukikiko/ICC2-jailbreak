@@ -1,0 +1,17 @@
+# Mount the persistent state and set up $HOME before anything that needs it.
+# ordered before the appliance units; local-fs/udev have run by then (default
+# dependencies order oneshot units after sysinit.target), so the data
+# partition's by-label link exists.
+[Unit]
+Description=LIVI persistent state (config, bluetooth pairings, machine-id)
+Before=bluetooth.service livi.service livi-weston.service rawlink.service livi-pulse.service
+After=local-fs.target
+DefaultDependencies=yes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/livi/livi-persist
+
+[Install]
+WantedBy=multi-user.target

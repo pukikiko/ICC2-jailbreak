@@ -1,0 +1,80 @@
+#!/bin/sh
+# Put the small persistent state on the data partition and make the rest of
+# the writable paths tmpfs, so the rootfs can stay a read-only squashfs and a
+# yanked power cord can not corrupt anything that matters.
+#
+# What is persistent (/data, ext4 label livi-data, mounted noatime,commit=1):
+#   livi-config   LIVI's settings and pairing state (bind-mounted on
+#                 /home/user/.config; the outer launcher reads
+#                 --user-data-dir=$HOME/.config/LIVI-vnc and the inner app
+#                 reads $HOME/.config/LIVI, both must carry the 800x480
+#                 geometry or the kiosk window is rejected)
+#   bluetooth     BlueZ pairings (bind-mounted on /var/lib/bluetooth)
+#
+# Everything else under $HOME (caches, logs, V8 code cache) is tmpfs and is
+# rebuilt each boot; the read-only rootfs is never written. Without a data
+# partition (a bench board, or qemu without the second disk) /data becomes a
+# tmpfs and the appliance still starts, just without persistence.
+set -eu
+
+DATA=/data
+WAIT=50
+
+mkdir -p "$DATA"
+dev=""
+i=0
+while [ "$i" -lt "$WAIT" ]; do
+    if [ -e /dev/disk/by-label/livi-data ]; then
+        dev=/dev/disk/by-label/livi-data
+        break
+    fi
+    sleep 0.2
+    i=$((i + 1))
+done
+
+if [ -n "$dev" ]; then
+    # commit=1 bounds how much recent metadata can be lost to a power cut;
+    # the data is tiny and written rarely, so the cost is irrelevant
+    mount -o noatime,commit=1 "$dev" "$DATA" 2>/dev/null || true
+fi
+
+if mountpoint -q "$DATA"; then
+    echo "livi-persist: persistent state on $dev" >&2
+else
+    mount -t tmpfs -o mode=0755,size=16M tmpfs "$DATA"
+    echo "livi-persist: no data partition, using tmpfs" >&2
+fi
+
+mkdir -p "$DATA/livi-config/LIVI" "$DATA/livi-config/LIVI-vnc" "$DATA/bluetooth"
+
+# a writable, non-persistent $HOME: the app writes caches and logs there. the
+# two config dirs are bind-mounted back in from /data below.
+mkdir -p /home/user
+if ! mountpoint -q /home/user; then
+    mount -t tmpfs -o mode=0755,size=256M tmpfs /home/user
+fi
+mkdir -p /home/user/.config /var/lib/bluetooth
+
+if ! mountpoint -q /home/user/.config; then
+    mount --bind "$DATA/livi-config" /home/user/.config
+fi
+if ! mountpoint -q /var/lib/bluetooth; then
+    mount --bind "$DATA/bluetooth" /var/lib/bluetooth
+fi
+
+# seed a fresh data partition with the shipped settings, including the
+# wirelessAaEnabled park the phone deployment uses
+for d in LIVI LIVI-vnc; do
+    if [ ! -f "/home/user/.config/$d/config.json" ]; then
+        cp /usr/share/livi/config.json "/home/user/.config/$d/config.json"
+    fi
+done
+
+# systemd wants a real machine-id and BlueZ keys some state on it. persist
+# one so pairings keep working, and fall back to generating a fresh one.
+if [ ! -s "$DATA/machine-id" ]; then
+    cat /proc/sys/kernel/random/uuid | tr -d -- '-' > "$DATA/machine-id"
+fi
+if [ ! -s /etc/machine-id ] || [ "$(cat /etc/machine-id 2>/dev/null)" != "$(cat "$DATA/machine-id")" ]; then
+    mount --bind "$DATA/machine-id" /etc/machine-id 2>/dev/null || true
+fi

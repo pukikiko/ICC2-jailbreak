@@ -1,0 +1,9 @@
+# U-Boot config fragment for the release image. The board defconfig is
+# already minimal (no network, no fastboot, no USB host commands); the only
+# change that matters for the boot time is skipping the distro-boot scan and
+# loading our boot script directly. SPL falcon mode is not used: on sunxi the
+# SPL loads U-Boot proper (and the H616 needs TF-A BL31 between them), so
+# there is no falcon path to trim.
+CONFIG_BOOTDELAY=0
+CONFIG_USE_BOOTCOMMAND=y
+CONFIG_BOOTCOMMAND="load mmc 0:1 0x4a000000 boot.scr; source 0x4a000000"

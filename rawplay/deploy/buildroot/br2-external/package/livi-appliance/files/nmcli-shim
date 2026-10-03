@@ -1,0 +1,7 @@
+#!/bin/sh
+# The helper has a few nmcli calls outside `sudo` and outside a check=True
+# (listing saved profiles, persisting runtime profiles, the imager hotspot).
+# The appliance does not run NetworkManager: the AP is plain iw/ip/hostapd,
+# nothing else touches wlan0, and all those calls are best-effort. A silent
+# success keeps the helper from logging spurious failures.
+exit 0

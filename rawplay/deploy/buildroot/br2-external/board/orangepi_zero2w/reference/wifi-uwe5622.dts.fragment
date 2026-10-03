@@ -1,0 +1,63 @@
+// Reference device-tree fragment for the Orange Pi Zero 2W's Wi-Fi/BT module.
+//
+// This file is deliberately NOT applied by the build. VERIFIED (see
+// README.md, "Needs a decision"): the module is a Unisoc/Spreadtrum UWE5622
+// (AW859A package; Orange Pi's own build config names the drivers
+// uwe5622_bsp_sdio/sprdwl_ng/sprdbt_tty) and mainline Linux has no driver for
+// it. Enabling mmc1 without that driver makes the SDIO bus scan a chip with
+// no driver and costs boot time for nothing, so it stays off until a driver
+// package exists.
+//
+// The nodes are the ones Armbian's sunxi-6.12 patch
+// arm64-dts-h616-add-wifi-support-for-orange-pi-zero-2-and-zero3.patch and
+// the vendor 6.1 device tree (linux-orangepi orange-pi-6.1-sun50iw9,
+// sun50i-h618-orangepi-zero2w.dts) both use: SDIO on mmc1 (PG0-PG5), a
+// 32 kHz clock and a PG18 reset for the chip, 3.3 V and 1.8 V rails.
+// Fold it into sun50i-h618-orangepi-zero2w.dts (and add the BT UART the
+// driver's sprdbt_tty needs) together with the driver package.
+//
+// Firmware: unlike the AP6256 the owner guessed, no brcmfmac .bin/.txt is
+// involved. UWE5622 firmware is loaded by sprdwl_ng from the rootfs and the
+// exact files are part of the driver port; they are not present in
+// linux-firmware. That is the main reason this is a blocking decision rather
+// than a firmware-package tweak.
+
+/ {
+    reg_vcc33_wifi: vcc33-wifi {
+        /* Always on 3.3V regulator for WiFi and BT */
+        compatible = "regulator-fixed";
+        regulator-name = "vcc33-wifi";
+        regulator-min-microvolt = <3300000>;
+        regulator-max-microvolt = <3300000>;
+        regulator-always-on;
+        vin-supply = <&reg_vcc5v>;
+    };
+
+    reg_vcc_wifi_io: vcc-wifi-io {
+        /* Always on 1.8V/300mA regulator for WiFi and BT IO */
+        compatible = "regulator-fixed";
+        regulator-name = "vcc-wifi-io";
+        regulator-min-microvolt = <1800000>;
+        regulator-max-microvolt = <1800000>;
+        regulator-always-on;
+        vin-supply = <&reg_vcc33_wifi>;
+    };
+
+    wifi_pwrseq: wifi-pwrseq {
+        compatible = "mmc-pwrseq-simple";
+        clocks = <&rtc 1>;
+        clock-names = "osc32k-out";
+        reset-gpios = <&pio 6 18 GPIO_ACTIVE_LOW>; /* PG18 */
+        post-power-on-delay-ms = <200>;
+    };
+};
+
+&mmc1 {
+    vmmc-supply = <&reg_vcc33_wifi>;
+    vqmmc-supply = <&reg_vcc_wifi_io>;
+    mmc-pwrseq = <&wifi_pwrseq>;
+    bus-width = <4>;
+    non-removable;
+    mmc-ddr-1_8v;
+    status = "okay";
+};

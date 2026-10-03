@@ -1,0 +1,16 @@
+# Write the T3/T4 boot milestones into the log the boot-time harness reads.
+# it runs alongside rawlink and waits for observable state, so it never slows
+# the boot it measures; the T3 line is the "gadget bound and enumerated"
+# milestone, T4 the weston socket.
+[Unit]
+Description=Boot milestone markers (T3 UDC configured, T4 wayland socket)
+After=rawlink.service livi-weston.service
+Wants=rawlink.service livi-weston.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/livi/livi-markers
+
+[Install]
+WantedBy=multi-user.target

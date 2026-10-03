@@ -1,0 +1,33 @@
+# rawlink in appliance mode: the functionfs gadget (vendor video interface +
+# the homebrew stick as mass storage) and the sender that captures the
+# headless weston session over weston_capture_v1.
+#
+# the gadget is the first boot milestone, ahead of LIVI: the unit's rawplay
+# starts waiting for video 15 s after launch and mounts the stick over the
+# same gadget. rawlink-wait is the main process (not an ExecStartPre) so a
+# restart never blocks on the port; rawlink retries the wayland socket by
+# itself, so it can start before weston.
+#
+# FIFO scheduling: rawlink is cheap but latency-critical, and Electron's
+# startup must not starve the USB service. this is the chrt -f the brief
+# asks for, expressed in the unit.
+[Unit]
+Description=rawlink: functionfs gadget + raw display link to the head unit
+After=local-fs.target sys-kernel-config.mount livi-persist.service
+Wants=sys-kernel-config.mount livi-persist.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/opt/livi/rawlink-wait
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=20
+Restart=always
+RestartSec=1
+# a graceful teardown is quick; do not sit in stop for the default 90 s if the
+# gadget or a blocking endpoint write wedges, the next start clears a stale
+# functionfs mount anyway
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

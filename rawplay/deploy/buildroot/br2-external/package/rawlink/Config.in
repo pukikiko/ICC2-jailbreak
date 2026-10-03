@@ -1,0 +1,15 @@
+config BR2_PACKAGE_RAWLINK
+    bool "rawlink"
+    depends on BR2_USE_MMU
+    depends on BR2_TOOLCHAIN_HAS_THREADS
+    select BR2_PACKAGE_WAYLAND
+    select BR2_PACKAGE_LIBUSB
+    help
+      rawlink, the host side of the raw livi link: the functionfs gadget
+      (vendor video interface + mass storage) and the sender that captures
+      the headless weston session over weston_capture_v1.
+
+      Built from the checkout this br2-external tree lives in (the
+      rawplay/ directory), so a git pull is all an update needs.
+
+      https://github.com/f-anomaly/ICC2-jailbreak (rawplay/rawlink.c)

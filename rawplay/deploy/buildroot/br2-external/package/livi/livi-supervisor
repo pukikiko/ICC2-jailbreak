@@ -1,0 +1,109 @@
+#!/bin/sh
+# run the extracted LIVI AppImage as the appliance service.
+#
+# this is the phone deployment's livi-chroot with the ubuntu chroot and bind
+# mounts removed (the Buildroot image is glibc, so the release runs directly)
+# and nothing else changed, because its supervision logic is load-bearing:
+#
+# the AppImage launcher hands off to a detached livi-compositor and exits 0 by
+# design (LIVI's src/main/index.ts: "outer launcher hands off to the nested
+# compositor and exits"). a plain exec would leave systemd with a finished
+# unit whose cgroup takes the real app down. this process stays alive while
+# the compositor lives, so Restart=always covers the app itself.
+#
+# stopping is staged because livi.service runs KillMode=mixed and only TERMs
+# this supervisor. the app sits under the compositor, so it gets the signal
+# first: LIVI's own quit path (wireless teardown, ...) then runs with wayland
+# still up, its main toplevel goes away and the compositor shuts itself down.
+# a wedged app gets LIVI_STOP_GRACE seconds, the compositor is closed anyway
+# and systemd's TimeoutStopSec SIGKILLs what is left.
+set -eu
+
+APP=/opt/livi/app
+HOME=${HOME:-/home/user}
+RUNDIR=${XDG_RUNTIME_DIR:-/run/livi}
+COMPOSITOR="bin/livi-compositor -s"
+STOP_GRACE=${LIVI_STOP_GRACE:-10}
+
+# the AppRun environment. the AppImage is extracted, not mounted, so AppRun
+# itself is not in the path and its exports are replicated here.
+export PATH="$APP:${PATH:+:$PATH}"
+export LD_LIBRARY_PATH="$APP/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export XDG_DATA_DIRS="$APP/usr/share:/usr/local/share:/usr/share${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+export GSETTINGS_SCHEMA_DIR="$APP/usr/share/glib-2.0/schemas"
+export APPDIR="$APP"
+
+compositor_pid() { pgrep -f "$COMPOSITOR" 2>/dev/null | head -n 1; }
+
+# every process under a pid. prints each child before recursing: a plain for
+# loop's variable is not scoped per function in POSIX sh, so the pid must not
+# be read after a deeper call has had a chance to overwrite it.
+descendants() {
+    for c in $(pgrep -P "$1" 2>/dev/null); do
+        printf '%s\n' "$c"
+        descendants "$c"
+    done
+}
+
+app_pids_alive() {
+    for p in "$@"; do
+        kill -0 "$p" 2>/dev/null && return 0
+    done
+    return 1
+}
+
+stop_app() {
+    trap '' TERM INT
+    pid=$(compositor_pid)
+    if [ -n "$pid" ]; then
+        pids=$(descendants "$pid")
+        for c in $pids; do
+            kill -TERM "$c" 2>/dev/null || true
+        done
+        i=0
+        while [ "$i" -lt "$STOP_GRACE" ] && app_pids_alive $pids; do
+            sleep 1
+            i=$((i + 1))
+        done
+        kill -TERM "$pid" 2>/dev/null || true
+    fi
+    exit 143
+}
+trap stop_app TERM INT
+
+# the persistent /home/user/.config is bind-mounted by livi-persist; if the
+# appliance booted without one, seed it here so the kiosk geometry is always
+# 800x480 (the inner app reads $HOME/.config/LIVI, the outer launcher reads
+# --user-data-dir; both must carry the panel size or weston's kiosk shell
+# rejects the window).
+for d in LIVI LIVI-vnc; do
+    mkdir -p "$HOME/.config/$d"
+    if [ ! -f "$HOME/.config/$d/config.json" ]; then
+        cp /usr/share/livi/config.json "$HOME/.config/$d/config.json"
+    fi
+done
+
+mkdir -p "$RUNDIR"
+# a killed instance leaves its compositor sockets behind and the next bind
+# fails; only this supervisor starts the app, so they are always stale here
+rm -f "$RUNDIR/livi-compositor.ctrl" "$RUNDIR/livi-compositor.ctrl.lock" \
+      "$RUNDIR/wayland-0" "$RUNDIR/wayland-0.lock"
+
+rc=0
+"$APP/livi" "$@" || rc=$?
+
+app_alive() { pgrep -f "$COMPOSITOR" >/dev/null 2>&1; }
+
+# give it a moment to spawn, then hold this process open for as long as it runs
+i=0
+while [ "$i" -lt 15 ] && ! app_alive; do
+    sleep 1
+    i=$((i + 1))
+done
+while app_alive; do
+    # backgrounded so a trapped TERM interrupts this wait and runs stop_app at
+    # once, instead of waiting out a foreground sleep
+    sleep 2 &
+    wait $! || true
+done
+exit $rc

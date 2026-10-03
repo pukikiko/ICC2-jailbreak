@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: LIVI appliance <livi@localhost>
+Date: Sat, 3 Oct 2026 12:00:00 +0000
+Subject: [PATCH] giscanner: do not merge pkg-config stderr into its output
+
+Buildroot puts its own pkg-config in PATH, and that wrapper is a /bin/sh
+script that runs with HOST_DIR/lib on LD_LIBRARY_PATH. On a build host whose
+/bin/sh is bash (linked against readline, linked against the system
+libncursesw), the loader prints
+
+    /.../host/lib/libncursesw.so.6: no version information available
+    (required by /usr/lib/libreadline.so.8)
+
+on stderr as soon as the wrapper starts. check_output() merged stderr into
+the pkg-config output, shlex.split() turned the warning words into linker
+arguments, and the introspection dumper died with "linker input file not
+found: no". The warning is noise: drop stderr instead of merging it.
+---
+ giscanner/pkgconfig.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/giscanner/pkgconfig.py b/giscanner/pkgconfig.py
+index 111111111111..222222222222 100644
+--- a/giscanner/pkgconfig.py
++++ b/giscanner/pkgconfig.py
+@@ -29,7 +29,7 @@ def check_output(flags, ignore_errors, command=None):
+     argv = command[:]
+     argv.extend(flags)
+     try:
+-        return subprocess.check_output(argv, universal_newlines=True, stderr=subprocess.STDOUT)
++        return subprocess.check_output(argv, universal_newlines=True, stderr=subprocess.DEVNULL)
+     except subprocess.CalledProcessError as e:
+         output = e.output or ''
+         if ignore_errors:
+-- 
+2.43.0
+

@@ -1,0 +1,95 @@
+# qemu aarch64 virt image of the LIVI appliance. It proves the software stack
+# (dummy_hcd gadget, rawlink, headless weston, LIVI, PulseAudio, the helper
+# shims and the boot order) on any x86 host with qemu; it can not prove H618
+# USB throughput, Wi-Fi/BT or the I2S DAC. See README.md for what it does and
+# does not prove.
+#
+# pin: Buildroot 2026.08 ships weston 15 (the LTS 2026.02 ships weston 14,
+# whose headless backend has no seat at all: --fake-seat is missing, and
+# without a seat weston-touch can not inject and Electron has no wl_seat).
+
+BR2_aarch64=y
+BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
+BR2_TOOLCHAIN_BUILDROOT_CXX=y
+BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_18=y
+BR2_ENABLE_LOCALE=y
+BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_LIVI_APPLIANCE_PATH)/patches"
+
+BR2_INIT_SYSTEMD=y
+BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_LIVI_APPLIANCE_PATH)/board/common/busybox.fragment"
+BR2_TARGET_GENERIC_HOSTNAME="livi-qemu"
+BR2_TARGET_GENERIC_ISSUE="LIVI appliance (qemu aarch64 virt)"
+BR2_TARGET_GENERIC_GETTY_PORT="ttyAMA0"
+BR2_TARGET_GENERIC_GETTY_BAUDRATE_115200=y
+# BR2_TARGET_GENERIC_REMOUNT_ROOTFS_RW is not set
+
+BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_LIVI_APPLIANCE_PATH)/board/common/post-build.sh"
+BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_LIVI_APPLIANCE_PATH)/board/qemu_aarch64_virt/post-image.sh"
+
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.18.7"
+BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="board/qemu/aarch64-virt/linux.config"
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_LIVI_APPLIANCE_PATH)/board/qemu_aarch64_virt/linux.fragment"
+BR2_LINUX_KERNEL_IMAGE=y
+
+BR2_TARGET_ROOTFS_SQUASHFS=y
+BR2_TARGET_ROOTFS_SQUASHFS4_ZSTD=y
+BR2_TARGET_ROOTFS_SQUASHFS_BS_128K=y
+# BR2_TARGET_ROOTFS_TAR is not set
+
+# systemd trims: keep journald, udev, tmpfiles and the analyze tool; drop
+# everything the appliance never uses
+BR2_PACKAGE_SYSTEMD_ANALYZE=y
+# BR2_PACKAGE_SYSTEMD_NETWORKD is not set
+# BR2_PACKAGE_SYSTEMD_RESOLVED is not set
+# BR2_PACKAGE_SYSTEMD_TIMESYNCD is not set
+# BR2_PACKAGE_SYSTEMD_HOSTNAMED is not set
+# BR2_PACKAGE_SYSTEMD_MYHOSTNAME is not set
+# BR2_PACKAGE_SYSTEMD_HWDB is not set
+# BR2_PACKAGE_SYSTEMD_RANDOMSEED is not set
+# BR2_PACKAGE_SYSTEMD_PSTORE is not set
+# BR2_PACKAGE_SYSTEMD_VCONSOLE is not set
+
+# the appliance: units, shims, dummy_hcd stand-in, and the libraries the
+# Electron binary needs at load time (its DT_NEEDED list)
+BR2_PACKAGE_LIVI_APPLIANCE=y
+BR2_PACKAGE_UNIT_SIM=y
+BR2_PACKAGE_LIBNSS=y
+BR2_PACKAGE_CUPS=y
+BR2_PACKAGE_AT_SPI2_CORE=y
+BR2_PACKAGE_DEJAVU=y
+BR2_PACKAGE_XLIB_LIBX11=y
+BR2_PACKAGE_XLIB_LIBXCOMPOSITE=y
+BR2_PACKAGE_XLIB_LIBXDAMAGE=y
+BR2_PACKAGE_XLIB_LIBXEXT=y
+BR2_PACKAGE_XLIB_LIBXFIXES=y
+BR2_PACKAGE_XLIB_LIBXRANDR=y
+BR2_PACKAGE_XLIB_LIBXSHMFENCE=y
+BR2_PACKAGE_LIBXCB=y
+BR2_PACKAGE_MESA3D=y
+BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_SOFTPIPE=y
+# the phone deployment runs Electron on Mesa llvmpipe (libgl1-mesa-dri);
+# softpipe alone has no GLES3 EGL config and Chromium's GPU process rejects it
+BR2_PACKAGE_MESA3D_LLVM=y
+BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_LLVMPIPE=y
+BR2_PACKAGE_MESA3D_OPENGL_EGL=y
+BR2_PACKAGE_MESA3D_OPENGL_ES=y
+BR2_PACKAGE_ALSA_UTILS=y
+BR2_PACKAGE_ALSA_UTILS_APLAY=y
+BR2_PACKAGE_ALSA_UTILS_SPEAKER_TEST=y
+
+# prebuilt Electron tree: already stripped, and stripping 800 MB of
+# third-party libraries only costs build time
+BR2_STRIP_EXCLUDE_DIRS="opt/livi/app"
+
+# Electron's DT_NEEDED list: GTK3 (X11+Wayland backends) and the X libraries.
+# Buildroot gates the xlib packages behind the X.org umbrella symbol, so it
+# has to be on even though the appliance runs no X server.
+BR2_PACKAGE_XORG7=y
+BR2_PACKAGE_LIBGTK3=y
+BR2_PACKAGE_LIBGTK3_X11=y
+BR2_PACKAGE_LIBGTK3_WAYLAND=y
+BR2_PACKAGE_PANGO=y
+BR2_PACKAGE_XLIB_LIBXRENDER=y

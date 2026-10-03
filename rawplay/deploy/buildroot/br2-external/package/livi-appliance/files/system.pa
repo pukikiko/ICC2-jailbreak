@@ -1,0 +1,14 @@
+# Minimal PulseAudio system mode configuration for the appliance.
+#
+# The stock system.pa starts udev detection and both local and TCP sockets;
+# the appliance wants a deterministic local socket and no network listener.
+# auth-anonymous=1 is safe here: /run/pulse is a root-owned runtime directory
+# on a single-user appliance with no login shell and no network access to the
+# socket. The null/DAC sinks are loaded by the -F file livi-pulse generates.
+.fail
+
+load-module module-native-protocol-unix auth-anonymous=1 socket=/run/pulse/native
+load-module module-always-sink
+load-module module-device-restore
+load-module module-stream-restore
+load-module module-card-restore

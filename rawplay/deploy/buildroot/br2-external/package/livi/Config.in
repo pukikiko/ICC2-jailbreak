@@ -1,0 +1,21 @@
+config BR2_PACKAGE_LIVI
+    bool "LIVI (CarPlay/Android Auto head unit)"
+    depends on BR2_aarch64
+    depends on BR2_USE_MMU
+    depends on BR2_TOOLCHAIN_HAS_THREADS
+    depends on BR2_TOOLCHAIN_USES_GLIBC
+    select BR2_PACKAGE_GSTREAMER1
+    select BR2_PACKAGE_GST1_PLUGINS_BASE
+    help
+      LIVI 8.3.0 (aarch64 glibc Electron AppImage) plus the two shims the
+      appliance needs: livi-stride-fix.so (the waylandsink stride fix) and
+      the LIVI supervisor (the AppImage hands off to a detached compositor
+      and exits, so a plain exec would look like a finished service).
+
+      The AppImage is extracted at build time with host-squashfs: the
+      aarch64 runtime cannot be run on the x86 build host, so the squashfs
+      offset is computed from the ELF section headers (extract-appimage.py).
+
+      Pinned to 8.3.0 on purpose: 9.x forces its inner app to Wayland and
+      its GPU process hands dmabufs to the nested compositor, which the
+      pixman renderer cannot import (Electron dies, panel black).

@@ -1,0 +1,12 @@
+config BR2_PACKAGE_UNIT_SIM
+    bool "unit-sim (guest-side rawplay stand-in)"
+    depends on BR2_USE_MMU
+    depends on BR2_TOOLCHAIN_HAS_THREADS
+    select BR2_PACKAGE_LIBUSB
+    help
+      unit-sim plays the car's rawplay on the wire inside a qemu guest: it
+      enumerates the dummy_hcd gadget, validates LR MODE/FRAME messages,
+      acks frames, sends the 1 s ready heartbeat, checks the mass-storage
+      LUN mounts read-only, and records the T5/T6 boot milestones.
+
+      It is a test instrument; leave it out of a release image.

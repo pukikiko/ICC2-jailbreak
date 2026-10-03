@@ -1,0 +1,7 @@
+# Debug boot script: same as boot.cmd plus the serial console and
+# initcall_debug, which scripts/boottime.sh parses. This is the image that
+# also has dropbear and a root shell on the UART; it is slower by design.
+setenv bootargs root=/dev/mmcblk0p2 ro rootwait rootfstype=squashfs console=ttyS0,115200 loglevel=7 ignore_loglevel initcall_debug random.trust_cpu=on systemd.journald.forward_to_console=1 systemd.log_target=console
+load mmc 0:1 0x40080000 Image
+load mmc 0:1 0x4fa00000 sun50i-h618-orangepi-zero2w.dtb
+booti 0x40080000 - 0x4fa00000

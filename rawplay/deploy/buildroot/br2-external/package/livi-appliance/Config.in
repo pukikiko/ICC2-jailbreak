@@ -1,0 +1,53 @@
+config BR2_PACKAGE_LIVI_APPLIANCE
+    bool "LIVI appliance services"
+    depends on BR2_aarch64
+    depends on BR2_INIT_SYSTEMD
+    depends on BR2_USE_MMU
+    depends on BR2_TOOLCHAIN_HAS_THREADS
+    depends on BR2_TOOLCHAIN_USES_GLIBC
+    select BR2_PACKAGE_LIVI
+    select BR2_PACKAGE_RAWLINK
+    select BR2_PACKAGE_WESTON_TOUCH
+    select BR2_PACKAGE_WESTON
+    select BR2_PACKAGE_WESTON_HEADLESS
+    select BR2_PACKAGE_WESTON_SHELL_KIOSK
+    select BR2_PACKAGE_BASH
+    select BR2_PACKAGE_BLUEZ5_UTILS
+    select BR2_PACKAGE_DBUS
+    select BR2_PACKAGE_DBUS_PYTHON
+    select BR2_PACKAGE_PYTHON3
+    select BR2_PACKAGE_PYTHON_GOBJECT
+    select BR2_PACKAGE_PYTHON_SMBUS2
+    select BR2_PACKAGE_PYTHON_PYYAML
+    select BR2_PACKAGE_HOSTAPD
+    select BR2_PACKAGE_DNSMASQ
+    select BR2_PACKAGE_IW
+    select BR2_PACKAGE_IPROUTE2
+    select BR2_PACKAGE_UTIL_LINUX
+    select BR2_PACKAGE_UTIL_LINUX_RFKILL
+    select BR2_PACKAGE_ALSA_UTILS
+    select BR2_PACKAGE_ALSA_UTILS_APLAY
+    select BR2_PACKAGE_PULSEAUDIO
+    select BR2_PACKAGE_PULSEAUDIO_DAEMON
+    select BR2_PACKAGE_HOST_MTOOLS
+    select BR2_PACKAGE_HOST_DOSFSTOOLS
+    select BR2_PACKAGE_HOST_E2FSPROGS
+    select BR2_PACKAGE_HOST_GENIMAGE
+    help
+      The systemd units, helper shims and first-boot state handling that turn
+      the rawlink/weston/LIVI packages into the appliance: gadget-first boot
+      order, a read-only rootfs with a small persistent /data partition,
+      PulseAudio with a null-sink fallback, and the tiny sudo/nmcli shims the
+      bundled python helper expects on a system without NetworkManager.
+
+if BR2_PACKAGE_LIVI_APPLIANCE
+
+config BR2_PACKAGE_LIVI_APPLIANCE_DEBUG
+    bool "debug image (serial console, initcall_debug, dropbear)"
+    help
+      The release image has no serial console and no login. The debug image
+      keeps the UART, boots with initcall_debug and loglevel=7 (which
+      scripts/boottime.sh parses), adds dropbear, and leaves kernel tracing
+      enabled. It is measurably slower; never ship it.
+
+endif

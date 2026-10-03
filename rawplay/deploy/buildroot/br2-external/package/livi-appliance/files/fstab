@@ -1,0 +1,5 @@
+# /run is mounted by systemd; /var is a tmpfs factory (Buildroot read-only
+# rootfs support) and /home/user is a tmpfs mounted by livi-persist. /tmp and
+# /var/tmp are the two paths those cover that still need an explicit mount.
+tmpfs  /tmp      tmpfs  mode=1777,nosuid,nodev  0 0
+tmpfs  /var/tmp  tmpfs  mode=1777,nosuid,nodev  0 0

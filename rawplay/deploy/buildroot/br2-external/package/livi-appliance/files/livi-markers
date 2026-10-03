@@ -1,0 +1,48 @@
+#!/bin/sh
+# Record the two boot milestones a shell can see into /run/livi-boot.log:
+#
+#   T3  rawlink is bound and the UDC left "not attached": the car enumerated
+#       the gadget (on qemu, unit-sim did). This is the milestone that matters
+#       first because the unit's rawplay waits 15 s for video and mounts the
+#       stick over the same gadget.
+#   T4  weston's wayland-livi socket exists.
+#
+# T5/T6 come from whatever is on the other end of the wire (unit-sim in qemu,
+# or the car); this script never guesses them.
+#
+# every line also goes to stdout so the debug image's journald console
+# forwarding puts it in the serial boot log boottime.sh parses for hardware.
+LOG=/run/livi-boot.log
+
+log() {
+    printf '%s\n' "$*" >> "$LOG"
+    printf 'livi-marker: %s\n' "$*"
+}
+
+up() { cut -d' ' -f1 /proc/uptime; }
+
+i=0
+while [ "$i" -lt 600 ]; do
+    state=$(cat /sys/class/udc/*/state 2>/dev/null | head -n 1)
+    if [ -n "$state" ] && [ "$state" != "not attached" ]; then
+        log "T3 $(up) udc $state"
+        break
+    fi
+    sleep 0.1
+    i=$((i + 1))
+done
+[ "$i" -ge 600 ] && log "T3 missing udc never left not attached"
+
+i=0
+while [ "$i" -lt 600 ]; do
+    if [ -S /run/livi/wayland-livi ]; then
+        log "T4 $(up) wayland-livi up"
+        break
+    fi
+    sleep 0.1
+    i=$((i + 1))
+done
+[ "$i" -ge 600 ] && log "T4 missing weston socket never appeared"
+# a oneshot unit is failed if its ExecStart's last command exits non-zero;
+# the test above is false on the success path
+exit 0

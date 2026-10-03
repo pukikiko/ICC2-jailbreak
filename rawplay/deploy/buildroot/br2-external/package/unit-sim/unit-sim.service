@@ -1,0 +1,19 @@
+# qemu has no car, so unit-sim stands in for rawplay: it enumerates the
+# dummy_hcd gadget and consumes the live stream while smoke.sh watches the
+# milestone file. release board images do not build this package.
+[Unit]
+Description=unit-sim (car-side rawplay stand-in for qemu)
+After=rawlink.service
+Wants=rawlink.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/unit-sim --log /run/livi-boot.log --seconds 900
+# the status line the smoke test greps (stick mounted read-only, endpoints)
+StandardOutput=append:/tmp/unit-sim.log
+StandardError=append:/tmp/unit-sim.log
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
