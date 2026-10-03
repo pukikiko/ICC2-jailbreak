@@ -1498,7 +1498,7 @@ static void wlcap_convert(struct stream *s, const struct wlcap_state *st)
         const unsigned char *p = st->map + (size_t)sy * (size_t)st->width * 4;
 
         for (x = 0; x < st->width; x++, p += 4, dst += 2) {
-            dst[0] = (unsigned char)((p[1] << 5) | (p[0] >> 3));
+            dst[0] = (unsigned char)(((p[1] & 0x1c) << 3) | (p[0] >> 3));
             dst[1] = (unsigned char)((p[2] & 0xf8) | (p[1] >> 5));
         }
     }
