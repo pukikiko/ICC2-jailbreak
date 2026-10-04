@@ -17,7 +17,9 @@ done
 while ! ls /sys/class/udc/* >/dev/null 2>&1; do
     sleep 1
 done
-echo "" > /sys/kernel/config/usb_gadget/g1/UDC 2>/dev/null
+if [ -d /sys/kernel/config/usb_gadget/g1 ]; then
+    echo "" > /sys/kernel/config/usb_gadget/g1/UDC 2>/dev/null
+fi
 umount /dev/ffs-liviraw 2>/dev/null
 # --stats is what the boot-time harness reads for T5 (first frames) even when
 # no reader is attached yet

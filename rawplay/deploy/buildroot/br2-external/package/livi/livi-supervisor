@@ -89,8 +89,30 @@ mkdir -p "$RUNDIR"
 rm -f "$RUNDIR/livi-compositor.ctrl" "$RUNDIR/livi-compositor.ctrl.lock" \
       "$RUNDIR/wayland-0" "$RUNDIR/wayland-0.lock"
 
-rc=0
-"$APP/livi" "$@" || rc=$?
+# the outer Electron launcher runs no UI: kn() in out/main/main.js writes the
+# config and spawns resources/compositor/livi-compositor with the command
+# below, then exits. the inner app repeats the config write, so starting the
+# compositor directly is equivalent while skipping one full Electron cold
+# start (qemu's TCG clock charges ~12 s for it; on hardware it is much less
+# but never zero). set LIVI_USE_OUTER_LAUNCHER=1 to restore the shipped
+# launcher verbatim.
+if [ "${LIVI_USE_OUTER_LAUNCHER:-0}" = "1" ] || [ ! -x "$APP/resources/compositor/livi-compositor" ]; then
+    rc=0
+    "$APP/livi" "$@" || rc=$?
+else
+    # the exact command string kn() builds, with APPIMAGE pointing at the
+    # wrapper that adds --no-sandbox; the env it exports for the compositor
+    # (LIVI_OUTPUT_SIZE is 800x480 because config.json carries the panel and
+    # kiosk.main is true, so no +32 window decoration)
+    rc=0
+    COMPOSITOR_CMD="LIVI_COMPOSITOR=1 LD_LIBRARY_PATH='${LD_LIBRARY_PATH:-}' '${APPIMAGE:-$APP/livi-inner}' --ozone-platform=wayland ${LIVI_INNER_ARGS:-}"
+    LIVI_OUTPUT_APP_ID=dev.f-io.livi \
+    LIVI_COMPOSITOR_CTRL="$RUNDIR/livi-compositor.ctrl" \
+    LIVI_SCREENS=main,dash,aux \
+    LIVI_OUTPUT_SIZE=800x480 \
+    env -u APPIMAGE -u APPDIR -u ARGV0 -u OWD \
+        "$APP/resources/compositor/livi-compositor" -s "$COMPOSITOR_CMD" &
+fi
 
 app_alive() { pgrep -f "$COMPOSITOR" >/dev/null 2>&1; }
 

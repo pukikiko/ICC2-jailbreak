@@ -25,7 +25,7 @@ done
 exec qemu-system-aarch64 \
     -M virt -cpu max -smp 4 -m 2048 \
     -kernel "$IMAGES/Image" \
-    -append "root=/dev/vda1 ro rootwait rootfstype=squashfs console=ttyAMA0,115200 systemd.journald.forward_to_console=1 random.trust_cpu=on printk.time=1 ${LIVI_QEMU_APPEND:-}" \
+    -append "root=/dev/vda1 ro rootwait rootfstype=squashfs console=ttyAMA0,115200 systemd.journald.forward_to_console=1 random.trust_cpu=on printk.time=1 systemd.getty_auto=0 systemd.setenv=LIVI_INNER_ARGS=--disable-gpu ${LIVI_QEMU_APPEND:-}" \
     -drive if=none,id=disk,format=raw,file="$IMAGES/disk.img" \
     -device virtio-blk-device,drive=disk \
     -device virtio-rng-pci \

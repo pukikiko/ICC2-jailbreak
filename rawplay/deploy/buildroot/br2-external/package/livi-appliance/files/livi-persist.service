@@ -1,12 +1,14 @@
 # Mount the persistent state and set up $HOME before anything that needs it.
-# ordered before the appliance units; local-fs/udev have run by then (default
-# dependencies order oneshot units after sysinit.target), so the data
-# partition's by-label link exists.
+# DefaultDependencies=no plus an explicit local-fs dependency is what keeps
+# this unit off the sysinit path: with the defaults it also waited for
+# systemd-udev-trigger (2-3 s of coldplug for devices this appliance never
+# asks udev about), and every appliance unit waits on this one.
 [Unit]
 Description=LIVI persistent state (config, bluetooth pairings, machine-id)
-Before=bluetooth.service livi.service livi-weston.service rawlink.service livi-pulse.service
-After=local-fs.target
-DefaultDependencies=yes
+DefaultDependencies=no
+After=local-fs.target systemd-journald.socket
+Conflicts=shutdown.target
+Before=shutdown.target bluetooth.service livi-pulse.service livi-weston.service rawlink.service livi.service
 
 [Service]
 Type=oneshot

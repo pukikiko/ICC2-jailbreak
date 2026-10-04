@@ -18,16 +18,24 @@
 set -eu
 
 DATA=/data
-WAIT=50
+WAIT=25
 
 mkdir -p "$DATA"
+# find the data partition without udev: root is mounted from the same device,
+# so the node is already in devtmpfs. the fixed names cover the qemu virtio
+# disk and the board's SD/eMMC; the by-label symlink (when udev did run) is
+# the last candidate. the poll is only for an mmc card scanned a moment after
+# init; it is instantaneous on qemu and after a normal SD boot.
 dev=""
 i=0
 while [ "$i" -lt "$WAIT" ]; do
-    if [ -e /dev/disk/by-label/livi-data ]; then
-        dev=/dev/disk/by-label/livi-data
-        break
-    fi
+    for c in /dev/vda2 /dev/mmcblk0p3 /dev/mmcblk1p3 /dev/disk/by-label/livi-data; do
+        if [ -b "$c" ]; then
+            dev="$c"
+            break
+        fi
+    done
+    [ -n "$dev" ] && break
     sleep 0.2
     i=$((i + 1))
 done

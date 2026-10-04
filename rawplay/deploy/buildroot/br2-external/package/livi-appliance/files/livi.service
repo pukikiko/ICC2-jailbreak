@@ -8,8 +8,11 @@
 # then closes the compositor. TimeoutStopSec is the backstop.
 [Unit]
 Description=LIVI head unit UI on the Weston kiosk display
-After=livi-weston.service livi-pulse.service
+DefaultDependencies=no
+After=local-fs.target livi-persist.service livi-weston.service livi-pulse.service systemd-journald.socket
 Wants=livi-weston.service livi-pulse.service
+Conflicts=shutdown.target
+Before=shutdown.target
 StartLimitIntervalSec=0
 
 [Service]
@@ -32,6 +35,12 @@ Environment=APPIMAGE=/opt/livi/livi-inner
 Environment=ELECTRON_DISABLE_SANDBOX=1
 # audio is the system PulseAudio daemon
 Environment=PULSE_SERVER=unix:/run/pulse/native
+# GStreamer rescans every plugin when its registry cache is missing, and the
+# default cache under $HOME is tmpfs and thrown away each boot. put the
+# registry on the persistent partition and tell GStreamer not to revalidate
+# it: first boot scans once, every later boot loads the cache.
+Environment=GST_REGISTRY=/data/livi-config/gst-registry.aarch64.bin
+Environment=GST_REGISTRY_UPDATE=no
 # waylandsink hands the compositor the caps stride while the frame memory is
 # row-padded; the shim corrects it (see livistride.c)
 Environment=LIVI_GST_PRELOAD=/opt/livi/livi-stride-fix.so

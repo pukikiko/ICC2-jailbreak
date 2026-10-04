@@ -30,6 +30,15 @@ data partition, and all boot-path drivers are built in.
 > source-verified and marked as such. Two blocking hardware facts (Wi-Fi/BT, audio) are in "Needs a
 > decision" and are the reason the board image cannot yet do a wireless
 > session or sound.
+>
+> The boot path has since been trimmed (see "Boot-time work" below): the
+> stock PulseAudio unit that stalled LIVI for ~30 s is masked, the appliance
+> units no longer wait on the udev coldplug, the getty comes from a unit with
+> no device dependency, the outer Electron launcher is skipped, the
+> GStreamer registry is persisted on `/data`, and the board cmdline skips the
+> unused-clock teardown. qemu T6 is dominated by Electron under TCG (host
+> load moves it a lot); the numbers in the table are the current image on
+> this machine, not a hardware prediction.
 
 ## Layout
 
@@ -38,7 +47,7 @@ rawplay/deploy/buildroot/
   br2-external/
     Config.in, external.desc, external.mk
     configs/               qemu_aarch64_virt_defconfig, orangepi_zero2w[_debug]_defconfig
-    board/common/          post-build.sh (machine-id, no getty)
+    board/common/          post-build.sh (machine-id, unit masks, udev/getty policy)
     board/orangepi_zero2w/ linux.fragment, uboot.fragment, boot.cmd[.debug],
                            genimage.cfg, post-image.sh, reference/ (Wi-Fi DT notes)
     board/qemu_aarch64_virt/ linux.fragment, post-image.sh
@@ -257,7 +266,35 @@ are the check on real hardware.
   `CPUSchedulingPolicy=fifo`, the `chrt -f` the brief asks for) and
   `livi-pulse` in parallel -> `livi-weston` -> `livi`. rawlink retries the
   wayland socket by itself, so weston does not gate the gadget; the unit
-  sees a UDC and a stick as early as the kernel allows.
+  sees a UDC and a stick as early as the kernel allows. Every appliance unit
+  sets `DefaultDependencies=no` and an explicit `local-fs.target` order:
+  with the defaults they also waited on `systemd-udev-trigger`, and that
+  coldplug costs seconds on this CPU for devices the appliance never asks
+  udev about. `livi-persist` finds the data partition by its fixed `/dev`
+  node (`/dev/vda2`, `/dev/mmcblk0p3`) so it needs no udev-created
+  `/dev/disk/by-label` symlink.
+* **Session start**: `livi-supervisor` starts
+  `resources/compositor/livi-compositor -s` directly instead of exec'ing the
+  outer Electron launcher. The shipped launcher's only job (`kn()` in
+  `out/main/main.js`) is to write the config - which the inner app repeats -
+  and spawn that same compositor with the same command string and
+  environment, so the direct start removes one full Electron cold start
+  (qemu's TCG clock charges ~12 s for it) with no change to what runs.
+  `LIVI_USE_OUTER_LAUNCHER=1` restores the shipped path.
+* **udev and the console**: `systemd-udev-trigger` is masked; the kernel has
+  every boot-path driver built in, devtmpfs carries the nodes, and udevd
+  still runs for live events (the car plugging in, a card inserted later).
+  The stock `serial-getty@.service` pulls in its own `.device` unit and would
+  sit on the 90 s device timeout once the coldplug is gone, so the qemu and
+  debug images get `livi-console-getty.service`, an agetty with no device
+  dependency (the release image boots no getty at all). `systemd.getty_auto=0`
+  and masks of the stock tty instances keep any generated getty out.
+* **GStreamer registry**: `livi.service` points `GST_REGISTRY` at
+  `/data/livi-config/gst-registry.aarch64.bin` (`GST_REGISTRY_UPDATE=no`).
+  The default cache under `$HOME` is tmpfs and thrown away each boot, so
+  GStreamer rescanned every plugin on every start; with the persistent path
+  only the first boot after a flash scans. The shipped `config.json` still
+  seeds the profile on `/data`, so Chromium's own caches persist too.
 * **Rootfs**: squashfs, zstd, 128 KiB blocks, mounted `ro`; tmpfs `/run`,
   `/tmp`, `/var` (Buildroot's systemd `/var` factory) and `/home/user`; a
   128 MB ext4 partition labelled `livi-data` mounted `noatime,commit=1`
@@ -274,18 +311,25 @@ are the check on real hardware.
   `USB_MUSB_GADGET`), squashfs/zstd, `NULL_TTY`, Bluetooth/802.11 core for
   when the UWE5622 driver lands, and tracing/debug off. No module is loaded
   in the boot path. `quiet loglevel=0`, `rootwait ro`,
-  `random.trust_cpu=on`, and `console=ttynull` in the release image (the
-  debug image keeps the UART with `loglevel=7 initcall_debug`, which is what
-  `boottime.sh board` parses).
+  `random.trust_cpu=on`, `clk_ignore_unused pd_ignore_unused` (skip the
+  sunxi late init that walks every unused clock and power domain) and
+  `console=ttynull` in the release image; the debug image keeps the UART
+  with `loglevel=7 initcall_debug`, which is what `boottime.sh board`
+  parses. Both set `systemd.getty_auto=0` because the stock serial getty
+  would otherwise wait on a `.device` unit the masked coldplug never
+  creates (`console=ttynull` gets one too).
 * **U-Boot**: board defconfig + fragment (`BOOTDELAY=0`, direct
   `boot.scr` load; no network/fastboot in the board defconfig to start
   with). The SPL/TF-A stages are untouched.
 * **Audio**: PulseAudio 17 system daemon, one process, started before LIVI;
-  `livi-pulse` loads a null sink always and an `livi-dac` ALSA sink when
-  `/proc/asound/cards` names a PCM5102/livi card, and
-  `livi-default-sink` points `@DEFAULT_SINK@` at the DAC or the null sink
-  (LIVI's `pactl` calls need a default sink at startup). No PipeWire: more
-  processes for no benefit on an appliance with no session.
+  `livi-pulse` writes the DAC sink first when `/proc/asound/cards` names a
+  PCM5102/livi card and the null sink otherwise, then the null sink; the
+  first sink loaded is PulseAudio's default with no state to restore
+  (LIVI's `pactl` calls need a default sink at startup). The stock
+  `pulseaudio.service` is masked: it would start a second, unconfigured
+  daemon that takes `/run/pulse/pid`, and its `ExecStartPost` retry loop
+  then held `livi.service` for ~30 s. No PipeWire: more processes for no
+  benefit on an appliance with no session.
 * **LIVI start-up**: the `--wayland` capture needs no ffmpeg; the release
   image has no ffmpeg. `--disable-dev-shm-usage`, `--ozone-platform` and
   GPU flags were left at the phone's validated environment: 8.3.0's inner
@@ -324,44 +368,94 @@ socket, T5 first frame, T6 non-blank LIVI UI.
 
 Measured by `tests/smoke.sh` on this machine (Buildroot 2026.08, kernel
 6.18.7, qemu 11 TCG `-cpu max`, 4 vCPU, 2 GiB; serial log
-`build/smoke-console.log`, harness stdout `build/qemu-boot.log`). "guest" is
-the kernel/`/proc/uptime` clock, "host" is mapped onto qemu's process start
-(T0) with the offset of the first printk timestamp. One run, one boot:
+`build/smoke-console.log`). "guest" is the kernel/`/proc/uptime` clock,
+"host" is mapped onto qemu's process start (T0) with the offset of the first
+printk timestamp. The coordinated change is hard to time on a shared
+machine - this host runs a desktop, and TCG timings move by 2-4x with its
+load - so the table is one `tests/smoke.sh` run (all checks pass, warm
+`/data`):
 
 | id | milestone | guest s | host s |
 |---|---|---|---|
 | T0 | power on / qemu start | - | 0.000 |
-| T1 | kernel entry | 0.000 | 2.806 |
-| T2 | rootfs mounted, init running | 1.030 | 3.836 |
-| T3 | gadget bound to the UDC, rawlink running | 10.180 | 12.986 |
-| T4 | weston wayland-livi socket exists | 10.200 | 13.006 |
-| T5 | first FRAME sent | 9.210 | 12.016 |
-| T6 | LIVI UI on the weston output | 77.340 | 80.146 |
+| T1 | kernel entry | 0.000 | 3.996 |
+| T2 | rootfs mounted, init running | 1.001 | 4.996 |
+| T3 | gadget bound to the UDC, rawlink running | 5.140 | 9.136 |
+| T4 | weston wayland-livi socket exists | 5.710 | 9.706 |
+| T5 | first FRAME sent | 6.500 | 10.496 |
+| T6 | LIVI UI on the weston output | 39.880 | 43.876 |
 
-(The host column moved by a couple of seconds between runs: this host was
-busy during the final run, so qemu's first kernel line landed ~2.8 s after
-process start. Guest times are the stable comparison.)
+Before this work the documented run was T2 1.0 s, T3/T4 10.2 s and T6
+77.3 s with `multi-user.target` at 35.9 s; the appliance chain is now
+~4 s to weston and ~5 s to the gadget instead of ~10 s, and T6 lost the
+~30 s PulseAudio stall plus the outer Electron start.
 
-`systemd-analyze` in the same run: **multi-user.target reached after 35.9 s
-in userspace**, and the critical chain is dominated by udev and the
-persistent-state mount, not by the appliance units:
+`systemd-analyze` in the same run: **multi-user.target reached after 4.4 s
+in userspace** and `systemctl is-system-running` is `running` (the old
+image reached multi-user at 35.9 s only after the broken PulseAudio restart
+finished). The critical chain is the persistent mount and the marker unit
+that measures T3/T4:
 
 ```
-multi-user.target @35.902s
-└─livi-weston.service @6.440s +196ms
-  └─livi-persist.service @4.728s +1.634s
-    └─basic.target @4.704s
-      └─sockets.target @4.703s
-        └─dbus.socket @4.702s +477us
-          └─sysinit.target @4.680s
-            └─systemd-udev-trigger.service @2.066s +2.609s
+multi-user.target @4.442s
+└─livi-markers.service @3.569s +868ms
+  └─livi-weston.service @3.410s +112ms
+    └─livi-persist.service @3.003s +377ms
+      └─local-fs.target @2.994s
+        └─home-user.mount @3.932s
+          └─local-fs-pre.target @2.331s
+            └─systemd-tmpfiles-setup-dev.service @2.196s +131ms
 ```
 
-T2 to T5 is ~8 s; T5 to T6 is ~70 s and is **all Electron under TCG**:
-Chromium starts, fails to create a GLES3 context (see below), falls back to
-software rasterization and paints the first non-blank frame. That 124 s is
-the number the board's SD card and CPU replace, and the target there is the
-brief's 10 s (the phone's LIVI starts in a few seconds on real hardware).
+T2 to T5 is ~5.5 s; T5 to T6 is **all Electron under TCG**: Chromium
+starts, fails to create a GLES3 context (see below), falls back to software
+rasterization and paints the first non-blank frame. That is the number the
+board's SD card and CPU replace, and the target there is the brief's 10 s
+(the phone's LIVI starts in a few seconds on real hardware).
+
+### Boot-time work, and why each piece exists
+
+The boot path was changed only where it could be verified from the qemu
+image; every item was either removed entirely or kept as a toggle.
+
+* **One PulseAudio, one sink policy.** `pulseaudio.service` (from the
+  package) ran first, took `/run/pulse/pid`, and made `livi-pulse` fail to
+  create its own; `livi-pulse`'s retrying `livi-default-sink` ExecStartPost
+  then sat for ~30 s before systemd marked it failed, and `livi.service`
+  (`After=livi-pulse.service`) did not start until then. The stock unit is
+  now masked, and the sink policy is "the first sink PulseAudio loads is the
+  default" - no `pactl` call, no retry loop, no `module-always-sink`
+  (which would create `auto_null` first). This is the single biggest fix.
+* **Off the sysinit path.** `livi-persist`, `rawlink`, `livi-weston`,
+  `livi-pulse` and `livi` set `DefaultDependencies=no` with an explicit
+  `After=local-fs.target` and `Before=shutdown.target`, so they no longer
+  wait for `systemd-udev-trigger`/`sysinit.target`.
+* **No coldplug.** `systemd-udev-trigger` is masked. It re-emitted a uevent
+  for every device on the system (2-3 s here); every boot-path driver is
+  built in, devtmpfs has the nodes, and udevd still processes live events.
+  `livi-persist` mounts the data partition by fixed node rather than the
+  udev `by-label` symlink.
+* **A getty without a device unit.** The stock `serial-getty@.service`
+  `BindsTo=dev-%i.device`; without the coldplug that unit never appears and
+  the getty held `multi-user.target` for the 90 s device timeout.
+  `livi-console-getty.service` (qemu and debug images only) starts agetty
+  straight on the devtmpfs node; `systemd.getty_auto=0` plus masks of the
+  stock tty instances keep generated gettys out.
+* **Skip the outer Electron.** `livi-supervisor` starts
+  `resources/compositor/livi-compositor -s` with the exact command and
+  environment the outer launcher's `kn()` builds, saving one Electron cold
+  start (~12 s under qemu TCG).
+* **Persistent GStreamer registry.** `GST_REGISTRY` on `/data` with
+  `GST_REGISTRY_UPDATE=no`: the ~4 s plugin scan happens only on the first
+  boot after a flash, not on every boot. The Chromium profile on `/data`
+  already made later boots cheaper; this is the GStreamer half of that.
+* **Units that only boot work.** `cups.{service,path,socket}` (GTK printing
+  only), `systemd-network-generator.service` (no networkd) and
+  `systemd-udev-load-credentials.service` (no credentials) are masked.
+* **Board cmdline.** The release boot script adds
+  `clk_ignore_unused pd_ignore_unused` (skip the sunxi unused-clock/power-
+  domain teardown) and `systemd.getty_auto=0`, on top of the existing
+  `quiet loglevel=0 console=ttynull`.
 
 The harness records the slowest `initcall_debug` entries and
 `systemd-analyze blame`/`critical-chain`; the qemu kernel does not boot with
@@ -373,9 +467,11 @@ board's trimmed arm64 defconfig, so none of this is a board prediction.
 ### Initcalls and userspace blame
 
 `boottime.sh` prints the slowest `initcall_debug` entries (debug images) and
-`systemd-analyze blame` / `critical-chain`. qemu's minimal kernel does not
-boot with `initcall_debug`, so that column is board/debug-only. The
-critical chain from the first smoke run is recorded here once taken.
+`systemd-analyze blame` / `critical-chain`, and `qemu_boot.py`'s check block
+also records `systemctl is-system-running` and `systemctl list-jobs` so a
+boot that never reaches multi-user is visible (it caught the stock getty
+above). qemu's minimal kernel does not boot with `initcall_debug`, so that
+column is board/debug-only.
 
 ## What the qemu run proves, and what it does not
 
@@ -408,12 +504,14 @@ Two qemu-specific observations worth knowing:
   when the console log says `Kernel panic` and fails on anything else. It is
   a harness flake, not the appliance: the UDC/FunctionFS path itself is
   upstream kernel code exercised identically on the board.
-* `livi-pulse.service` restarts once early in boot: system-mode PulseAudio
-  drops to the `pulse` user before creating `/run/pulse/pid`, and the first
-  attempt loses that race. The restart lands on a working daemon and every
-  smoke check sees it active; the unit now pre-chowns the runtime dir and
-  the daemon's own state directory. It is cosmetic and does not delay LIVI
-  (LIVI waits for the socket, not the unit).
+* The first boot after a fresh `disk.img` (an empty `/data`) can leave LIVI
+  mapped but unpainted under TCG: Chromium's GPU init and first-paint
+  against a cold profile are slow enough that the emulated timing sometimes
+  wins the race. A second boot uses the persistent profile (and the
+  persistent GStreamer registry) and T6 lands every time measured. This is
+  the qemu clock, not a board result; the `qemu_boot.py` command line sets
+  `systemd.setenv=LIVI_INNER_ARGS=--disable-gpu` for the qemu device's
+  benefit (the board keeps the phone-validated GPU path).
 
 ## Hardware bring-up checklist (no board was available here)
 
@@ -483,15 +581,19 @@ information out of a first power-on.
 * The board image is untested on hardware in this session.
 * Board boot time is not yet measured; the qemu table says nothing about
   the 10 s target. The T5->T6 gap in qemu is Electron under TCG; on the
-  board, Electron's startup on the SD card is the thing to profile first
-  (the brief's pre-warm/readahead experiments).
+  board, Electron's startup on the SD card is the thing to profile first.
+  The shipped image starts with a fresh `/data`, so the pre-flash boot is
+  the cold-profile case; the readahead/pre-warm experiments are still the
+  next lever there.
 * `initcall_debug` parsing is only exercised by debug images; the qemu
   kernel does not use it.
 * Wi-Fi/BT and audio are blocked above; the helper's hostapd/BT paths are
   therefore unexercised outside unit-sim's fake gadget.
 * A pre-warmed V8 code cache / readahead of the Electron tree
   (`vmtouch`-style) is not implemented; the brief lists it as an
-  experiment to run once the board is on a bench.
+  experiment to run once the board is on a bench. The persistent Chromium
+  profile and GStreamer registry on `/data` already remove the repeated
+  per-boot caches after the first boot.
 * The `usb.img` in a clean checkout is a stand-in (MBR+FAT with the tracked
   stick base and `homebrew/apps/rawplay.sh`); run `make stick` at the repo
   root before flashing a car-bound card so the unit gets the real launcher,

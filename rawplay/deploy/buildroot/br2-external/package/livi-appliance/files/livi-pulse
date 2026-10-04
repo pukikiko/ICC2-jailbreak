@@ -15,12 +15,6 @@ RUNDIR=/run/pulse
 mkdir -p "$RUNDIR"
 SINKS="$RUNDIR/livi-sinks.pa"
 
-# a null sink is always present; the name is what livi-default-sink selects
-# when no DAC card exists
-printf '%s\n' \
-    'load-module module-null-sink sink_name=livi-null sink_properties=device.description=LIVI-Null' \
-    > "$SINKS"
-
 # find the simple-audio-card bond to the PCM5102A. the codec has no control
 # bus, so the card is named by the machine driver; match the names the board
 # DT patch uses, and accept any card that mentions pcm5102 or livi
@@ -33,13 +27,23 @@ for f in /proc/asound/cards; do
             if ($0 ~ /pcm5102/ || $0 ~ /livi/) { print $1; exit }
         }' "$f")
 done
+
+# the first sink PulseAudio loads becomes the default when no state is
+# restored, so write the DAC first when it exists and the null sink (always
+# present) otherwise. this is the whole default-sink policy: no pactl
+# ExecStartPost, which used to block the unit for up to 20 s waiting for the
+# socket and kept livi.service waiting behind it.
 if [ -n "$card" ]; then
     printf 'load-module module-alsa-sink sink_name=livi-dac device=hw:%s channels=2 sink_properties=device.description=LIVI-DAC\n' \
-        "$card" >> "$SINKS"
-    echo "livi-pulse: DAC card $card present, livi-dac sink added" >&2
+        "$card" > "$SINKS"
+    echo "livi-pulse: DAC card $card present, livi-dac is the default sink" >&2
 else
+    : > "$SINKS"
     echo "livi-pulse: no I2S DAC card, null sink only" >&2
 fi
+printf '%s\n' \
+    'load-module module-null-sink sink_name=livi-null sink_properties=device.description=LIVI-Null' \
+    >> "$SINKS"
 
 # --disallow-exit keeps the daemon up for the appliance lifetime;
 # -F loads the generated sink list after the stock system.pa

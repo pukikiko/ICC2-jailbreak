@@ -16,8 +16,11 @@
 # weston-touch and Electron (see README.md).
 [Unit]
 Description=Weston headless kiosk session 800x480 (LIVI stack)
-After=livi-persist.service
+DefaultDependencies=no
+After=local-fs.target livi-persist.service systemd-journald.socket
 Wants=livi-persist.service
+Conflicts=shutdown.target
+Before=shutdown.target
 StartLimitIntervalSec=0
 
 [Service]

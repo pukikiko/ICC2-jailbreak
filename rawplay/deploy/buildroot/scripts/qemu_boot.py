@@ -41,6 +41,10 @@ echo --helper--
 ps 2>/dev/null | grep -v grep | grep livi-helper
 echo --udc--
 cat /sys/class/udc/*/state 2>/dev/null
+echo --state--
+systemctl is-system-running 2>&1
+echo --jobs--
+systemctl --no-pager list-jobs 2>&1
 echo --analyze--
 systemd-analyze --no-pager 2>&1
 echo --blame--
@@ -133,7 +137,19 @@ def run_qemu(images, serial):
         "-kernel", os.path.join(images, "Image"),
         "-append",
         "root=/dev/vda1 ro rootwait rootfstype=squashfs console=ttyAMA0,115200 "
-        "systemd.journald.forward_to_console=1 random.trust_cpu=on printk.time=1",
+        "systemd.journald.forward_to_console=1 random.trust_cpu=on printk.time=1 "
+        # the image ships its own no-device-unit getty for ttyAMA0; the stock
+        # generator's serial-getty would wait on dev-ttyAMA0.device forever
+        # with the udev coldplug masked (see board/common/post-build.sh)
+        "systemd.getty_auto=0 "
+        # qemu only: there is no GPU, and under TCG Chromium's llvmpipe GL
+        # init times out and crash-loops the GPU process; --disable-gpu takes
+        # the software path. the board keeps the phone-validated GPU path
+        # (see livi-supervisor's LIVI_INNER_ARGS).
+        "systemd.setenv=LIVI_INNER_ARGS=--disable-gpu "
+        # same escape hatch run-qemu.sh has, for measuring one image with
+        # different kernel options (e.g. systemd.setenv=)
+        + os.environ.get("LIVI_QEMU_APPEND", ""),
         "-drive", "if=none,id=disk,format=raw,file=%s" % disk,
         "-device", "virtio-blk-device,drive=disk",
         "-device", "virtio-rng-pci",
@@ -214,6 +230,10 @@ def evaluate(block, milestones):
     checks["unit livi up"] = active.get("livi") in ("active", "activating")
     checks["livi-helper running"] = bool(sections.get("helper"))
     checks["udc configured"] = any("configured" in l for l in sections.get("udc", []))
+    # a masked/stock getty waiting on a device unit used to hold multi-user
+    # for 90 s while every other check passed; systemd must be "running".
+    checks["systemd finished booting"] = any(
+        l.strip() == "running" for l in sections.get("state", []))
     logs = " ".join(sections.get("log", [])) + " " + " ".join(sections.get("unitsim", []))
     checks["stick rawplay.sh present"] = "homebrew/apps/rawplay.sh" in logs
     checks["no missing milestones"] = "missing" not in logs
@@ -316,7 +336,9 @@ def print_table(result):
     if not result.get("block"):
         return
     sections = split_sections(result["block"])
-    for key, title in (("analyze", "systemd-analyze"),
+    for key, title in (("state", "systemd state"),
+                       ("jobs", "pending jobs (boot still finishing)"),
+                       ("analyze", "systemd-analyze"),
                        ("critical", "systemd-analyze critical-chain"),
                        ("blame", "slowest userspace units (blame)")):
         if not sections.get(key):

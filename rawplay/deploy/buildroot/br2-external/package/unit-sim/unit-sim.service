@@ -3,8 +3,11 @@
 # milestone file. release board images do not build this package.
 [Unit]
 Description=unit-sim (car-side rawplay stand-in for qemu)
-After=rawlink.service
+DefaultDependencies=no
+After=rawlink.service systemd-journald.socket
 Wants=rawlink.service
+Conflicts=shutdown.target
+Before=shutdown.target
 StartLimitIntervalSec=0
 
 [Service]

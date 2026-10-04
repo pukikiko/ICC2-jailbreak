@@ -27,8 +27,6 @@ define LIVI_APPLIANCE_INSTALL_TARGET_CMDS
         $(TARGET_DIR)/opt/livi/livi-inner
     $(INSTALL) -D -m 0755 $(LIVI_APPLIANCE_PKGDIR)/files/livi-pulse \
         $(TARGET_DIR)/usr/lib/livi/livi-pulse
-    $(INSTALL) -D -m 0755 $(LIVI_APPLIANCE_PKGDIR)/files/livi-default-sink \
-        $(TARGET_DIR)/usr/lib/livi/livi-default-sink
     $(INSTALL) -D -m 0755 $(LIVI_APPLIANCE_PKGDIR)/files/sudo-shim \
         $(TARGET_DIR)/usr/bin/sudo
     $(INSTALL) -D -m 0755 $(LIVI_APPLIANCE_PKGDIR)/files/nmcli-shim \

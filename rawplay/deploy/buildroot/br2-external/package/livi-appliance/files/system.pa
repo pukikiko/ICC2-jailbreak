@@ -8,7 +8,11 @@
 .fail
 
 load-module module-native-protocol-unix auth-anonymous=1 socket=/run/pulse/native
-load-module module-always-sink
+# module-always-sink is deliberately absent: it would create auto_null before
+# livi-pulse's -F file loads, and that first sink would become the default.
+# livi-pulse always loads exactly one concrete null sink (and the DAC when the
+# board has one), so the first sink it loads is the default and the sink policy
+# needs no pactl call at boot.
 load-module module-device-restore
 load-module module-stream-restore
 load-module module-card-restore

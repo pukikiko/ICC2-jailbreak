@@ -3,9 +3,11 @@
 # otherwise, so LIVI's pactl calls always find a @DEFAULT_SINK@.
 [Unit]
 Description=PulseAudio sound server (system mode, LIVI sink policy)
-After=livi-persist.service
-Before=livi.service
+DefaultDependencies=no
+After=local-fs.target livi-persist.service systemd-journald.socket
+Before=livi.service shutdown.target
 Wants=livi-persist.service
+Conflicts=shutdown.target
 StartLimitIntervalSec=0
 
 [Service]
@@ -20,10 +22,6 @@ RuntimeDirectoryMode=0775
 # directory can already exist from an earlier unit); make it explicit
 ExecStartPre=+/bin/chown -R pulse:pulse /run/pulse /var/lib/pulse
 ExecStart=/usr/lib/livi/livi-pulse
-# the first pactl calls race the socket, so this retries. the daemon's
-# system.pa allows anonymous local clients, so root can set the sink without
-# pulling in util-linux's runuser.
-ExecStartPost=+/usr/lib/livi/livi-default-sink
 Restart=always
 RestartSec=1
 RuntimeDirectory=pulse
