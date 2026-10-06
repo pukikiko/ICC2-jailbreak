@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # build.sh - build the whole ICC2-jailbreak stack in one shot:
 #
-#   - all unit programs (out/): rawplay, mediaplayer, hbmenu, launcher, hmi-overlay.so,
-#     iccbuttons, buswatch, syncsploit, the livi-usb compile check
+#   - all unit programs (out/): rawplay, mediaplayer, terminal, hbmenu, launcher,
+#     hmi-overlay.so, iccbuttons, buswatch, syncsploit, the livi-usb compile check
 #   - the host tools (rawplay/out/): rawlink, test_gadget, livi-cmd
 #   - a complete homebrew stick tree under usb/homebrew/ and usb.img
 #

@@ -75,6 +75,7 @@ populated yet the build fetches and builds it (network needed); to do that step 
     iccbuttons/   the front panel/steering wheel button mapper
     buswatch/     the live uart3 + standby-pin scope, and the signal table baker
     mediaplayer/  the ffmpeg file browser/player
+    terminal/     the framebuffer terminal + on-screen keyboard (a shell on pipes)
     rawplay/      the raw rgb565 video/touch player: unit side, host side, tests, deploy
     syncsploit/   the navi-update installer (python tools, the ui, a ready-made stick tree)
     stick/        the tracked stick base: boot.sh, stickwatch.sh, apps.txt, buttons.txt,
@@ -89,6 +90,7 @@ populated yet the build fetches and builds it (network needed); to do that step 
 |---|---|---|
 | `out/rawplay` | raw rgb565 video + touch player | `apps/rawplay` |
 | `out/mediaplayer` | ffmpeg file browser/player | `apps/mediaplayer` |
+| `out/terminal` | framebuffer terminal + on-screen keyboard | `apps/terminal` |
 | `out/homebrew` | the homebrew menu | `main` |
 | `out/launcher` | touch connector with the two footer buttons | `launcher` |
 | `out/hmi-overlay.so` | theme-asset overlay shim | `hmi-overlay.so` |

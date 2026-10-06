@@ -56,7 +56,7 @@ output: the tracked base in `stick/` plus the built programs, copied and baked b
     usb/homebrew/main        the homebrew menu (hbmenu/homebrew.c)
     usb/homebrew/menu.raw    the menu's background art (hbmenu/mkmenuassets.py bakes it)
     usb/homebrew/apps.txt    one "label|command" a line
-    usb/homebrew/apps/       the built apps: doom, fbdemo, rawplay, buswatch, iccbuttons, mediaplayer
+    usb/homebrew/apps/       the built apps: doom, fbdemo, rawplay, buswatch, iccbuttons, mediaplayer, terminal
                              and the scripts rawplay.sh, mediaplayer.sh, usbhs.sh
 
 `apps.txt` is plain text, add a line to add an app. the menu runs the command with the shell

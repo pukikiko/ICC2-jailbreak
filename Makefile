@@ -11,7 +11,7 @@
 include config.mk
 
 UNIT    = out/rawplay out/iccbuttons out/buswatch out/syncsploit out/homebrew out/launcher \
-          out/hmi-overlay.so out/mediaplayer
+          out/hmi-overlay.so out/mediaplayer out/terminal
 STICK_SRC = stick
 STICK   = usb/homebrew
 
@@ -75,6 +75,12 @@ out/launcher: launcher/launcher.c $(SDKBASE) $(OURCO) $(SDK)/qnx.h $(COMMON)/hmi
               $(COMMON)/jlog.h $(LIBC)
 	@mkdir -p out
 	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $@ $(SDKBASE) $(OURCO) launcher/launcher.c $(LIBC)
+
+# a shell on the panel: framebuffer terminal + on-screen keyboard. no pty on the unit, so
+# it spawns /bin/sh -i on pipes and does the line editing itself (see terminal/terminal.c)
+out/terminal: terminal/terminal.c $(SDKBASE) $(SDK)/qnx.h $(LIBC)
+	@mkdir -p out
+	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $@ $(SDKBASE) terminal/terminal.c $(LIBC)
 
 # the overlay shim is a shared object, so it gets its own flags, not the executable ones
 out/hmi-overlay.so: hmi-overlay/hmi-overlay.c $(COMMON)/jlog.c $(SDK)/qnx.h $(COMMON)/jlog.h $(LIBC)
@@ -146,6 +152,7 @@ stick: $(UNIT) synctool
 	cp out/mediaplayer $(STICK)/apps/mediaplayer
 	cp out/buswatch $(STICK)/apps/buswatch
 	cp out/iccbuttons $(STICK)/apps/iccbuttons
+	cp out/terminal $(STICK)/apps/terminal
 	cp out/homebrew $(STICK)/main
 	cp out/launcher $(STICK)/launcher
 	cp out/hmi-overlay.so $(STICK)/hmi-overlay.so
