@@ -6,7 +6,7 @@
 
 LIVI_APPLIANCE_LICENSE = MIT
 
-LIVI_APPLIANCE_DEPENDENCIES = livi rawlink weston-touch weston \
+LIVI_APPLIANCE_DEPENDENCIES = livi-lite rawlink weston-touch weston \
     host-mtools host-dosfstools
 
 # the repo root, for the homebrew stick image: a clean checkout has no
@@ -23,8 +23,6 @@ define LIVI_APPLIANCE_INSTALL_TARGET_CMDS
         $(TARGET_DIR)/usr/lib/livi/livi-persist
     $(INSTALL) -D -m 0755 $(LIVI_APPLIANCE_PKGDIR)/files/livi-markers \
         $(TARGET_DIR)/usr/lib/livi/livi-markers
-    $(INSTALL) -D -m 0755 $(LIVI_APPLIANCE_PKGDIR)/files/livi-inner \
-        $(TARGET_DIR)/opt/livi/livi-inner
     $(INSTALL) -D -m 0755 $(LIVI_APPLIANCE_PKGDIR)/files/livi-pulse \
         $(TARGET_DIR)/usr/lib/livi/livi-pulse
     $(INSTALL) -D -m 0755 $(LIVI_APPLIANCE_PKGDIR)/files/sudo-shim \

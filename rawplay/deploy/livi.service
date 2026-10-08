@@ -1,43 +1,38 @@
-# LIVI itself (the CarPlay/Android Auto head unit UI) on the Weston headless kiosk session.
-# the release AppImage is a glibc/electron aarch64 build and postmarketos is musl, so it is
-# started through /opt/livi/livi-chroot, which runs it in the ubuntu base rootfs with the
-# host's wayland runtime dir bound in. stopping is staged through that supervisor (see
-# KillMode= below), because the app's detached nested compositor and the app itself must
-# not be killed at the same instant.
+# LIVI-Lite on the Weston headless kiosk session. LIVI-Lite (pukikiko/LIVI-Lite)
+# is the Electron-free fork of LIVI: the same Rust core, but a Slint UI and a
+# native nested compositor built against the phone's own musl GStreamer and
+# Wayland. There is no AppImage, no Electron/Chromium and no glibc chroot, so
+# this unit runs a plain postmarketOS binary that is up in milliseconds.
+#
+# livi-core starts the nested compositor, the Slint UI, the GStreamer video
+# host and the Rust helper itself and stays in the foreground; its SIGTERM
+# handler stops the children in order while wayland is still up. KillMode=mixed
+# keeps systemd from SIGTERMing the children first; TimeoutStopSec is the
+# backstop for a wedged decoder.
 [Unit]
-Description=LIVI head unit UI on the Weston kiosk display
+Description=LIVI-Lite head unit UI on the Weston kiosk display
 After=livi-weston.service
 Wants=livi-weston.service
 StartLimitIntervalSec=0
 
 [Service]
 Type=simple
+User=user
 Environment=WAYLAND_DISPLAY=wayland-livi
 Environment=XDG_RUNTIME_DIR=/run/livi
 Environment=HOME=/home/user
-# audio goes to the host's pipewire; livi-chroot binds its pulse socket and cookie here.
-# the bundled gstreamer only ships pulsesink and chromium's audio is pulse too.
-Environment=PULSE_SERVER=unix:/run/pulse/native
-Environment=PULSE_COOKIE=/run/pulse-cookie/cookie
 Environment=LIVI_KIOSK=1
-Environment=APPIMAGE_EXTRACT_AND_RUN=1
-# waylandsink hands the compositor the caps stride while the frame memory is
-# row-padded; the shim corrects it (see livistride.c)
-Environment=LIVI_GST_PRELOAD=/opt/livi/livi-stride-fix.so
+# the installed layout: resources/{driver,gst-host,compositor} and ../livi-ui
+Environment=LIVI_RESOURCES=/opt/livi/resources
+# audio goes to the host's pipewire through its pulse socket; install.sh
+# rewrites the uid. no chroot bind mounts are involved any more.
+Environment=PULSE_SERVER=unix:/run/user/10000/pulse/native
 EnvironmentFile=-/etc/default/livi
-ExecStart=/opt/livi/livi-chroot --user-data-dir=/home/user/.config/LIVI-vnc --no-sandbox
+ExecStart=/opt/livi/livi-core
 Restart=always
 RestartSec=2
-# the detached nested compositor and the electron app both live in this cgroup. the
-# default control-group stop SIGTERMs them at the same instant: the compositor dies first
-# and the app's own quit path (before-quit tears down wireless sessions; it can also wedge
-# on the now-dead wayland connection) is left racing it, so a stop could sit in
-# stop-sigterm for the default 90 s and make `systemctl restart livi` look hung.
-# mixed TERMs only livi-chroot: it forwards the signal to the app, waits up to
-# LIVI_STOP_GRACE (10 s) for it to quit, then closes the compositor. TimeoutStopSec is
-# the backstop for an app the supervisor cannot stop.
 KillMode=mixed
-TimeoutStopSec=15
+TimeoutStopSec=8
 
 [Install]
 WantedBy=multi-user.target

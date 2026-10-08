@@ -1,11 +1,10 @@
-# rawlink + weston + LIVI as a Buildroot appliance (Orange Pi Zero 2W)
+# rawlink + weston + LIVI-Lite as a Buildroot appliance (Orange Pi Zero 2W)
 
 This is the second rawlink deployment: a purpose-built Buildroot image for an
 **Orange Pi Zero 2W** (Allwinner H618, aarch64) with a **qemu aarch64 `virt`**
 board that proves the software stack on any x86 host. It reuses the phone
 deployment's units and the hard-won LIVI/rawlink fixes
-(`rawplay/deploy/README.md`, `rawplay/README.md`); the phone deployment is
-untouched.
+(`rawplay/deploy/README.md`, `rawplay/README.md`).
 
 ```
  car head unit (QNX, i.MX31, USB host)  <--- USB high speed --->  Orange Pi Zero 2W
@@ -13,32 +12,39 @@ untouched.
    /fs/usb0 = homebrew stick                                        functionfs vendor iface + mass storage (usb.img)
                                                                     weston_capture_v1 sender
                                                                   weston headless 800x480 kiosk pixman
-                                                                  LIVI 8.3.0 (Electron)
+                                                                  LIVI-Lite (Rust + Slint, from source)
 ```
 
+The image uses **LIVI-Lite** (pukikiko/LIVI-Lite), the Electron-free fork of
+LIVI: the upstream Rust core, a Slint UI and the Rust nested compositor,
+cross-built from the `LIVI-Lite` checkout next to this repo by
+`package/livi-lite` with Buildroot's prebuilt Rust and the image's own
+GStreamer/Wayland. There is no AppImage, no Electron/Chromium and no
+supervisor script: `livi.service` runs `/opt/livi/livi-core`, which starts the
+compositor, UI, GStreamer host and helper itself.
+
 Divergences from the phone deployment, by design: the H618 is glibc (no
-Ubuntu chroot; LIVI runs directly), there is no charger state machine or
+Ubuntu chroot), there is no charger state machine or
 `livi-link-monitor`, the rootfs is a read-only squashfs with a small ext4
 data partition, and all boot-path drivers are built in.
 
 > Status: the **qemu image builds, boots, reaches T6 and passes
-> `tests/smoke.sh`** (measured table below). The **Orange Pi defconfig and
-> board files are in place and validated** (the defconfig parses cleanly and
-> shares every package with the tested qemu image), but a full board build
-> was **not** run in this session and the image has **not** been run on
-> hardware (none was available); everything below that concerns the board is
-> source-verified and marked as such. Two blocking hardware facts (Wi-Fi/BT, audio) are in "Needs a
-> decision" and are the reason the board image cannot yet do a wireless
-> session or sound.
+> `tests/smoke.sh`** with LIVI-Lite (measured table below). The **Orange Pi
+> defconfig and board files are in place and validated** (the defconfig parses
+> cleanly and shares every package with the tested qemu image), but a full
+> board build was **not** run in this session and the image has **not** been
+> run on hardware (none was available); everything below that concerns the
+> board is source-verified and marked as such. Two blocking hardware facts
+> (Wi-Fi/BT, audio) are in "Needs a decision" and are the reason the board
+> image cannot yet do a wireless session or sound.
 >
-> The boot path has since been trimmed (see "Boot-time work" below): the
-> stock PulseAudio unit that stalled LIVI for ~30 s is masked, the appliance
-> units no longer wait on the udev coldplug, the getty comes from a unit with
-> no device dependency, the outer Electron launcher is skipped, the
-> GStreamer registry is persisted on `/data`, and the board cmdline skips the
-> unused-clock teardown. qemu T6 is dominated by Electron under TCG (host
-> load moves it a lot); the numbers in the table are the current image on
-> this machine, not a hardware prediction.
+> The boot path is trimmed (see "Boot-time work" below): the stock PulseAudio
+> unit that stalled LIVI for ~30 s is masked, the appliance units no longer
+> wait on the udev coldplug, the getty comes from a unit with no device
+> dependency, the GStreamer registry is persisted on `/data`, and the board
+> cmdline skips the unused-clock teardown. With LIVI-Lite the T5->T6 gap is no
+> longer an Electron cold start (it was ~30 s under qemu TCG); the numbers in
+> the table are relative qemu measurements, not a hardware prediction.
 
 ## Layout
 
@@ -53,7 +59,7 @@ rawplay/deploy/buildroot/
     board/qemu_aarch64_virt/ linux.fragment, post-image.sh
     package/rawlink/       builds ../../../rawplay/out/rawlink (local site method)
     package/weston-touch/  builds weston-touch.so against the image's libweston
-    package/livi/          pins + extracts LIVI 8.3.0, livistride shim, supervisor
+    package/livi-lite/     cross-builds pukikiko/LIVI-Lite from source (local site)
     package/livi-appliance/ units, shims, persist/pulse/seed scripts
     package/unit-sim/      qemu's car-side rawplay stand-in
   scripts/                 build.sh, run-qemu.sh, flash.sh, boottime.sh,
@@ -75,21 +81,19 @@ rawplay/deploy/buildroot/
     scripts/flash.sh build/orangepi_zero2w/images/sdcard.img /dev/sdX
 
 Buildroot is fetched and pinned by `build.sh` (**2026.08**, see "Pin" below)
-and the external tree is applied with `BR2_EXTERNAL`; rawlink and
-weston-touch are built from the working tree (`local` site), so a `git pull`
-plus a rebuild is an update. The LIVI AppImage is fetched, sha256-checked and
-extracted at build time; nothing mounts an AppImage at boot.
+and the external tree is applied with `BR2_EXTERNAL`; rawlink, weston-touch
+and LIVI-Lite are built from the working trees (`local` site), so a `git pull`
+plus a rebuild is an update. LIVI-Lite's crate downloads are pinned by each
+workspace's `Cargo.lock` and cached in `$(DL_DIR)/br-cargo-home`; the Rust
+toolchain itself is Buildroot's prebuilt `host-rust-bin`.
 
-Build notes: the image needs Python's GObject bindings for LIVI's wireless
-helper, and Buildroot's `python-gobject` pulls in `gobject-introspection`,
-which builds a host `qemu-user` and host introspection tools. The Mesa
-llvmpipe driver pulls in LLVM (host and target), which dominates a clean
-build's time; a ccache or a prebuilt toolchain is worth it on repeat builds. The external
-tree carries one host-tool patch
-(`br2-external/patches/gobject-introspection/`) because `g-ir-scanner` merges
-`pkg-config` stderr into its output and on a build host whose `/bin/sh` is
-bash+readline the loader's ncurses warning becomes bogus linker arguments;
-the patch drops that stderr. This is a build-host fix, not a target change.
+Build notes: the Mesa llvmpipe driver pulls in LLVM (host and target), which
+dominates a clean build's time; a ccache or a prebuilt toolchain is worth it
+on repeat builds. With LIVI-Lite the image no longer needs Python or
+`gobject-introspection` at all (the helper is Rust), so the old
+`gobject-introspection` host-tool patch in `br2-external/patches/` is no
+longer exercised; it is kept because the external tree still supports the
+older Electron package set.
 
 ## Pin: Buildroot 2026.08, kernel 6.12 LTS / 6.18 LTS, U-Boot 2024.10
 
@@ -98,7 +102,7 @@ the patch drops that stderr. This is a build-host fix, not a target change.
   seat at all** (`libweston/backend-headless/headless.c` has the `fake_seat`
   struct but no `wesyon_seat_init`; `--fake-seat` first appears in 15.0.0).
   Without a seat, `weston-touch.so` can add no touch device, panel keys can
-  not be injected, and Electron has no `wl_seat`. 2026.08 ships weston
+  not be injected, and the UI has no `wl_seat`. 2026.08 ships weston
   15.0.1, which has `--fake-seat` and `weston_capture_v1`; `weston-touch.c`
   is built with `-DLIVI_WESTON_MAJOR=15` and uses its pre-16 API path
   (`weston_touch_create_touch_device()` with 4 arguments, confirmed in
@@ -123,7 +127,7 @@ systemd 258.7, weston 15.0.1, PulseAudio 17.0, hostapd 2.11, BlueZ 5.79.
 ## Verified hardware and software facts
 
 These were checked against the mainline kernel/device trees, U-Boot, the
-extracted LIVI 8.3.0 AppImage and upstream Buildroot 2026.08. Where something
+LIVI-Lite checkout and upstream Buildroot 2026.08. Where something
 could not be verified it says so.
 
 ### USB: USB0 is the USB-C port, on a MUSB controller
@@ -209,55 +213,49 @@ could not be verified it says so.
 
 Orange Pi lists **1 GB / 1.5 GB / 2 GB / 4 GB** LPDDR4 variants (product
 page; the name suffix is sometimes just "Zero 2W"). The image assumes the
-2 GB variant (Electron needs several hundred MB) and qemu is given 2 GB. No
+2 GB variant (the native stack is small; 1 GB works, 2 GB is headroom) and qemu is given 2 GB. No
 board measurement was possible. Kernel log's `Memory:` line and `free -m`
 are the check on real hardware.
 
-### LIVI 8.3.0
+### LIVI-Lite
 
-* Release asset: `LIVI-8.3.0-linux-arm64.AppImage`,
-  323 365 135 bytes, **sha256
-  266b6f0c31e89326c305f4ff678fd7032995eece4666bacef5c137ce881fcb5a**
-  (release API digest, and re-computed from the downloaded file). Pinned in
-  `package/livi/livi.hash`; 9.x is deliberately not used (dmabufs into the
-  pixman nested compositor, black panel).
-* Appended squashfs offset is **936456 (0xE4A08)**, the end of the ELF
-  section header table (`e_shoff + e_shnum * e_shentsize`); found with a
-  byte scan for `hsqs` as well. `extract-appimage.py` computes both, then
-  uses `unsquashfs -o`, so the x86 build host never executes the aarch64
-  runtime and nothing FUSE-mounts at boot.
-* The extracted tree is 832 MB; `livi`'s DT_NEEDED list is the source for
-  the image's library set: libasound, libatk-1.0, libatk-bridge-2.0,
-  libatspi, libcairo, libcups, libdbus-1, libexpat, libgbm, libgio/glib/
-  gobject, libgtk-3, libnspr4/libnss3/libnssutil3/libsmime3, libpango,
-  libudev, libX11, libxcb, libXcomposite, libXdamage, libXext, libXfixes,
-  libxkbcommon, libXrandr. The image selects all of them (plus Mesa
-  softpipe EGL/GLES for `livi-compositor`, whose own bundled libs are inside
-  the AppImage).
-* `AppRun` sets `PATH=$APPDIR:$APPDIR/usr/sbin:...`,
-  `XDG_DATA_DIRS=$APPDIR/usr/share:...`, `LD_LIBRARY_PATH=$APPDIR/usr/lib`
-  and `GSETTINGS_SCHEMA_DIR=$APPDIR/usr/share/glib-2.0/schemas`, then execs
-  `$APPDIR/livi`. `livi-supervisor` replicates exactly that and execs the
-  binary with `--no-sandbox` (the phone unit's args). The detached
-  `resources/compositor/bin/livi-compositor -s` and the staged stop are the
-  phone's `livi-chroot` logic minus chroot/mounts, because the AppImage
-  launcher exits 0 by design.
-* The wireless helper (`resources/driver/helper/livi-helper.py` and
-  `shared/wifi_ap.py`) was read in the exact pinned tree: the AP path is
-  `sudo iw`/`ip`/`hostapd`/`dnsmasq`/`hostapd_cli`/`rfkill`/`pkill`, with
-  every call `check=False` or in `try/except`; `nmcli` is only used
-  opportunistically (saved profiles, the imager hotspot) and a stub that
-  exits 0 is enough; `systemctl` exists for real. Hence the tiny
-  `/usr/bin/sudo` shim (drops option words and execs the rest; real sudo is
-  not shipped) and the `/usr/bin/nmcli` stub, and no NetworkManager and no
-  wpa_supplicant anywhere. Python 3.14 gets
-  `livi_asyncio_compat.py` + `.pth` (installed only when the target Python
-  is >= 3.14).
-* `pactl` is required by LIVI's `SystemVolume` (grep of `app.asar`), so the
-  image runs PulseAudio 17 as a system daemon with a default sink always set.
-* `livi-config.json` seeds both `$HOME/.config/LIVI/config.json` (inner app)
-  and `$HOME/.config/LIVI-vnc/config.json` (`--user-data-dir`); both carry
-  800x480 or the kiosk fullscreen check rejects the window.
+* Source: the `pukikiko/LIVI-Lite` checkout next to this repo (override
+  `LIVI_LITE_SRC=`), built by `package/livi-lite` with Buildroot's prebuilt
+  Rust (`host-rust-bin`, Rust 1.97.1) for `aarch64-unknown-linux-gnu`. The
+  build is one shared script (`rawplay/deploy/livi-lite-build.sh`) that
+  compiles four workspaces - `livi-gst-host`, `livi-compositor`, `livi-core`
+  + `livi-helperd`, `livi-ui` - with `--locked` and stages the installed
+  layout `Resources::installed()` expects:
+  `/opt/livi/livi-core`, `/opt/livi/livi-ui`,
+  `/opt/livi/resources/{driver/livi-helperd,gst-host/livi-gst-host,compositor/livi-compositor}`
+  plus the root templates from `assets/linux`.
+* Runtime dependencies are the image's own libraries, not a bundle:
+  GStreamer 1.x (system), wayland/libxkbcommon, libudev (systemd), EGL
+  (Mesa llvmpipe on qemu, the board's GPU/llvmpipe on hardware), and the
+  GStreamer plugins its pipelines use - `gst1-plugins-bad` (waylandsink,
+  h264/h265 parse, faad), `gst1-plugins-good` (pulsesink, volume, aacparse,
+  RTP), `gst1-plugins-base` (convert/resample/opus) and `gst1-libav`
+  (`avdec_h264`/`avdec_h265`, the software fallback).
+* There is no AppImage, no Electron/Chromium, no python helper and no
+  supervisor script. `livi-core` starts the nested compositor, the Slint UI,
+  the GStreamer video host and the helper itself and stays in the foreground;
+  its SIGTERM handler stops them in order. That removes the two boot costs
+  the Electron build paid (the AppImage/outer-launcher cold start and
+  Chromium's own startup) and most of the 832 MB prebuilt tree.
+* The udev rule livi-core installs at first run (`99-LIVI.rules` + the touch
+  filter) is pre-installed at image build time: the rootfs is a read-only
+  squashfs, so the runtime install would otherwise fail on every boot and
+  livi-core would restart itself once trying to pick it up.
+* The wireless helper is `livi-helperd` (Rust) running as root through the
+  tiny `/usr/bin/sudo` shim: the AP path is still
+  `iw`/`ip`/`hostapd`/`dnsmasq`/`rfkill`/`pkill`; `nmcli` is the
+  opportunistic stub; D-Bus is the system bus. `pactl` is required by
+  `SystemVolume`, so the image runs PulseAudio 17 as a system daemon with a
+  default sink always set.
+* `livi-config.json` seeds `$HOME/.config/LIVI/config.json` (and the old
+  `LIVI-vnc` dir, so an upgrade from an Electron install keeps its
+  settings); it carries 800x480 or the kiosk fullscreen check rejects the
+  window.
 
 ## Image design and why
 
@@ -273,14 +271,10 @@ are the check on real hardware.
   udev about. `livi-persist` finds the data partition by its fixed `/dev`
   node (`/dev/vda2`, `/dev/mmcblk0p3`) so it needs no udev-created
   `/dev/disk/by-label` symlink.
-* **Session start**: `livi-supervisor` starts
-  `resources/compositor/livi-compositor -s` directly instead of exec'ing the
-  outer Electron launcher. The shipped launcher's only job (`kn()` in
-  `out/main/main.js`) is to write the config - which the inner app repeats -
-  and spawn that same compositor with the same command string and
-  environment, so the direct start removes one full Electron cold start
-  (qemu's TCG clock charges ~12 s for it) with no change to what runs.
-  `LIVI_USE_OUTER_LAUNCHER=1` restores the shipped path.
+* **Session start**: `livi.service` runs `/opt/livi/livi-core`, which starts
+  `resources/compositor/livi-compositor` itself (the fork's design: one owner
+  for the compositor, UI and helper). There is no outer launcher and no
+  supervisor: the unit supervises the whole tree through one process.
 * **udev and the console**: `systemd-udev-trigger` is masked; the kernel has
   every boot-path driver built in, devtmpfs carries the nodes, and udevd
   still runs for live events (the car plugging in, a card inserted later).
@@ -293,8 +287,7 @@ are the check on real hardware.
   `/data/livi-config/gst-registry.aarch64.bin` (`GST_REGISTRY_UPDATE=no`).
   The default cache under `$HOME` is tmpfs and thrown away each boot, so
   GStreamer rescanned every plugin on every start; with the persistent path
-  only the first boot after a flash scans. The shipped `config.json` still
-  seeds the profile on `/data`, so Chromium's own caches persist too.
+  only the first boot after a flash scans.
 * **Rootfs**: squashfs, zstd, 128 KiB blocks, mounted `ro`; tmpfs `/run`,
   `/tmp`, `/var` (Buildroot's systemd `/var` factory) and `/home/user`; a
   128 MB ext4 partition labelled `livi-data` mounted `noatime,commit=1`
@@ -331,21 +324,14 @@ are the check on real hardware.
   then held `livi.service` for ~30 s. No PipeWire: more processes for no
   benefit on an appliance with no session.
 * **LIVI start-up**: the `--wayland` capture needs no ffmpeg; the release
-  image has no ffmpeg. `--disable-dev-shm-usage`, `--ozone-platform` and
-  GPU flags were left at the phone's validated environment: 8.3.0's inner
-  app already uses `ozone-platform=wayland` (grep of `app.asar`) and the
-  pixman nested compositor is the validated renderer. `--disable-gpu` was
-  not applied because the phone's working configuration does not use it,
-  and the brief says only keep experiments that measure better. Mesa is
-  built with **llvmpipe** (the phone chroot's software GL) as well as
-  softpipe, because Chromium's GPU process rejects softpipe's GLES3 EGL
-  configuration and LIVI's app then exits/restarts under qemu; llvmpipe is
-  the configuration that is actually validated on the phone. The unit
-  also sets `APPIMAGE=/opt/livi/livi-inner`: LIVI's outer launcher builds
-  the inner Electron command from `$APPIMAGE`, and on the phone that is the
-  AppImage runtime whose AppRun adds `--no-sandbox`. With the extracted tree
-  the path would be the raw binary, which fatals as root; the wrapper is the
-  same shim AppRun would have been, and it adds the flag.
+  image has no ffmpeg. `livi.service` sets `LIVI_RESOURCES`, `LIVI_KIOSK`,
+  `WAYLAND_DISPLAY=wayland-livi`, `PULSE_SERVER` and the persistent
+  `GST_REGISTRY`; everything else is the defaults. Mesa is built with
+  **llvmpipe** (plus softpipe as the fallback): the Rust compositor renders
+  through system EGL and llvmpipe is the software configuration that works
+  both here and on the phone (Adreno GL on hardware). There is no Electron
+  flag set left to carry: no `--no-sandbox`, no `--disable-gpu`, no
+  `ozone-platform`, no `APPIMAGE` shim.
 * **qemu board**: same rootfs, same units, same package set; only the
   board parts differ. `dummy_hcd` gives a real configfs/FunctionFS UDC and
   a virtual host controller in the same guest (verified: it supports high
@@ -353,7 +339,7 @@ are the check on real hardware.
   car. `mac80211_hwsim` provides wlan0/wlan1 for hostapd and the helper;
   `hci_vhci` exists for BlueZ but qemu cannot model a phone's Bluetooth
   controller (BlueZ comes up without a default controller). A `virtio-rng`
-  device avoids the entropy stall Chromium otherwise risks.
+  device avoids an entropy stall in the helper's crypto at first start.
 
 ## Boot measurements
 
@@ -364,54 +350,62 @@ UDC is virtual, the wire free, and the "hardware" is a TCG-emulated
 Cortex-A76). Real board numbers require the debug image and hardware.
 
 T0 power, T1 kernel entry, T2 init, T3 gadget bound+rawlink, T4 weston
-socket, T5 first frame, T6 non-blank LIVI UI.
+socket, T5 first frame, T6 non-blank LIVI UI. **T6u** is the same endpoint
+("LIVI is on the panel") read from the guest's own console instead of the
+rawplay wire: Electron logs `[kiosk] enter:` when its window is presented,
+LIVI-Lite logs `[core] UI started` when the Slint UI starts. `scripts/
+boottime.sh` prints it when present.
 
-Measured by `tests/smoke.sh` on this machine (Buildroot 2026.08, kernel
-6.18.7, qemu 11 TCG `-cpu max`, 4 vCPU, 2 GiB; serial log
-`build/smoke-console.log`). "guest" is the kernel/`/proc/uptime` clock,
-"host" is mapped onto qemu's process start (T0) with the offset of the first
-printk timestamp. The coordinated change is hard to time on a shared
-machine - this host runs a desktop, and TCG timings move by 2-4x with its
-load - so the table is one `tests/smoke.sh` run (all checks pass, warm
-`/data`):
+The T5/T6 wire is a test instrument: `unit-sim` on `dummy_hcd` inside qemu.
+On some qemu/kernel hosts that virtual USB host drops or corrupts the first
+MODE message (the guest console shows `FRAME before MODE, ignored`), and the
+wire's T5/T6 then never land even though rawlink and LIVI are running; the
+guest log's T6u is unaffected (and is what the smoke check falls back to).
+The T3/T4 markers and T5 (when it lands) are unaffected.
 
-| id | milestone | guest s | host s |
+### Unmodified (Electron AppImage) vs modified (LIVI-Lite), measured
+
+Same host and command for both, Buildroot 2026.08, kernel 6.18.7, qemu TCG
+`-cpu max`, 4 vCPU, 2 GiB, three warm boots each (`tests/smoke.sh`, all
+checks pass). "guest" is the kernel/`/proc/uptime` clock, "host" maps the
+first printk timestamp onto qemu's process start (T0). qemu numbers are
+**relative only** (virtual UDC, no wire, emulated CPU): the board's SD card
+and real cores replace them, so they are not a hardware prediction.
+
+| id | milestone | unmodified guest s | modified guest s |
 |---|---|---|---|
-| T0 | power on / qemu start | - | 0.000 |
-| T1 | kernel entry | 0.000 | 3.996 |
-| T2 | rootfs mounted, init running | 1.001 | 4.996 |
-| T3 | gadget bound to the UDC, rawlink running | 5.140 | 9.136 |
-| T4 | weston wayland-livi socket exists | 5.710 | 9.706 |
-| T5 | first FRAME sent | 6.500 | 10.496 |
-| T6 | LIVI UI on the weston output | 39.880 | 43.876 |
+| T0 | power on / qemu start | - | - |
+| T1 | kernel entry | 0.000 | 0.000 |
+| T2 | rootfs mounted, init running | 2.74 / 2.95 / 2.77 | 2.81 / 3.06 / 3.04 |
+| T3 | gadget bound to the UDC, rawlink running | 12.89 / 13.22 / 12.46 | 13.09 / 13.31 / 13.47 |
+| T4 | weston wayland-livi socket exists | 14.56 / 15.12 / 14.48 | 14.55 / 14.66 / 14.66 |
+| T5 | first FRAME sent | (15.81) | 15.57 / 15.63 / 15.79 |
+| T5/T6 | rawplay wire | mostly not landing (see above) | landing (T5) |
+| **T6u** | **LIVI UI presented** | **116.85 / 116.93 / 129.44** | **29.10 / 27.73 / 24.24** |
+| | rootfs.squashfs | 310.6 MB | 99.8 MB |
+| | disk.img | 444.9 MB | 234.0 MB |
 
-Before this work the documented run was T2 1.0 s, T3/T4 10.2 s and T6
-77.3 s with `multi-user.target` at 35.9 s; the appliance chain is now
-~4 s to weston and ~5 s to the gadget instead of ~10 s, and T6 lost the
-~30 s PulseAudio stall plus the outer Electron start.
+The first boot after a fresh flash is the cold-profile case: the unmodified
+image did **not** present the Electron UI within the 900 s scrape window on
+its first boot; the modified image presented LIVI-Lite on its first cold
+boot too (29.10 s guest, the run-1 row). Warm runs are the other rows.
 
-`systemd-analyze` in the same run: **multi-user.target reached after 4.4 s
-in userspace** and `systemctl is-system-running` is `running` (the old
-image reached multi-user at 35.9 s only after the broken PulseAudio restart
-finished). The critical chain is the persistent mount and the marker unit
-that measures T3/T4:
+**Result: `off -> rawplay up` is unchanged (~15 s guest, the same units and
+kernel) and `rawplay -> LIVI fully running` drops from ~117 s to ~27 s on
+this qemu host, a ~4.4x boot-to-UI improvement** (the rawplay device is
+bound at T3, ~13 s; the panel gets LIVI ~12 s after weston is up with
+LIVI-Lite, ~102 s with Electron). The remaining LIVI-Lite time is almost
+all the nested compositor's software-EGL context under TCG (~11 s between
+livi-core start and the compositor display); on real hardware that is a GPU
+(or llvmpipe on the board's CPU) and much smaller - for reference the same
+native stack starts `livi-core` to Slint UI in **~0.6 s** on an idle x86_64
+host with weston pixman.
 
-```
-multi-user.target @4.442s
-└─livi-markers.service @3.569s +868ms
-  └─livi-weston.service @3.410s +112ms
-    └─livi-persist.service @3.003s +377ms
-      └─local-fs.target @2.994s
-        └─home-user.mount @3.932s
-          └─local-fs-pre.target @2.331s
-            └─systemd-tmpfiles-setup-dev.service @2.196s +131ms
-```
-
-T2 to T5 is ~5.5 s; T5 to T6 is **all Electron under TCG**: Chromium
-starts, fails to create a GLES3 context (see below), falls back to software
-rasterization and paints the first non-blank frame. That is the number the
-board's SD card and CPU replace, and the target there is the brief's 10 s
-(the phone's LIVI starts in a few seconds on real hardware).
+`systemd-analyze` totals are nearly identical (that is expected - the LIVI
+unit is scheduled after `multi-user.target`): unmodified
+`multi-user.target reached after 11.31-11.97 s in userspace`, modified
+11.04-11.18 s; kernel 3.25-3.49 s vs 3.34-3.40 s. The difference is
+entirely inside `livi.service`.
 
 ### Boot-time work, and why each piece exists
 
@@ -441,14 +435,13 @@ image; every item was either removed entirely or kept as a toggle.
   `livi-console-getty.service` (qemu and debug images only) starts agetty
   straight on the devtmpfs node; `systemd.getty_auto=0` plus masks of the
   stock tty instances keep generated gettys out.
-* **Skip the outer Electron.** `livi-supervisor` starts
-  `resources/compositor/livi-compositor -s` with the exact command and
-  environment the outer launcher's `kn()` builds, saving one Electron cold
-  start (~12 s under qemu TCG).
+* **Native session start.** `livi.service` runs `livi-core` directly; the
+  binary starts the compositor, UI, gst-host and helper itself. Compared to
+  the Electron build this removes the AppImage/outer-launcher/Chromium cold
+  start entirely (the two cold starts cost ~12 s and ~30 s under qemu TCG).
 * **Persistent GStreamer registry.** `GST_REGISTRY` on `/data` with
-  `GST_REGISTRY_UPDATE=no`: the ~4 s plugin scan happens only on the first
-  boot after a flash, not on every boot. The Chromium profile on `/data`
-  already made later boots cheaper; this is the GStreamer half of that.
+  `GST_REGISTRY_UPDATE=no`: the plugin scan happens only on the first
+  boot after a flash, not on every boot.
 * **Units that only boot work.** `cups.{service,path,socket}` (GTK printing
   only), `systemd-network-generator.service` (no networkd) and
   `systemd-udev-load-credentials.service` (no credentials) are masked.
@@ -479,9 +472,11 @@ column is board/debug-only.
 boot order and unit graph, the FunctionFS gadget shape and functionfs
 binding, rawlink's capture/conversion/framing against a real compositor and
 the wire protocol against an independent reader (`unit-sim`), the weston
-headless+kiosk+pixman + `weston-touch` module stack, that the pinned LIVI
-AppImage starts under this glibc and renders a non-blank frame, PulseAudio
-plus the null sink, and the helper shims (`sudo`, `nmcli`, asyncio).
+headless+kiosk+pixman + `weston-touch` module stack, that **LIVI-Lite builds
+from source with Buildroot's Rust and starts, opens its nested compositor
+and Slint UI and renders through the system GStreamer/Mesa stack**,
+PulseAudio plus the null sink, and the helper shims (`sudo`, the wifi-ap
+unit, the Rust helper's root installs).
 
 **Does not prove**: H618 USB throughput (virtual UDC), any real USB
 electrical/timing behaviour, Wi-Fi/BT (UWE5622 driver absent; hwsim is not
@@ -490,28 +485,32 @@ timing, or that the car's i.MX31 rawsplay accepts any of it. The smoke
 test's mass-storage check exercises usb-storage and the read-only LUN
 inside the guest.
 
-Two qemu-specific observations worth knowing:
+qemu-specific observations worth knowing:
 
-* Chromium's GPU process needs a GLES3-capable software EGL. With only Mesa
-  softpipe it fails (`eglCreateContext ES 3.0 failed with EGL_BAD_ATTRIBUTE`)
-  and, after painting the UI, LIVI's app exits and restarts every ~20 s.
-  T6 still lands and every smoke check passes, but this is why the image
-  builds Mesa **llvmpipe** (`BR2_PACKAGE_MESA3D_LLVM` +
-  `GALLIUM_DRIVER_LLVMPIPE`), which is what the phone's chroot's
-  `libgl1-mesa-dri` provides. Softpipe is kept as a fallback.
+* The Rust nested compositor renders through system EGL. On qemu there is no
+  GPU, so that is Mesa **llvmpipe** (`BR2_PACKAGE_MESA3D_LLVM` +
+  `GALLIUM_DRIVER_LLVMPIPE`); softpipe is the fallback. The context setup
+  under TCG is the ~11 s between livi-core logging `listening` and
+  `compositor display`.
 * `dummy_hcd` (the virtual host controller in the same guest) has oopsed its
   hrtimer once under sustained bulk traffic; `tests/smoke.sh` retries once
   when the console log says `Kernel panic` and fails on anything else. It is
   a harness flake, not the appliance: the UDC/FunctionFS path itself is
   upstream kernel code exercised identically on the board.
-* The first boot after a fresh `disk.img` (an empty `/data`) can leave LIVI
-  mapped but unpainted under TCG: Chromium's GPU init and first-paint
-  against a cold profile are slow enough that the emulated timing sometimes
-  wins the race. A second boot uses the persistent profile (and the
-  persistent GStreamer registry) and T6 lands every time measured. This is
-  the qemu clock, not a board result; the `qemu_boot.py` command line sets
-  `systemd.setenv=LIVI_INNER_ARGS=--disable-gpu` for the qemu device's
-  benefit (the board keeps the phone-validated GPU path).
+* The virtual USB bulk stream can drop the first MODE message (the guest
+  logs `FRAME before MODE, ignored`), which suppresses the wire's T5/T6;
+  `qemu_boot.py` then uses T6u from the guest console. This is the same
+  qemu/dummy_hcd environment issue, not the appliance: rawlink reports
+  `reader ready` and frames go out, and the same binaries on hardware talk
+  to the unit's rawplay.
+* The first boot after a fresh `disk.img` (an empty `/data`) is the
+  cold-profile case: the old Electron image did not reach a presented UI
+  within the scrape window, the LIVI-Lite image did (26.09 s guest).
+  `GST_REGISTRY` on `/data` makes later boots skip the plugin scan.
+* `qemu_boot.py` keeps passing `systemd.setenv=LIVI_INNER_ARGS=--disable-gpu`
+  for the unmodified image's Chromium GPU path; LIVI-Lite does not read that
+  variable, so it is inert on the modified image and the two runs share one
+  command line.
 
 ## Hardware bring-up checklist (no board was available here)
 
@@ -580,20 +579,17 @@ information out of a first power-on.
 
 * The board image is untested on hardware in this session.
 * Board boot time is not yet measured; the qemu table says nothing about
-  the 10 s target. The T5->T6 gap in qemu is Electron under TCG; on the
-  board, Electron's startup on the SD card is the thing to profile first.
-  The shipped image starts with a fresh `/data`, so the pre-flash boot is
-  the cold-profile case; the readahead/pre-warm experiments are still the
-  next lever there.
+  the 10 s target. The largest remaining qemu cost is the nested
+  compositor's software EGL under TCG; on the board that is the Adreno-class
+  GPU (or llvmpipe on the CPU), and the same native stack starts core to
+  Slint UI in ~0.6 s on an idle x86_64 host.
 * `initcall_debug` parsing is only exercised by debug images; the qemu
   kernel does not use it.
 * Wi-Fi/BT and audio are blocked above; the helper's hostapd/BT paths are
   therefore unexercised outside unit-sim's fake gadget.
-* A pre-warmed V8 code cache / readahead of the Electron tree
-  (`vmtouch`-style) is not implemented; the brief lists it as an
-  experiment to run once the board is on a bench. The persistent Chromium
-  profile and GStreamer registry on `/data` already remove the repeated
-  per-boot caches after the first boot.
+* The GStreamer registry on `/data` removes the per-boot plugin scan after
+  the first boot; a readahead/pre-warm pass over `/opt/livi` is the next
+  lever on the board's SD card.
 * The `usb.img` in a clean checkout is a stand-in (MBR+FAT with the tracked
   stick base and `homebrew/apps/rawplay.sh`); run `make stick` at the repo
   root before flashing a car-bound card so the unit gets the real launcher,

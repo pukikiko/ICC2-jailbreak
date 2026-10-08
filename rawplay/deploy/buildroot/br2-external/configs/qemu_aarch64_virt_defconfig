@@ -52,44 +52,21 @@ BR2_PACKAGE_SYSTEMD_ANALYZE=y
 # BR2_PACKAGE_SYSTEMD_PSTORE is not set
 # BR2_PACKAGE_SYSTEMD_VCONSOLE is not set
 
-# the appliance: units, shims, dummy_hcd stand-in, and the libraries the
-# Electron binary needs at load time (its DT_NEEDED list)
+# the appliance: units, shims and the qemu stand-in for the car's rawplay.
+# LIVI-Lite builds against the image's own GStreamer, Wayland and Mesa: the
+# Electron-only libraries (GTK3/X11/CUPS/NSS/Pango) and Python are gone.
 BR2_PACKAGE_LIVI_APPLIANCE=y
 BR2_PACKAGE_UNIT_SIM=y
-BR2_PACKAGE_LIBNSS=y
-BR2_PACKAGE_CUPS=y
-BR2_PACKAGE_AT_SPI2_CORE=y
-BR2_PACKAGE_DEJAVU=y
-BR2_PACKAGE_XLIB_LIBX11=y
-BR2_PACKAGE_XLIB_LIBXCOMPOSITE=y
-BR2_PACKAGE_XLIB_LIBXDAMAGE=y
-BR2_PACKAGE_XLIB_LIBXEXT=y
-BR2_PACKAGE_XLIB_LIBXFIXES=y
-BR2_PACKAGE_XLIB_LIBXRANDR=y
-BR2_PACKAGE_XLIB_LIBXSHMFENCE=y
-BR2_PACKAGE_LIBXCB=y
+# weston 15's headless backend links pango (text in the debug/headless
+# path); the Electron image had it in via GTK, the native image needs it explicit
+BR2_PACKAGE_PANGO=y
 BR2_PACKAGE_MESA3D=y
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_SOFTPIPE=y
-# the phone deployment runs Electron on Mesa llvmpipe (libgl1-mesa-dri);
-# softpipe alone has no GLES3 EGL config and Chromium's GPU process rejects it
+# the nested compositor renders through EGL; with no GPU that is llvmpipe
+# (softpipe is kept as the fallback). Same configuration the phone runs.
 BR2_PACKAGE_MESA3D_LLVM=y
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_LLVMPIPE=y
 BR2_PACKAGE_MESA3D_OPENGL_EGL=y
 BR2_PACKAGE_MESA3D_OPENGL_ES=y
 BR2_PACKAGE_ALSA_UTILS=y
 BR2_PACKAGE_ALSA_UTILS_APLAY=y
-BR2_PACKAGE_ALSA_UTILS_SPEAKER_TEST=y
-
-# prebuilt Electron tree: already stripped, and stripping 800 MB of
-# third-party libraries only costs build time
-BR2_STRIP_EXCLUDE_DIRS="opt/livi/app"
-
-# Electron's DT_NEEDED list: GTK3 (X11+Wayland backends) and the X libraries.
-# Buildroot gates the xlib packages behind the X.org umbrella symbol, so it
-# has to be on even though the appliance runs no X server.
-BR2_PACKAGE_XORG7=y
-BR2_PACKAGE_LIBGTK3=y
-BR2_PACKAGE_LIBGTK3_X11=y
-BR2_PACKAGE_LIBGTK3_WAYLAND=y
-BR2_PACKAGE_PANGO=y
-BR2_PACKAGE_XLIB_LIBXRENDER=y

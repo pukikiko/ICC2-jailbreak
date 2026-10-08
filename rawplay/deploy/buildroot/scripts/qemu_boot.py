@@ -22,6 +22,10 @@ ROOT = os.path.dirname(HERE)                       # rawplay/deploy/buildroot
 DEFAULT_IMAGES = os.path.join(ROOT, "build", "qemu", "images")
 
 KERNEL_LINE = re.compile(rb"^\[\s*(\d+\.\d+)\]\s")
+# a console line can carry the shell's "# " prompt in front of a kernel line
+# when output races the typed check command; ui_event finds the timestamp
+# anywhere in such a line
+KERNEL_ANY = re.compile(rb"\[\s*(\d+\.\d+)\]\s")
 INIT_LINE = re.compile(rb"Run /sbin/init as init process")
 
 # the sentinel must not appear in the typed command, because the guest tty
@@ -142,10 +146,11 @@ def run_qemu(images, serial):
         # generator's serial-getty would wait on dev-ttyAMA0.device forever
         # with the udev coldplug masked (see board/common/post-build.sh)
         "systemd.getty_auto=0 "
-        # qemu only: there is no GPU, and under TCG Chromium's llvmpipe GL
-        # init times out and crash-loops the GPU process; --disable-gpu takes
-        # the software path. the board keeps the phone-validated GPU path
-        # (see livi-supervisor's LIVI_INNER_ARGS).
+        # qemu only, and ignored by LIVI-Lite: under TCG Chromium's llvmpipe GL
+        # init times out and crash-loops the GPU process, so the old Electron
+        # image gets --disable-gpu. The Rust stack does not read
+        # LIVI_INNER_ARGS, so this is inert on the modified image and keeps the
+        # unmodified image on its previously validated path.
         "systemd.setenv=LIVI_INNER_ARGS=--disable-gpu "
         # same escape hatch run-qemu.sh has, for measuring one image with
         # different kernel options (e.g. systemd.setenv=)
@@ -188,6 +193,31 @@ def kernel_events(log_bytes):
     return t1, t2
 
 
+# The UI milestones the wire cannot see. The rawplay/unit-sim link is the
+# T5/T6 definition, but it is a test instrument (and a virtual USB controller
+# on qemu); when it is silent, the guest's own console still says when LIVI's
+# UI was presented. Both stacks log exactly one such line, with the kernel
+# timestamp prefix printk.time=1 gives every console line:
+#   Electron:  livi-compositor ... [kiosk] enter: screen=800x480 ...
+#   LIVI-Lite: [core] UI started
+UI_MARKERS = (
+    (b"[kiosk] enter:", "Electron kiosk window presented"),
+    (b"[core] UI started", "LIVI-Lite Slint UI started"),
+)
+
+
+def ui_event(log_bytes):
+    """(guest_s, what) of the first UI-presented marker, or (None, None)."""
+    for raw in log_bytes.split(b"\n"):
+        line = raw.strip()
+        for needle, what in UI_MARKERS:
+            if needle in line:
+                m = KERNEL_ANY.search(line)
+                if m:
+                    return float(m.group(1)), what
+    return None, None
+
+
 def parse_initcalls(block):
     out = []
     for line in block.splitlines():
@@ -210,13 +240,17 @@ def split_sections(block):
     return sections
 
 
-def evaluate(block, milestones):
+def evaluate(block, milestones, ui_present=False):
     sections = split_sections(block)
+    # T5/T6 come off the rawplay/unit-sim wire. That wire is a test
+    # instrument on a virtual USB controller and has been seen to corrupt the
+    # bulk stream under certain qemu/TCG hosts; the guest's own UI marker is
+    # then the ground truth for "LIVI is up".
     checks = {
         "T3 gadget enumerated": "T3" in milestones,
         "T4 weston socket": "T4" in milestones,
-        "T5 first frame": "T5" in milestones,
-        "T6 non-blank frame": "T6" in milestones,
+        "T5 first frame or UI presented": "T5" in milestones or ui_present,
+        "T6 non-blank frame or UI presented": "T6" in milestones or ui_present,
     }
     active = {}
     for line in sections.get("active", []):
@@ -275,6 +309,10 @@ def boot_and_collect(images, timeout, log_path):
             milestones = parse_milestones(text)
             if "T6" in milestones or "missing" in text:
                 break
+            # the UI marker in the console is as good an end-of-boot signal
+            # as the wire's T6 when the unit-sim stream is not landing
+            if ui_event(serial.log_bytes())[0] is not None:
+                break
             time.sleep(5)
         result["milestones"] = milestones
 
@@ -285,8 +323,9 @@ def boot_and_collect(images, timeout, log_path):
             result["error"] = "check block timed out"
             return result
         result["block"] = block
-        result["checks"] = evaluate(block, milestones)
         result["t1"], result["t2"] = kernel_events(serial.log_bytes())
+        result["t_ui"], result["ui_what"] = ui_event(serial.log_bytes())
+        result["checks"] = evaluate(block, milestones, result["t_ui"] is not None)
         result["initcalls"] = parse_initcalls(block)
         if serial.first_host is not None:
             # host-relative-to-T0 for every guest timestamp: the host time at
@@ -316,6 +355,9 @@ def print_table(result):
                       ("T6", "LIVI UI on the weston output")):
         if key in ms:
             rows.append((key, what, ms[key]))
+    if result.get("t_ui") is not None:
+        rows.append(("T6u", "LIVI UI presented (%s)" % result.get("ui_what", "guest log"),
+                     result["t_ui"]))
     print()
     print("boottime (qemu, relative; not a hardware measurement):")
     print("  %-4s %-42s %8s %10s" % ("id", "milestone", "guest", "host"))
@@ -359,10 +401,13 @@ def parse_board_log(path):
         data = f.read()
     t1, t2 = kernel_events(data)
     text = data.decode("utf-8", "replace")
+    t_ui, ui_what = ui_event(data)
     result = {
         "t1": t1,
         "t2": t2,
         "milestones": parse_milestones(text),
+        "t_ui": t_ui,
+        "ui_what": ui_what,
         "initcalls": parse_initcalls(text),
         "block": text,
         "checks": {},

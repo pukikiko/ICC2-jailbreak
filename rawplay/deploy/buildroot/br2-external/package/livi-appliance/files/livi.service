@@ -1,13 +1,16 @@
-# LIVI itself (the CarPlay/Android Auto head unit UI) on the weston kiosk
-# session. The release AppImage is glibc, and this image is glibc, so it runs
-# directly: /opt/livi/livi-supervisor is the AppImage's launcher environment
-# plus the supervision the detached nested compositor needs (see the script).
+# LIVI-Lite (the native CarPlay/Android Auto head unit UI) on the weston kiosk
+# session. There is no AppImage, no Electron/Chromium and no chroot here:
+# /opt/livi/livi-core starts the nested compositor, the Slint UI, the
+# GStreamer video host and the helper itself and stays in the foreground, so
+# systemd supervises the whole stack through one process and the boot path has
+# no extraction/interpreter step in it at all.
 #
-# KillMode=mixed TERMs only the supervisor, which forwards the stop to the
-# app, waits for LIVI's own quit path while wayland is still up, and only
-# then closes the compositor. TimeoutStopSec is the backstop.
+# livi-core's SIGTERM handler stops its children in order (UI, compositor,
+# helper) while wayland is still up; KillMode=mixed keeps systemd from
+# SIGTERMing the children first, and TimeoutStopSec is only the backstop for a
+# wedged decoder.
 [Unit]
-Description=LIVI head unit UI on the Weston kiosk display
+Description=LIVI-Lite head unit UI on the Weston kiosk display
 DefaultDependencies=no
 After=local-fs.target livi-persist.service livi-weston.service livi-pulse.service systemd-journald.socket
 Wants=livi-weston.service livi-pulse.service
@@ -21,35 +24,20 @@ Environment=WAYLAND_DISPLAY=wayland-livi
 Environment=XDG_RUNTIME_DIR=/run/livi
 Environment=HOME=/home/user
 Environment=LIVI_KIOSK=1
-# the extracted AppImage is never mounted as an AppImage; AppRun's env is
-# replicated by the supervisor. this keeps the bundled gstreamer from trying
-# to mount anything at boot.
-Environment=APPIMAGE_EXTRACT_AND_RUN=1
-# the outer launcher spawns the inner Electron app from $APPIMAGE (or its own
-# execPath) with --ozone-platform=wayland. pointing APPIMAGE at the wrapper
-# gives the inner process the --no-sandbox the raw binary would otherwise
-# lack (Electron fatals as root); see files/livi-inner.
-Environment=APPIMAGE=/opt/livi/livi-inner
-# belt and braces for the outer process; Electron also reads this as the
-# no-sandbox switch
-Environment=ELECTRON_DISABLE_SANDBOX=1
+# the installed layout: resources/{driver,gst-host,compositor} and ../livi-ui
+Environment=LIVI_RESOURCES=/opt/livi/resources
 # audio is the system PulseAudio daemon
 Environment=PULSE_SERVER=unix:/run/pulse/native
-# GStreamer rescans every plugin when its registry cache is missing, and the
-# default cache under $HOME is tmpfs and thrown away each boot. put the
-# registry on the persistent partition and tell GStreamer not to revalidate
-# it: first boot scans once, every later boot loads the cache.
+# the system GStreamer registry lives on the persistent partition, so the
+# plugin scan happens only on the first boot after a flash
 Environment=GST_REGISTRY=/data/livi-config/gst-registry.aarch64.bin
 Environment=GST_REGISTRY_UPDATE=no
-# waylandsink hands the compositor the caps stride while the frame memory is
-# row-padded; the shim corrects it (see livistride.c)
-Environment=LIVI_GST_PRELOAD=/opt/livi/livi-stride-fix.so
 EnvironmentFile=-/etc/default/livi
-ExecStart=/opt/livi/livi-supervisor --user-data-dir=/home/user/.config/LIVI-vnc --no-sandbox
+ExecStart=/opt/livi/livi-core
 Restart=always
-RestartSec=2
+RestartSec=1
 KillMode=mixed
-TimeoutStopSec=15
+TimeoutStopSec=8
 
 [Install]
 WantedBy=multi-user.target

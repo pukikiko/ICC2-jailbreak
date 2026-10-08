@@ -1,15 +1,22 @@
-# LIVI + rawlink on a postmarketOS phone (the appliance build)
+# LIVI-Lite + rawlink on a postmarketOS phone (the appliance build)
 
 This is the deployment that turns a postmarketOS phone into the head-unit side of the raw
-livi link: the phone runs the **unmodified aarch64 LIVI release** and `rawlink`, its USB
-port enumerates as the car's USB gadget (vendor video interface + the homebrew stick), and
-the unit's 800x480 panel becomes LIVI's display with touch/knob/button coming back up the
-same wire. Everything is a systemd unit that starts at boot and restarts on its own. One
-of them, `livi-link`, is the power state machine: the charger decides the radios and LIVI's
-lifecycle, rawlink's own log decides the CPU idle depth - unplugged means radios off, LIVI
-stopped and deep idle, charging with a player on the link means shallow CPU idle (see "The
-rawplay link state"). Wireless Android Auto is parked on in LIVI's config and left alone:
-toggling it under the running app upsets LIVI's helper.
+livi link: the phone runs **LIVI-Lite** (pukikiko/LIVI-Lite, the Electron-free fork of
+LIVI) and `rawlink`, its USB port enumerates as the car's USB gadget (vendor video
+interface + the homebrew stick), and the unit's 800x480 panel becomes LIVI's display with
+touch/knob/button coming back up the same wire. Everything is a systemd unit that starts
+at boot and restarts on its own. One of them, `livi-link`, is the power state machine: the
+charger decides the radios and LIVI's lifecycle, rawlink's own log decides the CPU idle
+depth - unplugged means radios off, LIVI stopped and deep idle, charging with a player on
+the link means shallow CPU idle (see "The rawplay link state"). Wireless Android Auto is
+parked on in LIVI's config and left alone: toggling it under the running app upsets LIVI's
+helper.
+
+**LIVI-Lite is built from source on the phone** (native aarch64 musl, no AppImage and no
+glibc chroot), and it starts in milliseconds: livi-core, the nested compositor, the Slint
+UI and the Rust helper are plain binaries, where the old deployment paid an AppImage
+extraction plus a full Electron cold start. The boot order is unchanged; only the last
+step got native.
 
 Reference hardware: **Xiaomi Mi A1 (qcom-msm8953, "tissot")**, postmarketOS edge with
 systemd. The virtual display is 800x480 to match the unit's panel, and it is a **virtual
@@ -24,7 +31,8 @@ is generic: any aarch64 postmarketOS phone with a configfs/functionfs-capable UD
 ```
  phone (postmarketOS, musl)                          car (i.MX31, QNX, usb host)
  ┌──────────────────────────────────────────┐        ┌──────────────────────────┐
- │ LIVI AppImage (glibc)  ── ubuntu chroot  │        │                          │
+ │ LIVI-Lite (native aarch64 musl)          │        │                          │
+ │  livi-core ─ livi-compositor ─ livi-ui   │        │                          │
  │      │ wayland (nested compositor)        │        │                          │
  │ weston headless (kiosk, pixman, 800x480) │        │                          │
  │      │ weston_capture_v1 (shm)            │        │                          │
@@ -35,23 +43,24 @@ is generic: any aarch64 postmarketOS phone with a configfs/functionfs-capable UD
         USB-C (device)               USB-A (host)
 ```
 
-## Why a chroot
+## Why there is no chroot any more
 
-LIVI's release builds are glibc Electron bundles; postmarketOS is musl. `gcompat` cannot
-load Electron (`unsupported relocation type 1032`), so the AppImage runs inside a small
-**Ubuntu base rootfs** (aarch64 glibc) with the host's Wayland runtime dir and audio
-sockets bind-mounted in. `livi-chroot` is the launcher/supervisor that does the mounts and runs the
-AppImage; it also stays alive while LIVI's detached nested compositor lives, because the
-AppImage launcher exits by design (`src/main/index.ts`: "outer launcher hands off to the
-nested compositor and exits") and a plain `exec` would leave systemd with a finished unit
-whose cgroup takes the real app down.
+LIVI's release builds were glibc Electron bundles and postmarketOS is musl, so the old
+deployment ran the AppImage inside a small Ubuntu base rootfs (`livi-chroot`). LIVI-Lite
+removed the reason for both: it is a Rust core, a Slint UI and a Rust nested compositor,
+and `install.sh` builds all of it from source for the phone's own ABI. The four binaries
+are ordinary musl binaries linked against the system GStreamer, Wayland and EGL, so there
+is no rootfs to unpack, no mount dance, no FUSE AppImage and no Electron/Chromium cold
+start. That is also where the boot-time win comes from: `livi.service` starts
+`/opt/livi/livi-core` directly and it is listening and painting the UI in milliseconds.
 
-**Use Ubuntu 26.04 (or Debian Trixie), not 24.04.** The release's bundled GStreamer wants
-newer host libraries than 24.04 has: `libavcodec` links `libva.so.2` for `vaMapBuffer2`
-(libva >= 2.21) and `libgstwaylandsink` links `wl_display_create_queue_with_name`
-(libwayland >= 1.23). On 24.04 those plugins silently fail to load, the codec probe
-reports `h264(hw=false sw=false)`, and everything wireless projects into a black screen
-while otherwise working perfectly. On 26.04 the probe reports `h264(hw=true sw=true)`.
+The bundled-GStreamer pitfalls the old deployment had to work around are gone with the
+bundle: the video-plane stride shim (`livistride.c`) existed because the AppImage's own
+GStreamer and waylandsink disagreed about the row padding - the system GStreamer the Rust
+`livi-gst-host` links against is self-consistent. The python 3.14 asyncio shim existed for
+the packaged python helper; LIVI-Lite's helper (`livi-helperd`) is Rust. The optional
+packages in `livi-config.json` stay dismissed: the phone's radios are still driven by the
+helper through hostapd/BlueZ, not by a desktop stack.
 
 ## The phone's own UI (fbkeyboard)
 
@@ -74,17 +83,15 @@ any other UI the image shipped with) and sets all of it up.
 
 | file | what it is |
 |---|---|
-| `install.sh` | automated deployment on the phone (packages, phone UI, build, chroot, units) |
-| `livi-chroot` | the chroot launcher/supervisor (also stages the stop, see below); goes to `/opt/livi/livi-chroot` |
-| `livi_asyncio_compat.py`, `livi-asyncio-compat.pth` | python 3.14 fix for the wireless helper (see below) |
-| `livistride.c` | preload shim that fixes the video plane's wl_shm stride (see below) |
+| `install.sh` | automated deployment on the phone (packages, phone UI, rawlink, LIVI-Lite build, units) |
+| `livi-lite-build.sh` | the shared source-build recipe: builds the four LIVI-Lite workspaces and stages the installed layout (also called by the Buildroot package) |
 | `livi-config.json` | LIVI settings: 800x480 kiosk, wireless AA parked on, and the optional-package dialog dismissed |
 | `livi-link-monitor` | the power state machine: the charger sets the radios and starts/stops LIVI, rawlink's log sets the CPU idle depth (see "The rawplay link state") |
-| `livi-cmd.c` | one-line client for LIVI's helper control socket (`set-aa`), for toggling wireless AA by hand; goes to `/opt/livi/livi-cmd` |
+| `livi-cmd.c` | one-line client for LIVI's helper control socket, for toggling wireless AA by hand; goes to `/opt/livi/livi-cmd` |
 | `livi-link.service` | runs `livi-link-monitor` as root at boot, restart-forever |
 | `pipewire.desktop` | xdg autostart override that hides the desktop's pipewire-launcher so the systemd user units own audio (see "Audio") |
 | `livi-weston.service` | weston headless/kiosk/pixman at 800x480 (repaint-on-capture, `--debug` for capture authorization); hosts the app, the video plane and the `weston-touch` module |
-| `livi.service` | the LIVI AppImage, through `livi-chroot`, on `wayland-livi` |
+| `livi.service` | runs `/opt/livi/livi-core` (LIVI-Lite) on `wayland-livi`; no chroot |
 | `rawlink.service` | `rawlink run`: functionfs gadget + mass storage + headless-weston wayland sender |
 | `rawlink-wait` | forces device mode, waits for the UDC, then execs rawlink (the unit's main process) |
 | `console-blank.service` | the phone UI's idle blanking: console blank on `tty1` (screen + backlight off) after 2 min |
@@ -97,8 +104,14 @@ for when something needs doing by hand.
 ### 1. Packages
 
      sudo apk add build-base bash weston weston-backend-headless weston-shell-kiosk \
-                  weston-dev wayland-dev fuse3 xkeyboard-config \
-                  postmarketos-ui-fbkeyboard
+                  weston-dev wayland-dev xkeyboard-config postmarketos-ui-fbkeyboard \
+                  rust cargo pkgconf cmake perl \
+                  gstreamer-dev gst-plugins-base-dev \
+                  gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav \
+                  wayland-protocols libxkbcommon-dev mesa-dev libdrm-dev \
+                  pulseaudio-utils bluez iproute2 iw rfkill hostapd dnsmasq sudo
+     # names that move between postmarketOS releases; install what exists
+     sudo apk add systemd-dev gst-plugins-bad-dev || true
 
 * `postmarketos-ui-fbkeyboard` is the phone's own UI, the preferred console UI (see "The
   phone's own UI"). install it **before** removing a desktop UI, so the shared
@@ -112,8 +125,19 @@ for when something needs doing by hand.
   is in-process and wayland-native.
 * `xkeyboard-config` provides the evdev keymap weston's fake-seat keyboard and the panel
   key taps use.
-* `bash` is needed by the AppImage's `AppRun`; postmarketOS has busybox `ash` only.
-* tested with LIVI 8.3.0, weston 16.0.0, Ubuntu base 24.04.3.
+* `rust`/`cargo` build LIVI-Lite; the `-dev` packages above are what its build scripts
+  link against (gstreamer-sys, wayland-sys, libudev, EGL/GLES via mesa-dev). `cmake`
+  builds `aws-lc-sys` (the crypto half of the CarPlay stack), `perl` is used by its
+  generated assembly.
+* `sudo` is required at runtime: livi.service runs as `user`, and livi-core starts its
+  helper (`livi-helperd`) as root through it. `install.sh` pre-seeds a validated
+  `/etc/sudoers.d/99-LIVI-helper` rule for exactly that binary.
+* the runtime GStreamer plugins cover LIVI's pipelines: `waylandsink` and the H.26x
+  parsers (bad), `pulsesink`/`volume`/`aacparse`/RTP (good), `avdec_h264`/`avdec_h265`
+  and the software fallback (libav), `faad` for CarPlay AAC.
+* `systemd-dev` (or `eudev-dev` on a non-systemd image) provides `libudev.pc`, which
+  `libudev-sys` needs; `gst-plugins-bad-dev` is only needed on releases that split it.
+* tested with LIVI-Lite `main`, weston 16.0.0.
 
 ### 2. Build the host tools
 
@@ -130,98 +154,59 @@ weston 16 changed the touch and keyboard APIs (see `weston-touch.c`): building t
 injects the panel keys rawlink sends (`k CODE` evdev taps); both are wayland events, so
 there is no XTest mouse fallback to land on. `../` is the `rawplay/` directory.
 
-### 3. Assets
+### 3. LIVI-Lite from source
 
-* **LIVI** — the standard aarch64 release AppImage, e.g.
-  `https://github.com/f-io/LIVI/releases/download/v8.3.0/LIVI-8.3.0-linux-arm64.AppImage`.
-  No patches; `livi.sh`'s environment is the supported one.
-* **The homebrew stick** — `python3 ../../mkusb.py` builds `usb.img` with the
-  launcher, hmi overlay and `apps/rawplay`. This is the mass-storage image the gadget
-  serves as `/fs/usb0`; on the unit the launcher's carplay button runs
-  `/fs/usb0/homebrew/apps/rawplay.sh`.
+`install.sh` clones `https://github.com/pukikiko/LIVI-Lite` to `~/LIVI-Lite` when the
+checkout is missing and builds the four workspaces (compositor, gst-host, helperd/core,
+UI) natively with the phone's cargo. To use an existing checkout or pin a revision:
 
-Install both under `/opt/livi`:
+    ./install.sh --livi-lite ~/LIVI-Lite          # use this tree
+    LIVI_LITE_REF=v9.3.0 ./install.sh             # pin a tag/commit
+    LIVI_LITE_STAGE=/path/to/stage ./install.sh   # install a pre-built stage tree
+
+By hand the build is one command; `livi-lite-build.sh` stages the installed layout
+(`livi-core`, `livi-ui`, `resources/{driver,gst-host,compositor}` and the root templates):
+
+    sh livi-lite-build.sh ~/LIVI-Lite /tmp/livi-stage
+    sudo cp -a /tmp/livi-stage/. /opt/livi/
+
+A native release build on a phone is the slow step (rustc, slint, aws-lc); a pre-built
+`LIVI_LITE_STAGE` tree makes reinstalls and CI fast. A cross/CI build can drive the same
+script with `CARGO_BUILD_TARGET`, `CARGO_TARGET_DIR` and `PKG_CONFIG_*` pointed at a
+target sysroot.
+
+### 4. Assets: the homebrew stick
+
+`python3 ../../mkusb.py` builds `usb.img` with the launcher, hmi overlay and
+`apps/rawplay`. This is the mass-storage image the gadget serves as `/fs/usb0`; on the
+unit the launcher's carplay button runs `/fs/usb0/homebrew/apps/rawplay.sh`.
 
     sudo install -d /opt/livi
     sudo install -m 755 ../out/rawlink /opt/livi/rawlink
     sudo install -m 755 ../out/livi-cmd /opt/livi/livi-cmd
     sudo install -m 644 weston-touch.so /opt/livi/weston-touch.so
     sudo install -m 644 /path/to/usb.img /opt/livi/usb.img
-    sudo install -m 755 livi-chroot /opt/livi/livi-chroot
     sudo install -m 755 livi-link-monitor /opt/livi/livi-link-monitor
-
-### 4. The glibc chroot
-
-    sudo mkdir -p /opt/livi/rootfs
-    curl -fL https://cdimage.ubuntu.com/ubuntu-base/releases/26.04/release/ubuntu-base-26.04.1-base-arm64.tar.gz \
-      | sudo tar -xz -C /opt/livi/rootfs
-    sudo mount --bind /dev /opt/livi/rootfs/dev
-    sudo mount -t proc proc /opt/livi/rootfs/proc
-    sudo mount -t sysfs sys /opt/livi/rootfs/sys
-    sudo cp /etc/resolv.conf /opt/livi/rootfs/etc/resolv.conf
-    sudo cp LIVI-8.3.0-linux-arm64.AppImage /opt/livi/rootfs/opt/LIVI.AppImage
-    sudo chroot /opt/livi/rootfs /bin/bash -c \
-      'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-         libgtk-3-0t64 libnss3 libxss1 libxtst6 libgbm1 libasound2t64 libatspi2.0-0t64 \
-         libsecret-1-0 libnotify4 libcups2t64 libdbus-1-3 libexpat1 libfontconfig1 \
-         fonts-dejavu-core libxkbcommon0 libxkbcommon-x11-0 libxrandr2 libxcomposite1 \
-         libxdamage1 libxfixes3 libxext6 libx11-xcb1 libxcb-dri3-0 libxcb-xkb1 libxcb-shm0 \
-         libxcb-randr0 libxcb-render0 libxcb-sync1 libxcb-xfixes0 libxcb-shape0 libxcb-glx0 \
-         libgl1 libegl1 libgles2 libglx-mesa0 libgl1-mesa-dri libpango-1.0-0 libcairo2 \
-         libgdk-pixbuf-2.0-0 libatk1.0-0t64 libatk-bridge2.0-0t64 libfuse2t64 libfuse3-4 \
-         libxshmfence1 libdrm2 libssh-4 libgudev-1.0-0 \
-         libva2 libva-drm2 libva-x11-2 libva-wayland2 libpulse0 pulseaudio-utils \
-         python3 python3-dbus python3-gi gir1.2-glib-2.0 python3-smbus2 python3-pip \
-         python3-yaml gcc libc6-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-         bluez iproute2 iw rfkill hostapd dnsmasq-base procps sudo network-manager'
-
-`libssh-4` lets the bundled ffmpeg plugin load at all; `libva2` (>= 2.21) is needed for
-the bundled H.264 decoder, `libgudev-1.0-0` for the remaining v4l2 helpers. `install.sh`
-also **removes** `libv4l-0t64` again: with it the bundled stateful v4l2 plugin loads, the
-codec probe reports `hw=true`, and the app builds a `v4l2h26xdec` pipeline whose dmabuf
-output the pixman nested compositor cannot take (`waylandsink` logs `Could not bind to
-zwp_linux_dmabuf_v1`, the pipeline dies `not-negotiated`, the screen stays black). Without
-it the probe reports `hw=false sw=true` and the bundled `avdec_h26x` software decoders
-feed waylandsink through `wl_shm`, which pixman composites fine.
-
-Then the two in-chroot extras `install.sh` also does:
-
-    # python 3.14 shim for the wireless helper
-    sudo install -m 644 livi_asyncio_compat.py /opt/livi/rootfs/usr/lib/python3/dist-packages/
-    sudo install -m 644 livi-asyncio-compat.pth /opt/livi/rootfs/usr/lib/python3/dist-packages/
-    # the waylandsink stride shim; gcc and the gstreamer headers came with the packages
-    # above and match the bundled 1.28 ABI
-    sudo mkdir -p /opt/livi/rootfs/opt/livi
-    sudo install -m 644 livistride.c /opt/livi/rootfs/tmp/livistride.c
-    sudo chroot /opt/livi/rootfs /bin/bash -c \
-      'gcc -O2 -fPIC -shared -I/usr/include/gstreamer-1.0 -I/usr/include/glib-2.0 \
-       -I/usr/lib/aarch64-linux-gnu/glib-2.0/include \
-       -o /opt/livi/livi-stride-fix.so /tmp/livistride.c'
-
-`livi-chroot` re-does the `/dev`, `/proc`, `/sys`, `$XDG_RUNTIME_DIR`, `/run/dbus` and
-the pulse socket/cookie mounts itself (idempotently), so the manual mounts above are only
-needed for `apt` during setup. There is no X11 socket to bind any more.
 
 ### 5. LIVI configuration
 
-The outer launcher reads `--user-data-dir`'s `config.json`, but the real (inner) app uses
-`$HOME/.config/LIVI/config.json`. Both must carry the panel size or the nested compositor
-defaults to 1280x720 and weston's kiosk fullscreen rejects the window
+The app reads `$HOME/.config/LIVI/config.json`; it must carry the panel size or the
+nested compositor defaults to 1280x720 and weston's kiosk fullscreen rejects the window
 (`xdg_surface geometry ... larger than the configured fullscreen state`):
 
-    sudo install -m 644 livi-config.json /opt/livi/rootfs/home/user/.config/LIVI/config.json
-    sudo install -m 644 livi-config.json /opt/livi/rootfs/home/user/.config/LIVI-vnc/config.json
-    sudo chown 1000:1000 /opt/livi/rootfs/home/user/.config/LIVI/config.json \
-                         /opt/livi/rootfs/home/user/.config/LIVI-vnc/config.json
+    sudo install -m 644 livi-config.json /home/user/.config/LIVI/config.json
+    sudo chown user:user /home/user/.config/LIVI/config.json
 
 `dismissedPackages` in that file silences the "Missing Packages" dialog for the optional
-Bluetooth/Wi-Fi/VA-API helpers that a postmarketOS chroot cannot usefully provide.
+Bluetooth/Wi-Fi/VA-API helpers the phone does not provide (its radios are driven by
+LIVI's own helper + hostapd/BlueZ, not by the desktop stacks the list names).
 
 On an install where LIVI has already run, `config.json` is the app's own full settings
 file (carName, pairing, bindings, geometry), so `install.sh` does not replace it: it only
-merges `wirelessAaEnabled: true` into it. The manual `install` commands above are for a
-fresh rootfs. The park is read when `livi` starts, so an upgrade takes effect at the next
-livi restart or reboot; doing that over ssh drops the connection when the AP takes wlan0.
+merges `wirelessAaEnabled: true` into it. The park is read when `livi` starts, so an
+upgrade takes effect at the next livi restart or reboot; doing that over ssh drops the
+connection when the AP takes wlan0. `install.sh` also seeds the `LIVI-vnc` config the old
+Electron outer launcher used, so an upgrade from the AppImage keeps its old settings.
 
 ### 6. Units, power and the rawplay link state
 
@@ -398,43 +383,34 @@ or `cat /tmp/rawlink.log` to drive it from something else while debugging),
 state machine and `livi-cmd` are covered by
 `make -C rawplay livi-cmd && python3 rawplay/test_livi_link.py` on any host.
 
-## Wireless Android Auto / CarPlay (the python helper)
+## Wireless Android Auto / CarPlay (the Rust helper)
 
-LIVI's wireless paths run `resources/driver/helper/livi-helper.py` inside the chroot: it
-talks to the host's **BlueZ** (pairing agent, iAP2/AA Bluetooth profiles, discoverability)
-and to **NetworkManager** over the **system D-Bus**, and it drives **hostapd** + **dnsmasq**
-to put an AP on the Wi-Fi interface. Inside the chroot that needs two things this
-deployment provides:
+LIVI-Lite's wireless paths run `resources/driver/livi-helperd` (the Rust rewrite of the
+old python helper) as root through `sudo -n -E`: it talks to the host's **BlueZ**
+(pairing agent, iAP2/AA Bluetooth profiles, discoverability) over the **system D-Bus**,
+and it drives **hostapd** + **dnsmasq** to put an AP on the Wi-Fi interface. Nothing is
+inside a chroot any more, so the helper sees the real `/run/dbus`, the real radios and
+the real `systemctl`.
 
-* the helper's userland: `python3 python3-dbus python3-gi gir1.2-glib-2.0 python3-smbus2
-  python3-pip python3-yaml bluez iproute2 iw rfkill hostapd dnsmasq-base procps sudo
-  network-manager` (installed in step 4);
-* the host **system bus** bound into the chroot (`livi-chroot` mounts `/run/dbus`), without
-  which every `dbus.SystemBus()` call fails with
-  `Failed to connect to socket /run/dbus/system_bus_socket`;
-* on python 3.14 (the 26.04 default) the `livi_asyncio_compat.py` + `.pth` shim restores
-  the implicit event loop creation `asyncio.get_event_loop()` lost in 3.14. Without it the
-  helper dies on import (`There is no current event loop in thread 'MainThread'`) and the
-  app logs `livi-helper.py exceeded max restarts`. The shim is loaded from a `.pth`
-  because ubuntu ships its own `/usr/lib/python3.14/sitecustomize.py` that shadows ours.
-
-On the host, `install.sh` writes a `bluetooth.service` drop-in with `--noplugin=sap,midi`
-(LIVI's helper does this itself on a normal machine, but its writes land in the chroot):
+`install.sh` pre-seeds the one sudoers rule livi-core needs to start the helper
+(`/etc/sudoers.d/99-LIVI-helper`, validated by `visudo`); from there the helper installs
+its own udev rules, the `livi-wifi-ap` unit and the rest of the sudoers set on first run.
+It also writes a `bluetooth.service` drop-in with `--noplugin=sap,midi`:
 `sap` otherwise holds RFCOMM channel 8, which Android Auto's AAP wants, and `midi` takes a
 128-bit EIR UUID slot CarPlay uses.
 
 The helper only advertises (adapter `Alias` = `carName`, `Discoverable`/`Pairable`, AA
-service) once its AP reports ready; if the AP is not ready it logs
-`BT advertising held (AP not ready)`.
+service) once its AP reports ready; if the AP is not ready it holds the Bluetooth
+advertising back.
 
 **The AP takes wlan0.** The wcn36xx firmware advertises no interface combinations, so the
 phone cannot be a Wi-Fi client and an AP at once. Enabling wireless AA in LIVI's settings
 drops the phone's own Wi-Fi (including ssh) for the duration of the session and puts
-`10.10.0.1` on wlan0; disable it again in LIVI's UI to hand the interface back to
-NetworkManager. With the single USB port acting as the gadget to the unit, a second Wi-Fi
-adapter is not an option while the car link is up.
+`10.10.0.1` on wlan0; disable it again in LIVI's UI to hand the interface back. With the
+single USB port acting as the gadget to the unit, a second Wi-Fi adapter is not an option
+while the car link is up.
 
-Because toggling it under the running app upsets LIVI's helper, the deployment parks
+Because toggling it under the running app upsets the helper, the deployment parks
 `wirelessAaEnabled` **on** and leaves it alone: the AP and the BT advertising come up with
 the app and stay up, and `livi-link` never talks to the helper's control socket (see "The
 rawplay link state"). `install.sh` merges the key into LIVI's own settings file (never
@@ -444,73 +420,46 @@ then on the phone's own Wi-Fi client and ssh are down for as long as the applian
 the sections below assume a local shell.
 
 LIVI's settings UI, its config file, or `livi-cmd` are how it comes down by hand. The
-runtime toggle is the same RPC the app sends, only on demand:
+helper's control socket is `/tmp/cp-bt.sock` (the same path the app uses), so:
 
-    sudo /opt/livi/livi-cmd /opt/livi/rootfs/tmp/cp-bt.sock "set-aa 0"   # wlan0 back to NM
-    sudo /opt/livi/livi-cmd /opt/livi/rootfs/tmp/cp-bt.sock "set-aa 1"   # AP back up
+    sudo /opt/livi/livi-cmd /tmp/cp-bt.sock "set-aa 0"   # wlan0 back to NM
+    sudo /opt/livi/livi-cmd /tmp/cp-bt.sock "set-aa 1"   # AP back up
 
 A file park changes the boot state (the config is only read at `livi` start):
 
     sudo sed -i 's/"wirelessAaEnabled": *true/"wirelessAaEnabled": false/' \
-        /opt/livi/rootfs/home/user/.config/LIVI/config.json
+        /home/user/.config/LIVI/config.json
     sudo systemctl restart livi
 
 Check the helper:
 
-    ps | grep livi-helper                      # spawned by the app once python3 exists
-    journalctl -u livi | grep livi-helper      # startup state, profiles registered
-    sudo chroot /opt/livi/rootfs /usr/bin/python3 -c \
-      'import dbus; print(dbus.SystemBus().get_object("org.bluez","/org/bluez/hci0"))'
+    ps | grep livi-helperd                     # spawned by livi-core as root
+    journalctl -u livi | grep '\[helper'       # startup state, profiles registered
+    sudo bluetoothctl show | grep -E "Alias|Discoverable|Pairable"
 
-With wireless AA up the unit appears to phones as `carName`:
-
-    bluetoothctl show | grep -E "Alias|Discoverable|Pairable"
-
-### The video-plane stride fix (`livistride.c`)
-
-Once the software decoder was in place the wireless video arrived as a diagonally
-sheared, "h-sync failure" looking picture while the UI around it was pixel perfect.
-waylandsink builds the `wl_shm` buffer from the negotiated caps (`stride 3200` for
-800x480 RGBx) but videoconvert hands it row-padded memory: the frame is `3328*480`
-bytes, a 256-byte aligned stride. The compositor then reads every row 128 bytes early —
-one row's shift per row — which is the shear. `livi.service` sets `LIVI_GST_PRELOAD`
-(LIVI's own hook for its GStreamer child) to `livi-stride-fix.so`, which interposes
-`gst_wl_shm_memory_construct_wl_buffer()` and calls the real implementation with the
-memory's actual stride. Verify with `GST_DEBUG=wl_shm:6`: the log must say
-`Creating wl_buffer from SHM of size 1597440 (800 x 480, stride 3328), format RGBx`.
-The shim is compiled in the chroot (its gstreamer headers match the bundled 1.28 ABI).
+With wireless AA up the unit appears to phones as `carName`.
 
 ## Audio
 
-The bundled GStreamer only ships `pulsesink` and Chromium's audio is PulseAudio too, so
-the app plays through the host's PipeWire by socket. `livi-chroot` binds the host user's
-pulse server and cookie at fixed paths and `livi.service` points at them:
+LIVI-Lite's GStreamer host uses the system `pulsesink`, so the app plays through the
+phone's PipeWire by socket. `livi.service` points straight at the user's pulse socket -
+there is no chroot bind any more:
 
-    Environment=PULSE_SERVER=unix:/run/pulse/native
-    Environment=PULSE_COOKIE=/run/pulse-cookie/cookie
+    Environment=PULSE_SERVER=unix:/run/user/<uid>/pulse/native
 
-Audio then comes out of the phone's ordinary PipeWire sinks (speaker, headphones). Check
-it from inside the chroot:
+Audio comes out of the phone's ordinary PipeWire sinks (speaker, headphones). Check it on
+the host:
 
-    sudo chroot /opt/livi/rootfs /usr/bin/env HOME=/home/user \
-      PULSE_SERVER=unix:/run/pulse/native PULSE_COOKIE=/run/pulse-cookie/cookie \
-      pactl list short sinks
+    pactl list short sinks
 
 `/SystemVolume/` log lines show LIVI reading and setting the default sink volume. If
 `pactl` is missing it logs `is pactl installed?` and audio stays silent.
 
-Playback test, from the chroot (a wav through libpulse, then the app's exact AAC-LC
-chain with the bundled gst):
+Playback test (a wav through libpulse, then the app's exact AAC-LC chain with the system
+gst):
 
-    sudo chroot /opt/livi/rootfs /usr/bin/env HOME=/home/user \
-      PULSE_SERVER=unix:/run/pulse/native PULSE_COOKIE=/run/pulse-cookie/cookie \
-      paplay /tmp/test.wav
-    # with H=<extracted AppImage>/resources/gstreamer/linux-arm64
-    sudo chroot /opt/livi/rootfs /usr/bin/env HOME=/home/user \
-      PULSE_SERVER=unix:/run/pulse/native PULSE_COOKIE=/run/pulse-cookie/cookie \
-      LD_LIBRARY_PATH=$H/lib GST_PLUGIN_PATH=$H/lib/gstreamer-1.0 \
-      GST_PLUGIN_SCANNER=$H/libexec/gstreamer-1.0/gst-plugin-scanner \
-      $H/bin/gst-launch-1.0 -q filesrc location=/tmp/test.aac ! aacparse ! faad \
+    paplay /tmp/test.wav
+    gst-launch-1.0 -q filesrc location=/tmp/test.aac ! aacparse ! faad \
       ! audioconvert ! audioresample ! pulsesink
 
 ### Who owns PipeWire (linger and the launcher race)
@@ -539,10 +488,10 @@ perfectly.
 
 `install.sh` hides the autostart (the `pipewire.desktop` override goes to
 `~/.config/autostart`), so the systemd user units are the only owner: they are supervised
-(`Restart=on-failure`) and socket-activate pulse on the first client. `livi-chroot` also
-waits (up to 30 s) for `/run/user/<uid>/pulse/native` before binding it, so a hand-started
-`livi` that still races the user manager gets audio as soon as it is up instead of coming
-up mute. To repair an install that already lost the race (or to restart audio by hand):
+(`Restart=on-failure`) and socket-activate pulse on the first client. `livi.service` points
+PULSE_SERVER straight at that socket, so a livi started before the user manager comes up
+mute for that run: start it after boot with `systemctl restart livi`. To repair an install
+that already lost the race (or to restart audio by hand):
 
     export XDG_RUNTIME_DIR=/run/user/10000
     systemctl --user stop pipewire-pulse.socket pipewire.socket \
@@ -556,9 +505,8 @@ up mute. To repair an install that already lost the race (or to restart audio by
     systemctl --user reset-failed
     systemctl --user enable --now pipewire.socket pipewire-pulse.socket wireplumber.service
 
-Afterwards `pactl info` (on the host and in the chroot) must report a default sink and
-`systemctl --user status pipewire.service` must say `active (running)`, not `failed
-(start-limit-hit)`.
+Afterwards `pactl info` must report a default sink and `systemctl --user status
+pipewire.service` must say `active (running)`, not `failed (start-limit-hit)`.
 
 ## Boot behaviour
 
@@ -586,15 +534,14 @@ come up with multi-user too, and `tinydm` is disabled so nothing else takes `tty
   `unplugged`; the app comes back when the charger does).
 * each program has its own unit, so a crash restarts only that program; killing weston or
   the app brings the whole chain back through the dependencies.
-* the AppImage's detached nested compositor is inside `livi.service`'s cgroup (the
-  `livi-chroot` supervisor keeps the main process alive for it). stopping is staged:
-  the unit runs `KillMode=mixed`, so only the supervisor gets the SIGTERM; it forwards
-  that to the app under the compositor and waits up to `LIVI_STOP_GRACE` (10 s) for it
-  to quit, so LIVI's own before-quit path runs while wayland is still up, then closes
-  the compositor. `TimeoutStopSec=15` SIGKILLs whatever is left, which keeps
-  `systemctl restart livi` bounded even when the app wedges. Without this, a stop SIGTERM
-  killed the nested compositor at the same instant as the app and a quit path stuck on
-  the dead wayland connection held the unit for the default 90 s.
+* LIVI-Lite is one process tree under `livi.service`: livi-core starts the nested
+  compositor, the Slint UI, the GStreamer host and the helper itself. Stopping is
+  graceful by design: the unit runs `KillMode=mixed`, so only livi-core gets the SIGTERM;
+  its signal handler stops the UI first, then the compositor (so the UI never sees its
+  display vanish), then the helper. `TimeoutStopSec=8` SIGKILLs whatever is left, which
+  keeps `systemctl restart livi` bounded even when a decoder wedges. The native helper
+  means there is no python/asyncio layer and no `LIVI_STOP_GRACE` supervisor loop any
+  more.
 
 Verification after a reboot:
 
@@ -609,17 +556,29 @@ Verification after a reboot:
     systemctl is-active getty@tty1 fbkeyboard console-blank # the phone ui
     XDG_RUNTIME_DIR=/run/livi WAYLAND_DISPLAY=wayland-livi weston-screenshooter
 
+Timing reference (measured on the aarch64 Buildroot qemu image, which runs
+the same LIVI-Lite binaries and units): the appliance is at `multi-user` in
+~11 s and the panel gets LIVI-Lite ~12 s after weston is up; the previous
+Electron deployment took ~102 s from weston to a presented UI on the same
+image. A native x86_64 build starts core to Slint UI in ~0.6 s, so on phone
+hardware the app layer is no longer the long pole - the radio ~reload and
+the charger checks in `livi-link-monitor` are.
+
 ## Manual runs and `livi.sh`
 
 The units do not call `livi.sh` (each program restarts separately), but the stock script
-still works on the phone once the AppImage is the chroot wrapper:
+still works on the phone against the installed LIVI-Lite:
 
-    APPIMAGE=/opt/livi/livi-chroot ./livi.sh start     # or a copy with /opt/livi/livi-chroot
-                                                       # added to the candidate list
-    APPIMAGE=/opt/livi/livi-chroot ./livi.sh stop
+    ./livi.sh start          # uses /opt/livi/livi-core + /opt/livi/resources
+    ./livi.sh stop
 
-While the units run, `livi.sh start` sees the weston socket and the `--user-data-dir=`
-supervisor already alive and starts nothing.
+To run a source build instead, point it at the cargo output and the checkout:
+
+    LIVI_CORE=~/LIVI-Lite/native/livi-helperd/target/release/livi-core \
+      LIVI_ROOT=~/LIVI-Lite ./livi.sh start
+
+While the units run, `livi.sh start` sees the weston socket and the running `livi-core`
+and starts nothing.
 
 ## Troubleshooting
 
@@ -628,36 +587,35 @@ supervisor already alive and starts nothing.
 | `rawstream: wayland ... not up (No such file or directory), retrying` forever, 0 frames | rawlink started before weston; the capture thread retries every second and recovers when `livi-weston` is up. If it never comes up check `systemctl status livi-weston` and its journal |
 | `rawstream: wayland capture failed: unauthorized` | weston refuses every `weston_capture_v1` shot unless an authority allows it: `livi-weston.service` must run weston with `--debug` (its allow-all screenshot authority). an old unit without it never captures; re-run `install.sh` |
 | `rawstream: weston output is 1280x720, expected 800x480` | weston came up with the wrong mode; the unit pins `--width 800 --height 480` (a local `weston.ini` can override the headless output) |
-| panel black but frames flow; `ps` shows no Electron, and `~/.config/LIVI/log/compositor.log` has `eglCreateImageKHR createImageFromDmaBufs failed` / `create_immed failed and produced an invalid wl_buffer` | LIVI 9+ forces its inner app to Wayland and its GPU process hands the nested compositor dmabufs; a pixman session's EGL is software and cannot import them, so Electron dies (the old X11 stack failed the same way). Run the session with `LIVI_WESTON_RENDERER=gl` (livi.sh) / `--renderer=gl` on a machine with a GPU, or stay on LIVI 8.3.0 with pixman |
+| panel black but frames flow; `~/.config/LIVI/log/compositor.log` has `eglCreateImageKHR createImageFromDmaBufs failed` / `create_immed failed and produced an invalid wl_buffer` | the nested compositor's EGL cannot import the decoder's dmabufs. On a pixman session that means the codec probe picked a hardware `v4l2*dec`/`va*dec`; make the plugin set match the phone (software `avdec_*`/`faad` are enough) or run a GL session (`LIVI_WESTON_RENDERER=gl`, `--renderer=gl`) on a machine with a working GPU |
 | picture is upside down on a GL session | weston's async GL capture is bottom-up on drivers without `GL_ANGLE_pack_reverse_row_order` (NVIDIA); start rawlink with `--flip`. pixman sessions are never affected |
 | frames draw line by line and/or audio stutters while the phone's screen is off | the CPUs sit in `cpu-power-collapse` between wakeups, taxing every FunctionFS completion and PipeWire period. `livi-link` must be in `connected` and holding `/dev/cpu_dma_latency` at 0 while a player is connected: check `cat /run/livi-link/state` and `journalctl -u livi-link` (it releases the latency by design in `idle` and `unplugged`); reinstall the current `livi-link-monitor`/unit and `rawlink` (1 MB video pipe, 256 KB ep1 writes); see the host section of `rawplay/README.md` |
 | `weston ... failed to create compositor backend` | `weston-backend-headless` (and/or `weston-shell-kiosk`) is not installed; `apk add weston-backend-headless weston-shell-kiosk` |
-| `livi-compositor` exits right after `new output` | stale sockets; `livi-chroot` removes `$XDG_RUNTIME_DIR/{livi-compositor.ctrl,wayland-0*}`, keep it that way |
+| `livi-compositor` exits right after `new output` | stale sockets from a hard kill: remove `$XDG_RUNTIME_DIR/livi/compositor.ctrl` (and `.lock`) and restart `livi` |
 | `xdg_surface geometry (1280x720) is larger than ... (800x480)` | `~/.config/LIVI/config.json` missing or not 800x480 (the inner app reads `$HOME/.config/LIVI`, not `--user-data-dir`) |
 | `usbgadget: no usb device controller` looping | phone not in device mode; `rawlink-wait` forces the role and waits for `/sys/class/udc` |
 | `systemctl restart rawlink` hangs | old unit had the wait in `ExecStartPre`; it is now in `rawlink-wait` (the main process), so start/restart return immediately even unplugged |
-| `systemctl restart livi` hangs in `stop-sigterm` | old unit used the default control-group stop: systemd SIGTERM'd the nested compositor and the app at the same instant, the app's quit path could wedge on the dead wayland connection, and the stop sat the default 90 s. Re-run `install.sh` (or install the current `livi.service` + `livi-chroot` and `systemctl daemon-reload`); a stop is now bounded by `LIVI_STOP_GRACE` plus `TimeoutStopSec` |
+| `systemctl restart livi` hangs in `stop-sigterm` | an old unit from the Electron deployment is still installed. Re-run `install.sh` (the current `livi.service` + native core stop bounded by `TimeoutStopSec=8`); check `systemctl cat livi` shows `ExecStart=/opt/livi/livi-core` and `KillMode=mixed` |
 | changed `usb.img` not visible to the unit | the LUN holds the old file until the gadget rebinds: `sudo systemctl restart rawlink` |
-| LIVI shows no Bluetooth device / `aa-bt initial populate gave up` | the python helper is not running: check `ModuleNotFoundError` in `journalctl -u livi`, install it in the chroot; or the system bus is not bound (`dbus.SystemBus()` error) |
-| `[helperSudoers] pkexec not available` | informational: the helper wants to install a sudoers drop-in; running as root in the chroot it does not need it |
-| wireless session connects but the screen stays black, `[gst_video] decoder=v4l2h265dec` | the hardware path needs dmabuf and the pixman compositor has none. Remove `libv4l-0t64` (and clear `~/.cache/gstreamer-1.0`) so the probe reports `h264(hw=false sw=true)` and the app uses `avdec_*` |
-| black screen, `[CodecCapability] h264(hw=false sw=false)` | the bundled decoder/waylandsink could not load at all. Use the 26.04/Trixie base (24.04 lacks `vaMapBuffer2` and `wl_display_create_queue_with_name`), install `libva2 libva-drm2 libva-x11-2 libssh-4 libgudev-1.0-0` |
-| video sheared/smeared ("h-sync failure") while the UI is perfect | waylandsink stride mismatch. Check `GST_DEBUG=wl_shm:6` says `stride 3328`; if not, `LIVI_GST_PRELOAD` is not reaching the app's GStreamer child (see the stride fix above) |
+| LIVI shows no Bluetooth device | the Rust helper is not running: `journalctl -u livi \| grep '\[helper'`; the usual cause is the sudoers rule (`/etc/sudoers.d/99-LIVI-helper`) missing or not matching `/opt/livi/resources/driver/livi-helperd`, or `bluetooth.service` not being up. Re-run `install.sh`, then `systemctl restart livi` |
+| `[core] cannot start the helper` / `sudo: a password is required` | the pre-seeded sudoers rule is missing. Re-run `install.sh` (it writes and `visudo`-validates it), or add `user ALL=(root) NOPASSWD: SETENV: /opt/livi/resources/driver/livi-helperd` to `/etc/sudoers.d/99-LIVI-helper` |
+| wireless session connects but the screen stays black, `decoder=v4l2h265dec` | the hardware path needs dmabuf and the pixman compositor has none. Get the software path back by making the probe report `hw=false sw=true` (the appliance's plugin set is `gst-libav` + `gst-plugins-bad`; clear `~/.cache/gstreamer-1.0` after changing plugins) |
+| black screen, codec probe `h264(hw=false sw=false)` | the decoder/waylandsink plugins are not installed. `apk add gst-plugins-bad gst-libav` and clear `~/.cache/gstreamer-1.0` |
+| video sheared/smeared while the UI is perfect | no longer expected with LIVI-Lite: the video host links the system GStreamer, whose waylandsink and videoconvert agree on the row stride. If it appears, the system GStreamer is mixed-version (update `gst-plugins-base`/`gst-plugins-bad` together) |
 | no audio from LIVI; `pactl info` in the chroot says `Connection refused`; `systemctl --user status pipewire.service` is `failed (start-limit-hit)` | the desktop `pipewire-launcher` autostart raced the systemd user units at login and left `pipewire-0`/`pulse/native` pointing at a dead listener. Re-run `install.sh` (it hides the launcher and repairs the stack) or run the repair block under "Who owns PipeWire" |
-| no audio from LIVI after the fbkeyboard switch; `journalctl -u livi` shows `mount ... /run/user/<uid>/pulse does not exist` and `[SystemVolume] could not set @DEFAULT_SINK@ ... is pactl installed?` | nothing starts the user manager at boot without a login session any more, so the pulse socket is not there when `livi` starts. `install.sh` now runs `loginctl enable-linger user`; by hand: `sudo loginctl enable-linger user && sudo systemctl start user@10000`, then `systemctl restart livi`. Check `loginctl show-user user -p Linger` (`yes`) and that `/run/user/10000/pulse/native` exists |
-| no audio from LIVI, and `paplay` hangs on the host too | `pipewire-pulse` is wedged or gone (`journalctl _UID=10000 \| grep -E 'create_stream_timeout\|pipewire'`). Restart the user audio stack per "Who owns PipeWire" (with `XDG_RUNTIME_DIR=/run/user/10000`). The chroot hears the host's sink through the bound `/run/pulse` socket |
-| helper crash-loops with `There is no current event loop in thread 'MainThread'` | python 3.14; install `livi_asyncio_compat.py` + `livi-asyncio-compat.pth` in the chroot's `dist-packages` |
-| no audio / `is pactl installed?` | install `libpulse0 pulseaudio-utils`; make sure `livi.service` has `PULSE_SERVER`/`PULSE_COOKIE` and `livi-chroot` bound `/run/pulse` + `/run/pulse-cookie` |
-| no Wi-Fi AP / phone never projects | look at `/tmp/livi-hostapd.log` in the chroot and `journalctl -u livi | grep wifi_ap`; `hostapd_cli -p /var/run/hostapd -i wlan0 status` inside the chroot |
-| phone's Wi-Fi/ssh is down (or was never reachable) while the appliance runs | expected on wcn36xx (no STA+AP concurrency) and by design: wireless AA is parked on in `livi-config.json` so it is never toggled under the running app. Toggle it off in LIVI's UI, or from a local shell with `/opt/livi/livi-cmd /opt/livi/rootfs/tmp/cp-bt.sock "set-aa 0"`, to get wlan0 back. Also expected in the `unplugged` state: `livi-link` stops `livi` and rfkill-blocks the radios while the charger is gone; plug the charger in (or `systemctl stop livi-link`) to get them back |
+| no audio from LIVI after the fbkeyboard switch; `[SystemVolume] could not set @DEFAULT_SINK@ ... is pactl installed?` | nothing starts the user manager at boot without a login session any more, so the pulse socket is not there when `livi` starts. `install.sh` runs `loginctl enable-linger user`; by hand: `sudo loginctl enable-linger user && sudo systemctl start user@10000`, then `systemctl restart livi`. Check `loginctl show-user user -p Linger` (`yes`) and that `/run/user/10000/pulse/native` exists |
+| no audio from LIVI, and `paplay` hangs on the host too | `pipewire-pulse` is wedged or gone (`journalctl _UID=10000 \| grep -E 'create_stream_timeout\|pipewire'`). Restart the user audio stack per "Who owns PipeWire" (with `XDG_RUNTIME_DIR=/run/user/10000`) |
+| no audio / `is pactl installed?` | install `pulseaudio-utils`; make sure `livi.service` has `PULSE_SERVER=unix:/run/user/<uid>/pulse/native` |
+| no Wi-Fi AP / phone never projects | `journalctl -u livi \| grep wifi_ap`; the helper runs hostapd directly, check `logread`/`dmesg` for wlan0 and the helper's sudoers rule |
+| phone's Wi-Fi/ssh is down (or was never reachable) while the appliance runs | expected on wcn36xx (no STA+AP concurrency) and by design: wireless AA is parked on in `livi-config.json` so it is never toggled under the running app. Toggle it off in LIVI's UI, or from a local shell with `/opt/livi/livi-cmd /tmp/cp-bt.sock "set-aa 0"`, to get wlan0 back. Also expected in the `unplugged` state: `livi-link` stops `livi` and rfkill-blocks the radios while the charger is gone; plug the charger in (or `systemctl stop livi-link`) to get them back |
 | LIVI is not on the panel although the phone is up | either the charger is gone (`cat /run/livi-link/state` says `unplugged`) or the radio reload failed after it returned (`journalctl -u livi-link` shows `radios not confirmed up`), in which case `livi` stays stopped by design. Plug/unplug once or `systemctl restart livi-link` to retry; check `rfkill list` and `dmesg` for the wcn36xx Data Abort row above |
-| wireless AA never comes up | it is LIVI's own now, not `livi-link`'s: check `journalctl -u livi \| grep livi-helper` (the helper must run) and the AP side (`journalctl -u livi \| grep wifi_ap`, `/tmp/livi-hostapd.log` in the chroot). `wirelessAaEnabled` must be `true` in `livi-config.json`; re-run `install.sh` if it is missing |
+| wireless AA never comes up | it is LIVI's own now, not `livi-link`'s: check `journalctl -u livi \| grep '\[helper'` (the helper must run) and the AP side (`journalctl -u livi \| grep wifi_ap`). `wirelessAaEnabled` must be `true` in `livi-config.json`; re-run `install.sh` if it is missing |
 | no `/fs/usb0` on the unit | the port must be high speed (jailbroken `io-usb` restart, `usb/homebrew/apps/usbhs.sh`); check `--stick /opt/livi/usb.img` exists |
 | phone unreachable after a while | either the charger is gone (`livi-link` turns the radios off by design: `cat /run/livi-link/state`, `rfkill list`, plug the charger in) or `livi-link` is not running (`systemctl is-active livi-link`; only `systemctl stop livi-link` releases the wake lock and restores the radios) |
 | wifi/AP does not come back after the charger returns, `dmesg` shows `qcom-wcnss-pil ... Data Abort` | a bare `rfkill unblock` crashes the wcn36xx firmware on this port. `livi-link` unloads `btqcomsmd`/`wcn36xx` while blocked and reloads them on the charger; if it was toggled by hand, `sudo modprobe -r btqcomsmd wcn36xx && sudo modprobe wcn36xx btqcomsmd && sudo systemctl restart bluetooth` (or reboot) |
 | `echo mem`/`systemctl suspend` resets the phone | expected on this port: s2idle hangs in device suspend with no working wake source and the PMIC watchdog resets the phone minutes later. `livi-link` holds the wake lock so nothing else tries it; do not stop the unit and suspend by hand |
-| AppImage `cannot execute: required file not found` | ran outside the chroot; use `livi-chroot` (or `APPIMAGE=/opt/livi/livi-chroot`) |
-| `unsupported relocation type 1032` | `gcompat` was used; the real glibc chroot is required |
+| `livi-core: not found` / `cannot execute` | a stale unit from the Electron deployment (`ExecStart=/opt/livi/livi-chroot`). Re-run `install.sh`; `systemctl cat livi` must show `/opt/livi/livi-core` |
+| `livi-core` starts but the UI never appears | check `journalctl -u livi \| grep -E 'UI started\|compositor\|no runtime'`; `LIVI_RESOURCES` must point at `/opt/livi/resources` and the four binaries must be staged there (`resources/driver`, `resources/gst-host`, `resources/compositor`, `livi-ui`) |
 | no touch, and panel keys do nothing, while the video works | the `weston-touch` module did not load, or weston restarted: check `journalctl -u livi-weston` for `livi-touch: touch device ready on ...` and for a module load error. building `weston-touch.so` without `-DLIVI_WESTON_MAJOR=16` on weston 16 aborts weston on the first touch. rawlink retries the socket every 2 s, so it also recovers from a weston restart |
 | no touch at all after a reboot, while the car link works | rawlink won the boot race before weston existed; an old `/opt/livi/rawlink` disabled injection at startup. the current build keeps injection enabled and retries the weston-touch socket on use; update it (`make -C rawplay rawlink` on the phone or re-run `install.sh`) and `systemctl restart rawlink` |
 | weston core-dumps on restart | weston 16 asserts the touch device list is empty at shutdown; `weston-touch.c` destroys its device in the compositor destroy listener |
@@ -678,8 +636,8 @@ supervisor already alive and starts nothing.
 * **No wired CarPlay dongle on the same port.** The single USB port is the gadget to the
   unit; a Carlinkit needs host mode. Wireless (LIVI Link network dongle) is the way to
   have both.
-* The stack is CPU-rendered (weston pixman, Electron software GL): fine for 800x480 UI,
-  not a GPU pipeline.
-* The UI still lists the optional Wi-Fi/BT/audio helpers as dismissed; installing them
-  inside the chroot does not give them access to the host's hardware (no system D-Bus),
-  which is why they are dismissed rather than installed.
+* The stack is CPU-rendered (weston pixman + the compositor's software EGL): fine for
+  800x480 UI, not a GPU pipeline.
+* The UI still lists the optional Wi-Fi/BT/audio helper packages as dismissed: the
+  phone's radios are driven by LIVI's own helper + hostapd/BlueZ, not by the desktop
+  stacks (NetworkManager, PipeWire's bluetooth plugin) that list names.

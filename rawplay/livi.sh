@@ -1,24 +1,22 @@
 #!/usr/bin/env bash
-# Run LIVI alone, fullscreen, in a virtual (headless) 800x480 Wayland session, so a raw
-# sender (rawplay/out/rawlink) can capture it and carry it to the unit. No X server is
+# Run LIVI-Lite alone, fullscreen, in a virtual (headless) 800x480 Wayland session, so a
+# raw sender (rawplay/out/rawlink) can capture it and carry it to the unit. No X server is
 # involved anywhere.
 #
 # Stack:
 #   weston (headless backend, kiosk shell, repaint-on-capture)
-#     -> livi-compositor (bundled, wayland)        places LIVI's video plane
-#       -> LIVI (Electron)
+#     -> livi-compositor (started by livi-core)   places LIVI's video plane
+#       -> livi-ui (Slint) + livi-gst-host
 #
-# LIVI needs a compositor of its own under it: its GStreamer waylandsink sends the
-# phone/video plane to a separate Wayland surface, and the nested compositor keeps that
-# inside the framebuffer the sender captures.
+# LIVI-Lite is the Electron-free fork: livi-core starts its own nested compositor, the
+# Slint UI, the GStreamer video host and the helper, all natively. The nested compositor
+# is still needed because the GStreamer waylandsink sends the video plane to a separate
+# Wayland surface that has to stay inside the framebuffer the sender captures.
 #
-# renderer: LIVI 8.3.0 works with the CPU (pixman) session the phone runs. LIVI 9.0.0
-# forces its inner app to Wayland (--ozone-platform=wayland) and its GPU process hands
-# the nested compositor dmabufs; a pixman session's EGL is software and cannot import
-# them, so the app dies with `create_immed ... invalid wl_buffer` and the panel stays
-# black. on a machine with a working GPU run LIVI_WESTON_RENDERER=gl (or just try it:
-# see the troubleshooting table in deploy/README.md). on NVIDIA that GL session's capture
-# comes out bottom-up (weston's async GL path), so start rawlink with --flip too.
+# the installed deployment (deploy/install.sh) puts the runtime at /opt/livi. To run a
+# source build instead, point LIVI_CORE at the cargo output and set LIVI_ROOT:
+#
+#   LIVI_CORE=~/LIVI-Lite/native/livi-helperd/target/release/livi-core ./livi.sh start
 #
 #   ./livi.sh start            start the stack
 #   ./livi.sh stop             stop it
@@ -27,13 +25,18 @@
 # `rawplay/out/rawlink stream <sock> --usb --wayland LIVI_WAYLAND_SOCKET` streams this
 # session; see rawplay/README.md.
 #
-# override with env: APPIMAGE, LIVI_WAYLAND_SOCKET (wayland-livi), LIVI_USERDATA,
-#                    LIVI_LOGDIR, LIVI_WESTON_RENDERER (pixman|gl), LIVI_WESTON_EXTRA
-#                    (extra weston flags)
+# override with env: LIVI_CORE (binary), LIVI_RESOURCES (installed resources dir, default
+# /opt/livi/resources), LIVI_ROOT (source checkout for the repo layout),
+# LIVI_WAYLAND_SOCKET (wayland-livi), LIVI_USERDATA, LIVI_LOGDIR,
+# LIVI_WESTON_RENDERER (pixman|gl), LIVI_WESTON_EXTRA (extra weston flags)
 set -euo pipefail
 
 HERE="$(dirname "$(readlink -f "$0")")"
-APPIMAGE="${APPIMAGE:-}"
+LIVI_CORE="${LIVI_CORE:-${LIVI_ROOT:-}/native/livi-helperd/target/release/livi-core}"
+[ -x "$LIVI_CORE" ] || LIVI_CORE=/opt/livi/livi-core
+if [ -z "${LIVI_ROOT:-}" ] && [ -z "${LIVI_RESOURCES:-}" ]; then
+  LIVI_RESOURCES=/opt/livi/resources
+fi
 WSOCK="${LIVI_WAYLAND_SOCKET:-wayland-livi}"
 USERDATA="${LIVI_USERDATA:-$HOME/.config/LIVI-vnc}"
 LOGDIR="${LIVI_LOGDIR:-$HOME/.local/state/livi-vnc}"
@@ -42,19 +45,10 @@ H=480
 RENDERER="${LIVI_WESTON_RENDERER:-pixman}"
 RUNDIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
-if [ -z "$APPIMAGE" ]; then
-  for candidate in "$HERE"/LIVI-*.AppImage "$HOME/Downloads"/LIVI-*.AppImage; do
-    if [ -x "$candidate" ]; then
-      APPIMAGE="$candidate"
-      break
-    fi
-  done
-fi
-
 mkdir -p "$USERDATA" "$LOGDIR" "$RUNDIR"
 
 start() {
-  [ -n "$APPIMAGE" ] && [ -x "$APPIMAGE" ] || { echo "livi: no executable AppImage (set APPIMAGE)" >&2; exit 1; }
+  [ -x "$LIVI_CORE" ] || { echo "livi: no livi-core binary (set LIVI_CORE)" >&2; exit 1; }
 
   # 1. private config for this instance: kiosk, 800x480, pinned to the top-left
   if [ ! -f "$USERDATA/config.json" ]; then
@@ -70,7 +64,7 @@ JSON
 
   # 2. Weston headless: the virtual session itself. --refresh-rate 0 means it repaints
   #    only when rawlink captures, and --debug authorizes those captures (the protocol is
-  #    privileged). --fake-seat gives the touch module and electron a wl_seat.
+  #    privileged). --fake-seat gives the touch module and the UI a wl_seat.
   if ! pgrep -f "socket=$WSOCK" >/dev/null; then
     echo "livi: starting weston headless (kiosk, ${W}x${H}, wayland-$WSOCK)"
     rm -f "$RUNDIR/$WSOCK" "$RUNDIR/$WSOCK.lock" 2>/dev/null || true
@@ -91,21 +85,22 @@ JSON
     for _ in $(seq 1 80); do [ -S "$RUNDIR/$WSOCK" ] && break; sleep 0.1; done
   fi
 
-  # 3. LIVI alone, fullscreen, inside the headless session. Its bundled nested compositor
-  #    puts the phone video plane in the same framebuffer rawlink captures.
-  if ! pgrep -f "user-data-dir=$USERDATA" >/dev/null; then
-    echo "livi: starting LIVI on $WSOCK"
-    setsid env -u LIVI_COMPOSITOR -u LIVI_NO_COMPOSITOR \
-      XDG_RUNTIME_DIR="$RUNDIR" WAYLAND_DISPLAY="$WSOCK" \
+  # 3. LIVI-Lite alone, fullscreen, inside the headless session. livi-core starts its
+  #    nested compositor and the UI itself and puts the phone video plane in the same
+  #    framebuffer rawlink captures.
+  if ! pgrep -f "livi-core" >/dev/null; then
+    echo "livi: starting LIVI-Lite ($LIVI_CORE) on $WSOCK"
+    setsid env XDG_RUNTIME_DIR="$RUNDIR" WAYLAND_DISPLAY="$WSOCK" \
       LIVI_KIOSK=1 \
-      "$APPIMAGE" --user-data-dir="$USERDATA" --no-sandbox \
-      >>"$LOGDIR/livi.log" 2>&1 < /dev/null &
+      ${LIVI_RESOURCES:+LIVI_RESOURCES="$LIVI_RESOURCES"} \
+      ${LIVI_ROOT:+LIVI_ROOT="$LIVI_ROOT"} \
+      "$LIVI_CORE" >>"$LOGDIR/livi.log" 2>&1 < /dev/null &
   fi
   echo "livi: session up at $RUNDIR/$WSOCK"
 }
 
 stop() {
-  pkill -f "user-data-dir=$USERDATA" 2>/dev/null || true
+  pkill -f "livi-core" 2>/dev/null || true
   pkill -f "socket=$WSOCK" 2>/dev/null || true
   rm -f "$RUNDIR/$WSOCK" "$RUNDIR/$WSOCK.lock" 2>/dev/null || true
   echo "livi: stopped"

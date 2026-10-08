@@ -1,0 +1,44 @@
+config BR2_PACKAGE_LIVI_LITE
+	bool "LIVI-Lite (native CarPlay/Android Auto head unit)"
+	depends on BR2_aarch64
+	depends on BR2_USE_MMU
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on BR2_TOOLCHAIN_USES_GLIBC
+	depends on BR2_PACKAGE_HOST_RUSTC_TARGET_ARCH_SUPPORTS
+	depends on BR2_PACKAGE_HAS_LIBUDEV
+	select BR2_PACKAGE_HOST_RUSTC
+	select BR2_PACKAGE_WAYLAND
+	select BR2_PACKAGE_LIBXKBCOMMON
+	select BR2_PACKAGE_GSTREAMER1
+	select BR2_PACKAGE_GST1_PLUGINS_BASE
+	select BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_OPUS
+	select BR2_PACKAGE_GST1_PLUGINS_GOOD
+	select BR2_PACKAGE_GST1_PLUGINS_GOOD_PLUGIN_AUDIOFX
+	select BR2_PACKAGE_GST1_PLUGINS_GOOD_PLUGIN_AUDIOPARSERS
+	select BR2_PACKAGE_GST1_PLUGINS_GOOD_PLUGIN_PULSE
+	select BR2_PACKAGE_GST1_PLUGINS_GOOD_PLUGIN_RTP
+	select BR2_PACKAGE_GST1_PLUGINS_BAD
+	select BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_FAAD
+	select BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_VIDEOPARSERS
+	select BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_WAYLAND
+	select BR2_PACKAGE_GST1_LIBAV
+	select BR2_PACKAGE_DEJAVU
+	help
+	  LIVI-Lite is the Electron-free fork of LIVI: the upstream Rust
+	  core (livi-core, livi-helperd, the GStreamer video host) plus a
+	  Slint UI and the Rust nested compositor, built from source against
+	  the image's own GStreamer/Wayland. There is no AppImage, no
+	  Electron/Chromium and no Ubuntu chroot: the four binaries start in
+	  milliseconds, which is what makes the appliance boot fast.
+
+	  DejaVu is selected because the GStreamer host's text rendering
+	  (fontique/fontconfig) unwraps a font match and panics when the
+	  image has no font installed at all.
+
+	  The source tree is expected next to the ICC2-jailbreak checkout
+	  (pukikiko/LIVI-Lite); override LIVI_LITE_SRC to point elsewhere.
+
+	  https://github.com/pukikiko/LIVI-Lite
+
+comment "livi-lite needs a glibc aarch64 toolchain with Rust support"
+	depends on BR2_aarch64 && !BR2_TOOLCHAIN_USES_GLIBC
