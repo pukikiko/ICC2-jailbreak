@@ -41,8 +41,8 @@
 #             disconnected stream client, or rawlink (re)starting or dying ("bound to",
 #             systemd's Started/Stopped / Main process exited / Scheduled restart).
 #
-# livi itself is tied to the radios: the unplugged state stops livi.service (the staged
-# stop livi-chroot documents), and the charger starts it again only after radios_on has
+# livi itself is tied to the radios: the unplugged state stops livi.service (a graceful
+# stop, livi-core tears down its children), and the charger starts it again only after radios_on has
 # confirmed the driver reload and the rfkill unblock. both directions are re-checked
 # every tick, so a livi the multi-user boot job or a manual start brings up behind the
 # monitor is taken down while the car is off, and one stopped by hand is started again

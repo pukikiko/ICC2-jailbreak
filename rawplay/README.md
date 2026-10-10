@@ -569,14 +569,13 @@ cache/sdram stalls qemu does not model.
 
 ### Emulator
 
-The display end is LIVI in the virtual wayland session (`rawplay/livi.sh`): weston's
-headless backend, kiosk shell, repaint-on-capture, no X server. qemu's `usb-livi` uses
-request-sized bulk transfers (`chunked=on`), which is what makes the zero-copy path work.
-The default renderer is pixman (what the phone runs, and what LIVI 8.3.0 needs); LIVI
-9.0.0 forces its inner app to Wayland and its GPU process needs a dmabuf-capable parent,
-so on a GPU host run it as `LIVI_WESTON_RENDERER=gl ./livi.sh start` and pass rawlink
-`--flip` (a pixman session makes Electron die with `create_immed ... invalid wl_buffer`
-and the panel stays black; NVIDIA's GL capture is bottom-up):
+The display end is **LIVI-Lite** in the virtual wayland session (`rawplay/livi.sh`):
+weston's headless backend, kiosk shell, repaint-on-capture, no X server. qemu's `usb-livi`
+uses request-sized bulk transfers (`chunked=on`), which is what makes the zero-copy path
+work. `livi.sh` runs `/opt/livi/livi-core` (or a source build via `LIVI_CORE`/`LIVI_ROOT`);
+the default renderer is pixman, which the appliance and the phone both run. On a GPU host
+`LIVI_WESTON_RENDERER=gl ./livi.sh start` also works; NVIDIA's GL capture is bottom-up, so
+pass rawlink `--flip` there:
 
     rawplay/livi.sh
     make -C rawplay rawlink

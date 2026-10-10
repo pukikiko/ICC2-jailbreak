@@ -1,16 +1,23 @@
 #!/bin/sh
-# deploy LIVI + rawlink on a postmarketOS phone (the appliance build). run it on the
-# phone, from a checkout of this repo (or with --rawplay pointing at one):
+# deploy rawlink + LIVI-Lite on a postmarketOS phone (the appliance build). run it on
+# the phone, from a checkout of this repo (or with --rawplay pointing at one):
 #
-#     ./install.sh --assets ~/livi-assets
+#     ./install.sh --livi-lite ~/LIVI-Lite
 #
-# --assets is a directory holding the aarch64 LIVI release AppImage and (optionally)
-# usb.img; usb.img is built from the repo when absent. everything needs sudo.
+# LIVI-Lite (pukikiko/LIVI-Lite) is the Electron-free fork of LIVI: a Rust core, a
+# Slint UI and a Rust nested compositor, all built from source against the phone's
+# own musl GStreamer/Wayland. There is no AppImage, no Electron and no glibc chroot
+# any more, which is what makes the appliance start in milliseconds. If no source
+# tree is given, the fork is cloned next to $HOME or the repo.
 #
-# steps: apk packages + the phone ui (fbkeyboard console, idle blanking), build rawlink +
-# weston-touch.so + livi-cmd, /opt/livi, the ubuntu glibc chroot, LIVI config, user audio
-# stack, systemd units, enable + start. idempotent; re-run after updates (it also retires
-# the old livi-wakelock unit).
+# --assets is (still) where usb.img may live; usb.img is built from the repo when
+# absent. everything needs sudo/doas.
+#
+# steps: apk packages + the phone ui (fbkeyboard console, idle blanking), build
+# rawlink + weston-touch.so + livi-cmd, fetch + build LIVI-Lite, /opt/livi, LIVI
+# config, user audio stack, systemd units, enable + start. idempotent; re-run after
+# updates (it also retires the old livi-wakelock/livi-xvnc units and the chroot
+# deployment).
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -21,11 +28,15 @@ ASSETS=${LIVI_ASSETS:-$HOME/livi-assets}
 LIVI_USER=${LIVI_USER:-user}
 LIVI_HOME=${LIVI_HOME:-/home/$LIVI_USER}
 OPT=/opt/livi
-ROOTFS=$OPT/rootfs
-APPIMAGE_NAME=${LIVI_APPIMAGE:-}
-# the livi release targets debian trixie / ubuntu 26.04; 24.04's older libva and
-# libwayland-client cannot load the bundled h264 decoder and waylandsink (black video)
-UBUNTU_URL=https://cdimage.ubuntu.com/ubuntu-base/releases/26.04/release/ubuntu-base-26.04.1-base-arm64.tar.gz
+# where the pukikiko/LIVI-Lite source tree lives; cloned here when missing. set
+# LIVI_LITE_DIR / --livi-lite to use a checkout elsewhere, LIVI_LITE_REF to pin a
+# tag or commit.
+LIVI_LITE_DIR=${LIVI_LITE_DIR:-$HOME/LIVI-Lite}
+LIVI_LITE_REPO=${LIVI_LITE_REPO:-https://github.com/pukikiko/LIVI-Lite}
+LIVI_LITE_REF=${LIVI_LITE_REF:-}
+# a pre-built stage tree (the output of deploy/livi-lite-build.sh) may be installed
+# instead of building on the phone; useful for slow phones and CI
+LIVI_LITE_STAGE=${LIVI_LITE_STAGE:-}
 
 SUDO=${SUDO:-}
 [ -z "$SUDO" ] && { command -v sudo >/dev/null && SUDO=sudo; }
@@ -37,7 +48,11 @@ while [ $# -gt 0 ]; do
         --assets) ASSETS=$2; shift 2 ;;
         --rawplay) LIVI_DIR=$2; REPO=$(cd "$2/.." && pwd); shift 2 ;;
         --user) LIVI_USER=$2; LIVI_HOME=/home/$2; shift 2 ;;
-        *) echo "usage: $0 [--assets DIR] [--rawplay DIR] [--user USER]" >&2; exit 2 ;;
+        --livi-lite) LIVI_LITE_DIR=$2; shift 2 ;;
+        --livi-stage) LIVI_LITE_STAGE=$2; shift 2 ;;
+        *) echo "usage: $0 [--assets DIR] [--rawplay DIR] [--user USER]" >&2
+           echo "          [--livi-lite DIR] [--livi-stage DIR]" >&2
+           exit 2 ;;
     esac
 done
 
@@ -45,20 +60,37 @@ done
 
 say() { printf 'install: %s\n' "$*"; }
 
+# some build dependencies are named differently across postmarketOS releases
+# (systemd-dev vs eudev-dev, gst-plugins-bad-dev present or not); install them
+# one by one so a rename cannot fail the whole deployment.
+apk_optional() {
+    for pkg in "$@"; do
+        $SUDO apk add --quiet "$pkg" 2>/dev/null || say "note: optional package $pkg not available"
+    done
+}
+
 # ---- packages ---------------------------------------------------------------------------
 
 say "packages"
-# weston is the headless wayland session the app and the sender run on; its headless
-# backend and the kiosk shell are separate subpackages (without the backend weston fails
-# with "failed to create compositor backend"). weston-dev is for the weston-touch.so
-# module and wayland-dev carries the libwayland-client headers and wayland-scanner
-# rawlink's capture needs. xkeyboard-config provides the evdev keymap weston's keyboard
-# and the panel key taps use. there is no X server and no ffmpeg on this stack any more.
+# weston is the headless wayland session the stack runs on; its headless backend and
+# the kiosk shell are separate subpackages (without the backend weston fails with
+# "failed to create compositor backend"). weston-dev is for the weston-touch.so
+# module and wayland-dev carries the libwayland headers and wayland-scanner rawlink's
+# capture needs. xkeyboard-config provides the evdev keymap weston's keyboard and the
+# panel key taps use. rust/cargo build LIVI-Lite; the gst/mesa/wayland *-dev packages
+# are what its build scripts link against, and the runtime plugin packages are the
+# codecs and sinks LIVI's pipelines use (waylandsink, pulsesink, avdec_*/faad).
 # postmarketos-ui-fbkeyboard is the phone's own UI (the preferred console UI, see the
 # README): it is installed here, before any desktop UI is retired, so the shared
 # postmarketos-base-ui package is not orphaned in between.
 $SUDO apk add --quiet build-base bash weston weston-backend-headless weston-shell-kiosk \
-    weston-dev wayland-dev fuse3 xkeyboard-config postmarketos-ui-fbkeyboard
+    weston-dev wayland-dev xkeyboard-config postmarketos-ui-fbkeyboard \
+    rust cargo pkgconf cmake perl \
+    gstreamer-dev gst-plugins-base-dev \
+    gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav \
+    wayland-protocols libxkbcommon-dev mesa-dev libdrm-dev \
+    pulseaudio-utils bluez iproute2 iw rfkill hostapd dnsmasq sudo
+apk_optional systemd-dev eudev-dev libudev-dev gst-plugins-bad-dev gst-plugins-ugly
 
 # ---- phone ui (the preferred console UI) -------------------------------------------------
 
@@ -93,16 +125,6 @@ $SUDO systemctl enable --now fbkeyboard.service
 
 # ---- assets -----------------------------------------------------------------------------
 
-if [ -z "$APPIMAGE_NAME" ]; then
-    for f in "$ASSETS"/LIVI-*-linux-arm64.AppImage "$LIVI_DIR"/LIVI-*.AppImage; do
-        [ -f "$f" ] && APPIMAGE_NAME=$f && break
-    done
-fi
-if [ -z "$APPIMAGE_NAME" ] || [ ! -f "$APPIMAGE_NAME" ]; then
-    echo "no LIVI-*-linux-arm64.AppImage found; put it in $ASSETS or set LIVI_APPIMAGE" >&2
-    exit 1
-fi
-
 if [ ! -f "$ASSETS/usb.img" ]; then
     say "building the homebrew stick image (mkusb.py)"
     (cd "$REPO" && python3 mkusb.py)
@@ -124,6 +146,29 @@ cc -O2 -Wall -Wextra -fPIC -DLIVI_WESTON_MAJOR="$WESTON_MAJOR" \
     -shared -o "$LIVI_DIR/weston-touch.so" "$LIVI_DIR/weston-touch.c" \
     $(pkg-config --libs "$WESTON_PC" wayland-server)
 
+# ---- LIVI-Lite (built from source unless a stage tree was handed over) ------------------
+
+if [ -n "$LIVI_LITE_STAGE" ]; then
+    say "LIVI-Lite: using the pre-built stage tree $LIVI_LITE_STAGE"
+    STAGE=$LIVI_LITE_STAGE
+else
+    if [ ! -d "$LIVI_LITE_DIR/native/livi-helperd" ]; then
+        say "LIVI-Lite: cloning $LIVI_LITE_REPO"
+        git clone --quiet "$LIVI_LITE_REPO" "$LIVI_LITE_DIR"
+    fi
+    if [ -n "$LIVI_LITE_REF" ]; then
+        say "LIVI-Lite: checking out $LIVI_LITE_REF"
+        git -C "$LIVI_LITE_DIR" fetch --quiet origin
+        git -C "$LIVI_LITE_DIR" checkout --quiet "$LIVI_LITE_REF"
+    fi
+    # musl/native build: cargo builds for the phone's own target by default. a
+    # native release build of the four workspaces takes a while on a phone, so the
+    # stage tree is what a fast reinstall uses after the first build.
+    say "LIVI-Lite: cargo build (native, $(uname -m)); this is the slow step"
+    STAGE=$(mktemp -d)
+    sh "$HERE/livi-lite-build.sh" "$LIVI_LITE_DIR" "$STAGE"
+fi
+
 # ---- /opt/livi --------------------------------------------------------------------------
 
 say "installing /opt/livi"
@@ -132,71 +177,45 @@ $SUDO install -m 755 "$LIVI_DIR/out/rawlink" "$OPT/rawlink"
 $SUDO install -m 755 "$LIVI_DIR/out/livi-cmd" "$OPT/livi-cmd"
 $SUDO install -m 644 "$LIVI_DIR/weston-touch.so" "$OPT/weston-touch.so"
 $SUDO install -m 644 "$ASSETS/usb.img" "$OPT/usb.img"
-$SUDO install -m 755 "$HERE/livi-chroot" "$OPT/livi-chroot"
 $SUDO install -m 755 "$HERE/rawlink-wait" "$OPT/rawlink-wait"
 $SUDO install -m 755 "$HERE/livi-link-monitor" "$OPT/livi-link-monitor"
+$SUDO rm -rf "$OPT/resources"
+$SUDO cp -a "$STAGE/." "$OPT/"
+[ -n "$LIVI_LITE_STAGE" ] || rm -rf "$STAGE"
+$SUDO chmod 755 "$OPT/livi-core" "$OPT/livi-ui"
 
-# ---- chroot -----------------------------------------------------------------------------
-
-if [ ! -f "$ROOTFS/etc/os-release" ]; then
-    say "ubuntu base rootfs -> $ROOTFS"
-    $SUDO mkdir -p "$ROOTFS"
-    wget -qO- "$UBUNTU_URL" | $SUDO tar -xz -C "$ROOTFS"
+# livi-core runs the helper as root through `sudo -n -E`; the rule is the one
+# LIVI's own installer would write, but pre-seeded here so the first start can
+# install its udev/wifi-ap rules without a password prompt. visudo validates
+# before anything lands in /etc/sudoers.d.
+say "sudoers rule for the LIVI helper"
+if command -v visudo >/dev/null 2>&1; then
+    sudoers_tmp=$(mktemp)
+    # the helper itself (livi-core starts it as root), and pkill so a helper
+    # left behind by a hard-killed core can be cleaned up on the next start
+    # (livi-core runs `sudo -n pkill -f driver/livi-helperd` for that).
+    PKILL=$(command -v pkill || echo /usr/bin/pkill)
+    {
+        printf '%s ALL=(root) NOPASSWD: SETENV: %s\n' \
+            "$LIVI_USER" "$OPT/resources/driver/livi-helperd"
+        printf '%s ALL=(root) NOPASSWD: %s\n' "$LIVI_USER" "$PKILL"
+    } > "$sudoers_tmp"
+    if visudo -c -f "$sudoers_tmp" >/dev/null 2>&1; then
+        $SUDO install -d -m 0750 /etc/sudoers.d
+        $SUDO install -m 0440 -o root -g root "$sudoers_tmp" /etc/sudoers.d/99-LIVI-helper
+    fi
+    rm -f "$sudoers_tmp"
 fi
 
-if [ ! -f "$ROOTFS/.livi-deps" ]; then
-    say "installing the glibc electron + wireless helper dependencies (apt)"
-    $SUDO mountpoint -q "$ROOTFS/dev" || $SUDO mount --bind /dev "$ROOTFS/dev"
-    $SUDO mountpoint -q "$ROOTFS/proc" || $SUDO mount -t proc proc "$ROOTFS/proc"
-    $SUDO mountpoint -q "$ROOTFS/sys" || $SUDO mount -t sysfs sys "$ROOTFS/sys"
-    $SUDO cp /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
-    # apt must not try to start NM/hostapd/bluetooth inside the chroot
-    printf '#!/bin/sh\nexit 101\n' | $SUDO tee "$ROOTFS/usr/sbin/policy-rc.d" >/dev/null
-    $SUDO chmod 755 "$ROOTFS/usr/sbin/policy-rc.d"
-    $SUDO chroot "$ROOTFS" /bin/bash -c '
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq
-        apt-get install -y -qq --no-install-recommends \
-            libgtk-3-0t64 libnss3 libxss1 libxtst6 libgbm1 libasound2t64 \
-            libatspi2.0-0t64 libsecret-1-0 libnotify4 libcups2t64 libdbus-1-3 libexpat1 \
-            libfontconfig1 fonts-dejavu-core libxkbcommon0 libxkbcommon-x11-0 libxrandr2 \
-            libxcomposite1 libxdamage1 libxfixes3 libxext6 libx11-xcb1 libxcb-dri3-0 \
-            libxcb-xkb1 libxcb-shm0 libxcb-randr0 libxcb-render0 libxcb-sync1 \
-            libxcb-xfixes0 libxcb-shape0 libxcb-glx0 libgl1 libegl1 libgles2 \
-            libglx-mesa0 libgl1-mesa-dri libpango-1.0-0 libcairo2 libgdk-pixbuf-2.0-0 \
-            libatk1.0-0t64 libatk-bridge2.0-0t64 libfuse2t64 libfuse3-4 \
-            libxshmfence1 libdrm2 libssh-4 libgudev-1.0-0 \
-            libva2 libva-drm2 libva-x11-2 libva-wayland2 libpulse0 pulseaudio-utils \
-            python3 python3-dbus python3-gi gir1.2-glib-2.0 python3-smbus2 \
-            python3-pip python3-yaml \
-            gcc libc6-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-            bluez iproute2 iw rfkill hostapd dnsmasq-base procps sudo network-manager'
-    # deliberately NOT libv4l-0t64: it makes the bundled v4l2 plugin load, the codec probe
-    # then reports hw=true, and the app builds a v4l2h26xdec pipeline whose dmabuf output
-    # the pixman nested compositor cannot take (waylandsink: "Could not bind to
-    # zwp_linux_dmabuf_v1", "not-negotiated"). without it the probe reports hw=false and
-    # the app uses the bundled avdec software decoders into waylandsink's shm path.
-    $SUDO chroot "$ROOTFS" /bin/bash -c \
-        'DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq libv4l-0t64 libv4lconvert0t64 || true'
-    # python 3.14 (26.04) removed the implicit loop creation in asyncio.get_event_loop();
-    # livi's helper calls it at import time and would crash-loop without this shim
-    $SUDO install -m 644 "$HERE/livi_asyncio_compat.py" \
-        "$ROOTFS/usr/lib/python3/dist-packages/livi_asyncio_compat.py"
-    $SUDO install -m 644 "$HERE/livi-asyncio-compat.pth" \
-        "$ROOTFS/usr/lib/python3/dist-packages/livi-asyncio-compat.pth"
-    # waylandsink hands the compositor the caps stride while videoconvert hands it
-    # row-padded memory (3328 vs 3200 for 800x480 RGBx); this shim corrects the
-    # wl_shm buffer stride or the video arrives sheared
-    $SUDO mkdir -p "$ROOTFS/opt/livi"
-    $SUDO install -m 644 "$HERE/livistride.c" "$ROOTFS/tmp/livistride.c"
-    $SUDO chroot "$ROOTFS" /bin/bash -c \
-        'gcc -O2 -fPIC -shared -I/usr/include/gstreamer-1.0 -I/usr/include/glib-2.0 \
-         -I/usr/lib/aarch64-linux-gnu/glib-2.0/include \
-         -o /opt/livi/livi-stride-fix.so /tmp/livistride.c'
-    $SUDO touch "$ROOTFS/.livi-deps"
-fi
+# ---- retire the AppImage/chroot deployment ---------------------------------------------
 
-$SUDO install -m 755 "$APPIMAGE_NAME" "$ROOTFS/opt/LIVI.AppImage"
+# the glibc Ubuntu chroot, the AppImage, the stride shim and the python asyncio
+# shim all belonged to the Electron build; LIVI-Lite is native and none of them
+# exist at runtime any more. Leave nothing behind for a stale unit to pick up.
+if [ -d "$OPT/rootfs" ]; then
+    say "retiring the old glibc chroot + AppImage"
+    $SUDO rm -rf "$OPT/rootfs" "$OPT/livi-chroot" "$OPT/livi-stride-fix.so"
+fi
 
 # ---- LIVI config ------------------------------------------------------------------------
 
@@ -206,17 +225,17 @@ $SUDO install -m 755 "$APPIMAGE_NAME" "$ROOTFS/opt/LIVI.AppImage"
 # window bindings, geometry), so an existing one is only merged and never replaced; the
 # deploy template is only for a missing file.
 say "LIVI config (800x480 kiosk, wireless Android Auto parked on)"
-$SUDO install -d "$ROOTFS$LIVI_HOME"
+$SUDO install -d "$LIVI_HOME"
 for d in LIVI LIVI-vnc; do
-    $SUDO mkdir -p "$ROOTFS$LIVI_HOME/.config/$d"
-    cfg="$ROOTFS$LIVI_HOME/.config/$d/config.json"
+    $SUDO mkdir -p "$LIVI_HOME/.config/$d"
+    cfg="$LIVI_HOME/.config/$d/config.json"
     if $SUDO grep -q '"wirelessAaEnabled"' "$cfg" 2>/dev/null; then
         $SUDO sed -i 's/"wirelessAaEnabled": *false/"wirelessAaEnabled": true/' "$cfg"
     else
         $SUDO install -m 644 "$HERE/livi-config.json" "$cfg"
     fi
 done
-$SUDO chown -R "$LIVI_USER:$LIVI_USER" "$ROOTFS$LIVI_HOME"
+$SUDO chown -R "$LIVI_USER:$LIVI_USER" "$LIVI_HOME"
 
 # the park is read at livi start, and the app keeps its old in-memory state until then:
 # an upgrade applies it at the next `systemctl restart livi` (or reboot). not done here,
@@ -225,10 +244,10 @@ $SUDO chown -R "$LIVI_USER:$LIVI_USER" "$ROOTFS$LIVI_HOME"
 
 # ---- host bluetoothd (wireless CarPlay / Android Auto) ----------------------------------
 
-# LIVI's python helper writes bluetoothd options into its own root; from a chroot those
-# never reach the host's bluetoothd, so the same drop-in is installed here. sap and midi
-# keep RFCOMM channel 8 free for Android Auto's AAP and the BLE MIDI service out of the
-# CarPlay EIR.
+# LIVI's helper writes bluetoothd options into its own root; from a normal service it
+# can reach the host's bluetoothd, but the sap/midi plugins still have to be off. sap
+# keeps RFCOMM channel 8 free for Android Auto's AAP and midi takes a BLE EIR slot
+# CarPlay uses.
 if systemctl cat bluetooth >/dev/null 2>&1; then
     say "host bluetoothd --noplugin=sap,midi"
     bd=$(systemctl cat bluetooth 2>/dev/null | sed -n 's/^ExecStart=\([^ ]*\).*/\1/p' | head -1)
@@ -259,12 +278,12 @@ if [ -e /etc/xdg/autostart/pipewire.desktop ]; then
 fi
 
 LIVI_UID=$(id -u "$LIVI_USER" 2>/dev/null || true)
+[ -n "$LIVI_UID" ] || { echo "no such user: $LIVI_USER" >&2; exit 1; }
 
 # the appliance has no desktop and no auto-login any more (fbkeyboard console, see step 8),
 # so nothing starts the user manager at boot: without lingering, /run/user/<uid> only
-# appears when somebody logs in on tty1 or over ssh, livi-chroot finds no pulse socket and
-# the app comes up mute. linger keeps user@<uid> and its enabled pipewire units running
-# from boot with no session.
+# appears when somebody logs in on tty1 or over ssh, and LIVI's pulse calls find no socket.
+# linger keeps user@<uid> and its enabled pipewire units running from boot with no session.
 if [ -n "$LIVI_UID" ]; then
     say "user audio stack: linger for $LIVI_USER (pipewire without a login session)"
     $SUDO loginctl enable-linger "$LIVI_USER" || true
@@ -320,14 +339,11 @@ if $SUDO systemctl cat livi-xvnc >/dev/null 2>&1; then
 fi
 for u in livi-link livi-weston livi rawlink; do
     sed -e "s|/home/user|$LIVI_HOME|g" -e "s|^User=user$|User=$LIVI_USER|" \
+        -e "s|/run/user/10000|/run/user/$LIVI_UID|g" \
         -e "s|chown -R user:user|chown -R $LIVI_USER:$LIVI_USER|" \
         "$HERE/$u.service" > "$tmp/$u.service"
     $SUDO install -m 644 "$tmp/$u.service" "/etc/systemd/system/$u.service"
 done
-if [ "$LIVI_USER" != "user" ]; then
-    sed "s|/home/user|$LIVI_HOME|g" "$HERE/livi-chroot" > "$tmp/livi-chroot"
-    $SUDO install -m 755 "$tmp/livi-chroot" "$OPT/livi-chroot"
-fi
 # the phone ui's idle blanking: console blank on tty1 after 2 min (screen + backlight off)
 $SUDO install -m 644 "$HERE/console-blank.service" /etc/systemd/system/console-blank.service
 

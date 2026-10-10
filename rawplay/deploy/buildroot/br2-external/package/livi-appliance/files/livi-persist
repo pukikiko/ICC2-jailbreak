@@ -5,9 +5,8 @@
 #
 # What is persistent (/data, ext4 label livi-data, mounted noatime,commit=1):
 #   livi-config   LIVI's settings and pairing state (bind-mounted on
-#                 /home/user/.config; the outer launcher reads
-#                 --user-data-dir=$HOME/.config/LIVI-vnc and the inner app
-#                 reads $HOME/.config/LIVI, both must carry the 800x480
+#                 /home/user/.config; LIVI-Lite's livi-core reads
+#                 $HOME/.config/LIVI and both dirs must carry the 800x480
 #                 geometry or the kiosk window is rejected)
 #   bluetooth     BlueZ pairings (bind-mounted on /var/lib/bluetooth)
 #

@@ -1,6 +1,6 @@
 menu "LIVI appliance packages"
 
-source "$BR2_EXTERNAL_LIVI_APPLIANCE_PATH/package/livi/Config.in"
+source "$BR2_EXTERNAL_LIVI_APPLIANCE_PATH/package/livi-lite/Config.in"
 source "$BR2_EXTERNAL_LIVI_APPLIANCE_PATH/package/livi-appliance/Config.in"
 source "$BR2_EXTERNAL_LIVI_APPLIANCE_PATH/package/rawlink/Config.in"
 source "$BR2_EXTERNAL_LIVI_APPLIANCE_PATH/package/weston-touch/Config.in"
