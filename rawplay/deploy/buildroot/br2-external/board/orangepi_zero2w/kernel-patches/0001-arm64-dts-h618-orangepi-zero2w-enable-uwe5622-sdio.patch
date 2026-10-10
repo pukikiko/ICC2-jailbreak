@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: LIVI appliance
+Date: Sat, 11 Oct 2026 00:00:00 +1030
+Subject: [PATCH] arm64: dts: h618-orangepi-zero2w: enable the UWE5622 SDIO bus
+
+The Zero 2W's Wi-Fi/BT combo is a Unisoc UWE5622 (AW859A) on mmc1
+(PG0-PG5), held in reset by PG18 off a 32 kHz clock, on always-on
+3.3 V / 1.8 V rails. Mainline leaves mmc1 disabled; enable it here so
+the out-of-tree driver (br2-external/package/uwe5622) has a bus to
+probe. Bluetooth needs no UART: sprdbt_tty carries HCI-H4 over the
+same SDIO bus.
+
+Mirrors Armbian's sunxi wifi nodes and the vendor 6.1 device tree (see
+board/orangepi_zero2w/reference/wifi-uwe5622.dts.fragment); the one
+deliberate difference is the pwrseq clock, which uses the mainline
+sun6i-rtc binding (CLK_OSC32K_FANOUT, "ext_clock") instead of the
+vendor cell/name.
+---
+ arch/arm64/boot/dts/allwinner/sun50i-h618-orangepi-zero2w.dts | 29 +++++++++++++++++++
+ 1 file changed, 29 insertions(+)
+
+--- a/arch/arm64/boot/dts/allwinner/sun50i-h618-orangepi-zero2w.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h618-orangepi-zero2w.dts
+@@ -11,6 +11,7 @@
+ #include <dt-bindings/gpio/gpio.h>
+ #include <dt-bindings/interrupt-controller/arm-gic.h>
+ #include <dt-bindings/leds/common.h>
++#include <dt-bindings/clock/sun6i-rtc.h>
+ 
+ / {
+ 	model = "OrangePi Zero 2W";
+@@ -52,6 +53,34 @@
+ 		vin-supply = <&reg_vcc5v>;
+ 		regulator-always-on;
+ 	};
++
++	reg_vcc33_wifi: vcc33-wifi {
++		/* Always on 3.3V regulator for WiFi and BT */
++		compatible = "regulator-fixed";
++		regulator-name = "vcc33-wifi";
++		regulator-min-microvolt = <3300000>;
++		regulator-max-microvolt = <3300000>;
++		regulator-always-on;
++		vin-supply = <&reg_vcc5v>;
++	};
++
++	reg_vcc_wifi_io: vcc-wifi-io {
++		/* Always on 1.8V/300mA regulator for WiFi and BT IO */
++		compatible = "regulator-fixed";
++		regulator-name = "vcc-wifi-io";
++		regulator-min-microvolt = <1800000>;
++		regulator-max-microvolt = <1800000>;
++		regulator-always-on;
++		vin-supply = <&reg_vcc33_wifi>;
++	};
++
++	wifi_pwrseq: wifi-pwrseq {
++		compatible = "mmc-pwrseq-simple";
++		clocks = <&rtc CLK_OSC32K_FANOUT>;
++		clock-names = "ext_clock";
++		reset-gpios = <&pio 6 18 GPIO_ACTIVE_LOW>; /* PG18 */
++		post-power-on-delay-ms = <200>;
++	};
+ };
+ 
+ &cpu0 {
+@@ -71,6 +100,15 @@
+ 	status = "okay";
+ };
+ 
++&mmc1 {
++	vmmc-supply = <&reg_vcc33_wifi>;
++	vqmmc-supply = <&reg_vcc_wifi_io>;
++	mmc-pwrseq = <&wifi_pwrseq>;
++	bus-width = <4>;
++	non-removable;
++	status = "okay";
++};
++
+ &ohci1 {
+ 	status = "okay";
+ };
+--
+2.30.2

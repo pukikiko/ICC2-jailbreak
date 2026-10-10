@@ -1,0 +1,15 @@
+config BR2_PACKAGE_UWE5622
+	bool "UWE5622 Wi-Fi/BT driver (out-of-tree modules)"
+	depends on BR2_LINUX_KERNEL
+	help
+	  Unisoc/Spreadtrum UWE5622 (AW859A) Wi-Fi + Bluetooth combo on the
+	  Orange Pi Zero 2W. Mainline Linux has no driver for it, so this
+	  builds armbian/uwe5622 (pinned below) out of tree against the
+	  image's own 6.12 kernel: uwe5622_bsp_sdio (SDIO core, Allwinner
+	  board profile), sprdwl_ng (cfg80211 Wi-Fi: station + AP for the
+	  helper's hostapd path) and sprdbt_tty (Bluetooth over SDIO,
+	  attached to BlueZ by uwe5622-bluetooth.service). The firmware
+	  (wcnmodem.bin, decoded from the driver's own .hex) ships in
+	  /lib/firmware; the SDIO bus itself is enabled by the
+	  uwe5622-overlay.dtbo applied in boot.cmd. Board images only:
+	  qemu keeps its hwsim radios.

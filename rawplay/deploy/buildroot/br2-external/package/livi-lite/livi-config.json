@@ -2,6 +2,8 @@
   "mainScreenWidth": 800,
   "mainScreenHeight": 480,
   "mainScreenBounds": { "x": 0, "y": 0, "width": 800, "height": 480 },
+  "projectionWidth": 800,
+  "projectionHeight": 480,
   "kiosk": { "main": true },
   "wirelessAaEnabled": true,
   "dismissedPackages": [

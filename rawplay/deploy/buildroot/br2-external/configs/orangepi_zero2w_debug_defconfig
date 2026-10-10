@@ -30,6 +30,10 @@ BR2_LINUX_KERNEL_DTS_SUPPORT=y
 BR2_LINUX_KERNEL_INTREE_DTS_NAME="allwinner/sun50i-h618-orangepi-zero2w"
 BR2_LINUX_KERNEL_IMAGE=y
 BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
+# the UWE5622 SDIO bus (mmc1 + wifi regulators/pwrseq): a DTS-only patch,
+# so no driver is built into the kernel. The driver itself is the
+# out-of-tree package below, built against this same kernel tree.
+BR2_LINUX_KERNEL_PATCH="$(BR2_EXTERNAL_LIVI_APPLIANCE_PATH)/board/orangepi_zero2w/kernel-patches"
 
 BR2_TARGET_ARM_TRUSTED_FIRMWARE=y
 BR2_TARGET_ARM_TRUSTED_FIRMWARE_CUSTOM_VERSION=y
@@ -73,6 +77,12 @@ BR2_PACKAGE_SYSTEMD_ANALYZE=y
 
 BR2_PACKAGE_LIVI_APPLIANCE=y
 BR2_PACKAGE_LIVI_APPLIANCE_DEBUG=y
+# UWE5622 Wi-Fi/BT (out-of-tree modules + wcnmodem.bin + btattach service);
+# wpa_supplicant joins networks for bench work, hostapd (via livi-appliance)
+# serves the phone-facing AP, btattach (BlueZ tools) binds /dev/ttyBT
+BR2_PACKAGE_UWE5622=y
+BR2_PACKAGE_WPA_SUPPLICANT=y
+BR2_PACKAGE_BLUEZ5_UTILS_TOOLS=y
 # weston 15's headless backend links pango (text in the debug/headless
 # path); the Electron image had it in via GTK, the native image needs it explicit
 BR2_PACKAGE_PANGO=y

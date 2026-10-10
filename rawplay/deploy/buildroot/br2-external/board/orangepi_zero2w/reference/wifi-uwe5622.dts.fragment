@@ -1,12 +1,10 @@
 // Reference device-tree fragment for the Orange Pi Zero 2W's Wi-Fi/BT module.
 //
-// This file is deliberately NOT applied by the build. VERIFIED (see
-// README.md, "Needs a decision"): the module is a Unisoc/Spreadtrum UWE5622
-// (AW859A package; Orange Pi's own build config names the drivers
-// uwe5622_bsp_sdio/sprdwl_ng/sprdbt_tty) and mainline Linux has no driver for
-// it. Enabling mmc1 without that driver makes the SDIO bus scan a chip with
-// no driver and costs boot time for nothing, so it stays off until a driver
-// package exists.
+// NOTE: this file itself is still not applied by the build; its live
+// equivalent is board/orangepi_zero2w/kernel-patches/0001-*, which carries
+// the same nodes as a kernel patch (plus the mainline sun6i-rtc clock
+// binding) now that the package/uwe5622 driver exists. Kept as the
+// annotated derivation record (see README.md).
 //
 // The nodes are the ones Armbian's sunxi-6.12 patch
 // arm64-dts-h616-add-wifi-support-for-orange-pi-zero-2-and-zero3.patch and

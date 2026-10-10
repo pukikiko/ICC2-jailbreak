@@ -1,0 +1,21 @@
+# Attach the UWE5622's Bluetooth TTY to BlueZ. sprdbt_tty speaks HCI-H4
+# over SDIO (no UART involved) on /dev/ttyBT once the modules are up;
+# btattach (BlueZ tools) binds it to the stack in the foreground and
+# bluetoothd picks the controller up from there. The wait loop is
+# deliberate: module load and the chip's firmware boot take a few seconds,
+# and there is no udev coldplug to order on (masked by
+# board/common/post-build.sh).
+[Unit]
+Description=Attach UWE5622 Bluetooth TTY to BlueZ
+After=systemd-modules-load.service bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c 'i=0; while [ ! -c /dev/ttyBT ] && [ $i -lt 100 ]; do sleep 0.2; i=$((i+1)); done; test -c /dev/ttyBT'
+ExecStart=/usr/bin/btattach -B /dev/ttyBT -P h4
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

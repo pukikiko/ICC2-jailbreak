@@ -24,6 +24,10 @@ Environment=WAYLAND_DISPLAY=wayland-livi
 Environment=XDG_RUNTIME_DIR=/run/livi
 Environment=HOME=/home/user
 Environment=LIVI_KIOSK=1
+# the car panel the headless session streams to (rawplay is 800x480
+# RGB565); livi-core sizes fresh projection defaults from it and livi-ui
+# opens at it
+Environment=LIVI_UI_SIZE=800x480
 # the installed layout: resources/{driver,gst-host,compositor} and ../livi-ui
 Environment=LIVI_RESOURCES=/opt/livi/resources
 # audio is the system PulseAudio daemon

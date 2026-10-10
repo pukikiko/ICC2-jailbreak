@@ -34,9 +34,10 @@ data partition, and all boot-path drivers are built in.
 > cleanly and shares every package with the tested qemu image), but a full
 > board build was **not** run in this session and the image has **not** been
 > run on hardware (none was available); everything below that concerns the
-> board is source-verified and marked as such. Two blocking hardware facts
-> (Wi-Fi/BT, audio) are in "Needs a decision" and are the reason the board
-> image cannot yet do a wireless session or sound.
+> board is source-verified and marked as such. One blocking hardware fact
+> (audio) is in "Needs a decision" and is the reason the board image cannot
+> yet do sound. Wi-Fi/BT now ships in the image (below) but is likewise
+> untested on hardware.
 >
 > The boot path is trimmed (see "Boot-time work" below): the stock PulseAudio
 > unit that stalled LIVI for ~30 s is masked, the appliance units no longer
@@ -161,7 +162,7 @@ could not be verified it says so.
   must be updated with it before this deployment is called done for a car.
   qemu proves nothing about this: dummy_hcd is virtual and the wire is free.
 
-### Wi-Fi/BT: not the guessed AP6256 — it is a Unisoc UWE5622 (AW859A)
+### Wi-Fi/BT: Unisoc UWE5622 (AW859A), shipped out of tree on mainline
 
 * Orange Pi's own build configuration for this board
   (`orangepi-build/external/config/boards/orangepizero2w.conf`) names the
@@ -169,19 +170,37 @@ could not be verified it says so.
   Armbian's extension calls it "Spreadtrum UWE5622 (AW859A)"; the vendor 6.1
   device tree uses SDIO `mmc1` (PG0-PG5) with a PG18 reset and 3.3 V/1.8 V
   rails, and BlueZ attaches over `sprdbt_tty`.
-* **Mainline Linux has no driver for it.** A recursive search of Linux
-  6.18's tree finds no `uwe`, `sprdwl` or `sprdbt` under
-  `drivers/net/wireless` (only unrelated ARM/SPRD platform drivers). The
-  driver lives only in vendor trees (`drivers/net/wireless/uwe5622/` in
-  Orange Pi's `linux-orangepi`) and in third-party ports. It is not the
-  brcmfmac firmware story the brief assumed: no `brcmfmac*.bin`/NVRAM file
-  is involved, and no firmware file can be packaged from `linux-firmware`.
-  This is a **blocking decision** (below), not a firmware-package tweak.
-* The mainline Zero 2W DTS (6.12 and 6.18) does not enable `mmc1` or any BT
-  UART. `board/orangepi_zero2w/reference/wifi-uwe5622.dts.fragment` carries
-  the exact nodes (from Armbian's sunxi-6.12 patch and the vendor DTS) to
-  fold in once a driver package exists; it is deliberately **not applied**,
-  because probing an SDIO bus with no driver only costs boot time.
+* **Mainline Linux has no driver for it**, so the image carries one:
+  `package/uwe5622` builds the pinned `armbian/uwe5622` tree (the unified
+  tree Armbian build-tests on 6.12.y, so no version patches) **out of tree**
+  against the image's own 6.12.111 kernel build dir. The kernel package
+  itself is never recompiled for this: only the three modules land in
+  `/lib/modules/.../extra` (`uwe5622_bsp_sdio`, `sprdwl_ng`, `sprdbt_tty`),
+  loaded via `/etc/modules-load.d/uwe5622.conf`. It is not the brcmfmac
+  firmware story the brief assumed: no `brcmfmac*.bin`/NVRAM file is
+  involved.
+* The SDIO bus is the one DTS-only kernel patch
+  (`board/orangepi_zero2w/kernel-patches/`): `mmc1` with the two always-on
+  regulators and the `mmc-pwrseq-simple` PG18 reset, mirroring Armbian's
+  sunxi nodes and the vendor DTS (the pwrseq clock uses the mainline
+  `sun6i-rtc` binding). `board/orangepi_zero2w/reference/` keeps the notes
+  this was derived from.
+* Firmware is `wcnmodem.bin`, decoded at package build time from the
+  `.hex` the driver ships (the driver's compiled-in arrays are stubs, so
+  without this file the chip never boots). It is installed both as
+  `/lib/firmware/wcnmodem.bin` (the `request_firmware` path the marlin
+  boot uses) and `/lib/firmware/uwe5622/wcnmodem.bin`.
+* Bluetooth is HCI-H4 over the same SDIO bus (no UART): `sprdbt_tty`
+  presents `/dev/ttyBT`, `uwe5622-bluetooth.service` binds it with
+  `btattach -P h4`, and `bluetooth.service` is enabled for `bluetoothd`.
+  Wi-Fi station + AP come from the same chip: `wpa_supplicant` joins
+  networks for bench work while the helper's `hostapd`/`dnsmasq`/`iw`
+  path (already in the image) serves the phone-facing AP.
+* **Untested on hardware** (no board in this session): the module build
+  against 6.12.111 is verified, the patched DTS compiles, and the
+  defconfig parses, but first power-on still has to show `wlan0` +
+  `hci0`. The driver is a vendor BSP port ("the driver is trash" per its
+  own porters): expect flakiness, not Intel quality.
 
 ### Audio: the PCM5102A cannot bind on mainline H618 today
 
@@ -254,8 +273,11 @@ are the check on real hardware.
   default sink always set.
 * `livi-config.json` seeds `$HOME/.config/LIVI/config.json` (and the old
   `LIVI-vnc` dir, so an upgrade from an Electron install keeps its
-  settings); it carries 800x480 or the kiosk fullscreen check rejects the
-  window.
+  settings); it carries 800x480 for the screen and the projection
+  (`projectionWidth`/`projectionHeight`), so Android Auto negotiates the
+  800x480 tier and the kiosk fullscreen check accepts the window.
+  `livi.service` also sets `LIVI_UI_SIZE=800x480`, which fresh installs
+  size their projection defaults from (and `livi-ui` opens at).
 
 ## Image design and why
 
@@ -325,7 +347,7 @@ are the check on real hardware.
   benefit on an appliance with no session.
 * **LIVI start-up**: the `--wayland` capture needs no ffmpeg; the release
   image has no ffmpeg. `livi.service` sets `LIVI_RESOURCES`, `LIVI_KIOSK`,
-  `WAYLAND_DISPLAY=wayland-livi`, `PULSE_SERVER` and the persistent
+  `LIVI_UI_SIZE=800x480`, `WAYLAND_DISPLAY=wayland-livi`, `PULSE_SERVER` and the persistent
   `GST_REGISTRY`; everything else is the defaults. Mesa is built with
   **llvmpipe** (plus softpipe as the fallback): the Rust compositor renders
   through system EGL and llvmpipe is the software configuration that works
@@ -536,24 +558,26 @@ information out of a first power-on.
    LIVI, touch round-trips, and the panel keys tap their LIVI actions.
 5. Audio: `aplay`/`speaker-test` cannot work until item 2 of "Needs a
    decision" is resolved; the null sink proves the daemon and `pactl` path.
-6. Wireless: nothing to test until item 1 is resolved. The helper, hostapd
-   and dnsmasq are installed and their shims are exercised in qemu, but the
-   UWE5622 has no driver.
+6. Wireless: `ip link` should show `wlan0` (firmware load in `dmesg`:
+   `loading image [wcnmodem.bin] successfully`), `bluetoothctl list`
+   should show `hci0` once `uwe5622-bluetooth.service` binds `/dev/ttyBT`.
+   Then join a network (`wpa_supplicant`/`wpa_cli`) and let the helper
+   bring up its AP for a phone. If either radio misbehaves, see "Needs a
+   decision" item 1.
 
 ## Needs a decision
 
-1. **Wi-Fi/BT driver (blocks wireless AA/CarPlay and Bluetooth pairing).**
-   The module is a Unisoc UWE5622/AW859A with no mainline driver. Options,
-   cheapest first:
-   a. add a br2-external package that builds a forward-ported `sprdwl_ng` +
-      `sprdbt_tty` against 6.12 (Armbian/misuzu/OpenWrt carry 6.6-6.12
-      ports) and ship the BT attach service; risk: out-of-tree SDIO driver
-      quality, firmware blobs must be vendored, unknown boot-time cost.
-   b. choose a different board with a mainline Wi-Fi/BT part (AP6256-class)
-      — the deployment stays the same.
-   c. accept wired-only, which for LIVI means no phone session at all; not
+1. **Wi-Fi/BT driver (was blocking wireless AA/CarPlay and Bluetooth
+   pairing; now shipped, untested on hardware).** The module is a Unisoc
+   UWE5622/AW859A with no mainline driver, so the image builds
+   `armbian/uwe5622` out of tree (`package/uwe5622`), enables the SDIO
+   bus with a DTS-only kernel patch, ships `wcnmodem.bin`, and attaches
+   Bluetooth via `uwe5622-bluetooth.service`. If the hardware bring-up
+   shows the BSP driver is unusable, the fallbacks are, cheapest first:
+   a. a different board with a mainline Wi-Fi/BT part (AP6256-class) —
+      the deployment stays the same;
+   b. accept wired-only, which for LIVI means no phone session at all; not
       useful.
-   The source evidence above is why this is a decision and not done here.
 2. **I2S/PCM5102A (blocks audio).** Mainline has no H616 I2S DAI. Options:
    a. port Armbian's H616 AHUB series and wire the PCM5102A to the vendor
       machine driver (not `simple-audio-card`), which is a real driver port;
