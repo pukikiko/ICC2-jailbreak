@@ -14,10 +14,17 @@ CFLAGS := -O2 -Wall -Wextra -fPIC -DLIVI_WESTON_MAJOR=$(WESTON_MAJOR) \
           $(shell pkg-config --cflags $(WESTON_PC) wayland-server)
 LDLIBS := $(shell pkg-config --libs $(WESTON_PC) wayland-server)
 
-all: weston-touch.so
+all: weston-touch.so mutter-devkit-touch.so
 
 weston-touch.so: weston-touch.c
 	$(CC) $(CFLAGS) -shared -o $@ $< $(LDLIBS)
+
+# nested gnome needs the devkit to hand the nested mutter pointer, keyboard and touch at
+# once; mutter-devkit only does pointer+keyboard or touch. preloaded into gnome-shell, it
+# adds EI_DEVICE_CAP_TOUCH to every ei_seat_bind_capabilities() call (see the comments in
+# mutter-devkit-touch.c). -ldl for dlsym with older glibcs.
+mutter-devkit-touch.so: mutter-devkit-touch.c
+	$(CC) -O2 -Wall -Wextra -fPIC -shared -o $@ $< -ldl
 
 # rawlink is the host: the functionfs gadget and the raw sender in one c binary
 # (stream/gadget/run); the python hosts (rawstream.py, rawgadget.py, usbgadget.py) were
@@ -60,7 +67,7 @@ livi-cmd: deploy/livi-cmd.c
 	$(CC) -O2 -Wall -Wextra -o out/livi-cmd deploy/livi-cmd.c
 
 clean:
-	rm -f weston-touch.so out/rawlink out/test_gadget out/livi-cmd \
+	rm -f weston-touch.so mutter-devkit-touch.so out/rawlink out/test_gadget out/livi-cmd \
 	      out/weston-output-capture-client-protocol.h out/weston-output-capture-protocol.c
 
 .PHONY: all clean rawlink test-gadget livi-cmd

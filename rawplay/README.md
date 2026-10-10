@@ -203,8 +203,7 @@ sample (displayed frames only). At 30 fps it costs 240 B/s.
   was told about. `--poll-us` only sets a lost-wakeup timeout. The driver reports a sample
   every millisecond while a finger is down and replays the samples queued before the
   player opened as one burst with the next touch, so without that the replayed history (the
-  launch tap, the previous run's exit gesture) reaches the host as a flood of moves and
-  phantom clicks.
+  launch tap) reaches the host as a flood of moves and phantom clicks.
 * **Timing/acks**: each consumed frame sends `LI type 8` with the displayed/stale bit; the
   host's latency sample is send-time → displayed-ack.
 * **Heartbeat and mode refresh**: a `ready` heartbeat goes out every second, and the host
@@ -218,14 +217,12 @@ sample (displayed frames only). At 30 fps it costs 240 B/s.
   fixed tick. This keeps touch responsive at a low frame rate: a touch never waits behind
   an in-flight ack, and an ack never stalls the loop that has to keep reading frames. A
   full queue drops the touch or the obsolete credit, never blocks.
-* **Exit/UI**: during streaming the panel is the video; a reserved top-left 96x36 touch
-  region exits on a brief held press (a CPU-written button on top would dirty cache lines
-  the IPU/DMA share). The hold matters: the touch driver hands a fresh reader the samples
-  queued before it opened, delivered as a burst with the next touch, so without it the
-  first touch of every run after the first replays the previous run's exit gesture and
-  quits it. The same replay is why the input thread only forwards the newest sample of a
-  pass. Status/errors print to the console and are drawn on the panel only while no
-  frames are flowing. `rawplay.sh` stops/restarts the HMI around the run.
+* **Exit/UI**: during streaming the panel is the video and there is no on-screen exit: the
+  player is a homebrew session, and the car takes it back the way it takes any homebrew
+  back - the panel's power button (or audio off with the ignition off) closes the command's
+  process group through the car guard the launcher/menu arm around it (`common/hmictl.c`,
+  see `docs/homebrew.md`). Status/errors print to the console and are drawn on the panel
+  only while no frames are flowing. `rawplay.sh` stops/restarts the HMI around the run.
 * **HMI windows with `--hmi`**: the HMI is stopped behind the video, so anything whose only
   display is the HMI has to bring it back. Three things do, all through the same window: a
   climate fascia key (`HMI_WINDOW_MS` = 1 s after the last key, a held key holds it open),
@@ -618,8 +615,8 @@ Constraints and pitfalls:
   safe; `rawplay/out/` log names are fixed, so serialize benchmark runs.
 * Fast visual bench on the snapshot: `cd qemu && python3 tests/snap.py 'upload
   ../out/gfprobe' 'sh /tmp/gfprobe'` (headless, writes `tests/out/sheet.png`).
-* to quit the player, press and hold the top-left 96x36 exit region briefly (it is not
-  forwarded), or `slay rawplay` from another shell.
+* to quit the player, `slay rawplay` from another shell; on a car the panel's power button
+  ends the session through the car guard.
 
 ### Real car
 
@@ -650,11 +647,11 @@ The unit player is `rawplay --usb [seconds] [--stats] [--direct] [--stage] [--ur
 panel); `--direct` opts into the zero-copy path, which is the emulator's path but stalls
 the bulk-in pipe on a real unit (section 3). The header is validated against the protocol
 (reserved byte, known type, mode length, frame length) because raw pixels have no start
-code to resync on. Reads are bounded (15 s before the first byte, 5 s once streaming) and
-the exit gesture interrupts a stalled read, so a dead link always ends the run instead of
-hanging. A bulk-in error mid-frame is not fatal any more: the frame is dropped and acked
-stale and the reader resumes at the next header (section 3). Touches go out as the same
-`LI` messages; the top-left 96x36 region is the exit gesture and is not forwarded. A
+code to resync on. Reads are bounded (15 s before the first byte, 5 s once streaming), so
+a dead link always ends the run instead of hanging. A bulk-in error mid-frame is not fatal
+any more: the frame is dropped and acked stale and the reader resumes at the next header
+(section 3). Touches go out as the same `LI` messages; there is no on-screen exit, so the
+panel's power button (the car guard around the homebrew session) is what ends a run. A
 heartbeat goes out every second and the mode message is refreshed after each one.
 
 ### Conventions

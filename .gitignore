@@ -2,6 +2,7 @@
 /out/
 /rawplay/out/
 /rawplay/weston-touch.so
+/rawplay/mutter-devkit-touch.so
 
 # the assembled stick output (build.sh / `make stick`); the tracked base is stick/
 /usb/

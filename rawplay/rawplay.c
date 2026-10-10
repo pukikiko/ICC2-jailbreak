@@ -35,26 +35,11 @@
 #define LI_READY     5
 #define LI_RAW       8
 
-/* the exit region: reserved while streaming (a visible button would mean cpu writes into
- * the buffer the usb dma and the ipu share), drawn while no frames are flowing */
-#define UI_BTN_X     8
-#define UI_BTN_Y     8
-#define UI_BTN_W     96
-#define UI_BTN_H     36
-
 /* the stream watchdog, the same shape the serial players used: a live link that goes
  * quiet exits, a link that never delivered anything waits longer for the host to start. */
 #define STARTUP_DEAD_US 15000000
 #define LINK_DEAD_US     5000000
 #define READY_INTERVAL_US 1000000
-
-/* the touch driver keeps the samples from before a reader opened and hands them over in
- * one burst when the next touch arrives: a run always starts with the tap that launched
- * it, and a second run also gets the exit gesture that ended the first one. the replayed
- * gesture is delivered in a few milliseconds, so a press that short is history, not a
- * person: an exit needs the press to have actually been held, or the first touch of the
- * next run quits it before the user has done anything. */
-#define EXIT_PRESS_US    50000
 
 /* the climate panel keys (their bits on ipc channel 6, see ICC2 sdk input.c). the hvac state
  * changes on the v850's own side when one is pressed, but the only place that state is
@@ -104,7 +89,6 @@ static unsigned long long t_start, rx_us, rx_bytes, last_rx_us;
 static unsigned long long src_dt_us;
 static unsigned src_frames, last_ts;
 static int have_ts;
-static volatile int ui_quit, ui_btn_down;
 
 /* the climate window: the input thread raises hmi_until_ms on a climate key and only the
  * main loop signals the hmi, so no frame is read between the continue and the stop */
@@ -445,15 +429,7 @@ static void *writer_thread(void *arg)
     return arg;
 }
 
-static int ui_btn_hit(int x, int y)
-{
-    return x >= UI_BTN_X && x < UI_BTN_X + UI_BTN_W &&
-           y >= UI_BTN_Y && y < UI_BTN_Y + UI_BTN_H;
-}
-
-/* the panel owns the video, so the input thread only forwards; the exit gesture is a
- * held press and release inside the top-left region. the hold is what keeps the replayed
- * exit gesture of the previous run from ending this one (see EXIT_PRESS_US).
+/* the panel owns the video, so the input thread only forwards.
  *
  * the driver reports a sample every millisecond while a finger is down, and a fresh
  * reader gets the samples from before it opened as a burst with the next touch. only the
@@ -461,11 +437,11 @@ static int ui_btn_hit(int x, int y)
  * move samples coalesce to the newest position, and a release is forwarded only for a
  * press the host was actually told about. that is what keeps a replayed gesture, the tap
  * that launched the player included, from reaching the host as a flood of moves and
- * phantom clicks. the exit gesture still sees every sample, coalesced or not. */
+ * phantom clicks. exits are the car's: the power button (or audio off with the ignition
+ * off) closes the whole homebrew session through hmictl.c's guard. */
 static void *input_thread(void *arg)
 {
-    int owner = 0, host_down = 0;
-    long long owner_us = 0;
+    int host_down = 0;
 
     while (running) {
         struct input_event ev, pending;
@@ -483,44 +459,8 @@ static void *input_thread(void *arg)
                 continue;
             }
             if (ev.down) {
-                if (!owner && ui_btn_hit(ev.x, ev.y)) {
-                    owner = 1;
-                    owner_us = now_us();
-                    ui_btn_down = 1;
-                    have_pending = 0;
-                    if (host_down) {
-                        /* the region takes the gesture over: release the host rather
-                         * than leave it with a press nothing will end */
-                        ev.down = 0;
-                        send_input(&ev);
-                        host_down = 0;
-                    }
-                    continue;
-                }
-                if (owner) {
-                    have_pending = 0;
-                    continue;
-                }
                 pending = ev;
                 have_pending = 1;
-                continue;
-            }
-            if (owner) {
-                if (ui_btn_hit(ev.x, ev.y) &&
-                    now_us() - owner_us >= EXIT_PRESS_US) {
-                    ui_quit = 1;
-                    /* the read loop may be sitting in a wait that only the link
-                     * can end; this is what makes the exit gesture work on a
-                     * link that never delivers anything */
-                    raw_usb_stop();
-                }
-                ui_btn_down = 0;
-                owner = 0;
-                have_pending = 0;
-                if (host_down) {
-                    send_input(&ev);
-                    host_down = 0;
-                }
                 continue;
             }
             if (!host_down) {
@@ -823,19 +763,6 @@ static void ui_idle(void)
     con_printf(&con, "rawplay: waiting for the host\n");
 }
 
-static void ui_button(void)
-{
-    pixel edge = fb_rgb(96, 116, 144);
-    pixel fill = ui_btn_down ? fb_rgb(58, 18, 24) : fb_rgb(13, 19, 30);
-
-    fb_fill(&fb, UI_BTN_X, UI_BTN_Y, UI_BTN_W, 2, edge);
-    fb_fill(&fb, UI_BTN_X, UI_BTN_Y + UI_BTN_H - 2, UI_BTN_W, 2, edge);
-    fb_fill(&fb, UI_BTN_X, UI_BTN_Y, 2, UI_BTN_H, edge);
-    fb_fill(&fb, UI_BTN_X + UI_BTN_W - 2, UI_BTN_Y, 2, UI_BTN_H, edge);
-    fb_fill(&fb, UI_BTN_X + 2, UI_BTN_Y + 2, UI_BTN_W - 4, UI_BTN_H - 4, fill);
-    fb_text(&fb, UI_BTN_X + 12, UI_BTN_Y + 10, fb_rgb(228, 236, 247), "EXIT");
-}
-
 /* put the hmi and buttons back to the way the session pause holds them */
 static void hmi_window_close(void)
 {
@@ -895,12 +822,12 @@ static void hmi_window(void)
         }
     }
     for (;;) {
-        while (!ui_quit && hmi_gen == gen &&
+        while (hmi_gen == gen &&
                (reverse_hold ||
                 !((long)(now_ms() - hmi_until_ms) >= 0 && !climate_held))) {
             usleep(10000);
         }
-        if (!ui_quit && hmi_gen != gen) {
+        if (hmi_gen != gen) {
             gen = hmi_gen;      /* a press arrived while the window was closing */
             continue;
         }
@@ -1010,7 +937,7 @@ int main(int argc, char **argv)
         }
     }
 
-    while (running && !ui_quit) {
+    while (running) {
         unsigned type, len, seq, ts;
         int r;
         long long now;
@@ -1029,9 +956,6 @@ int main(int argc, char **argv)
         now = now_us();
 
         if (r < 0) {
-            if (ui_quit) {
-                break;
-            }
             if (raw_usb_error()) {
                 /* the transport lost part of a transfer while scanning: no in-band
                  * resync exists, so drain it and look for the next header */
@@ -1064,7 +988,6 @@ int main(int argc, char **argv)
                 exit_reason = "host mode does not match the panel";
                 break;
             }
-            ui_btn_down = 0;
         } else if (type == LR_FRAME) {
             long long t0 = now_us();
 
@@ -1082,9 +1005,6 @@ int main(int argc, char **argv)
             last_ts = ts;
             have_ts = 1;
             if (skip_pad(LR_MSG - LR_HEADER) < 0) {
-                if (ui_quit) {
-                    break;
-                }
                 if (raw_usb_error()) {
                     printf("rawplay: bulk-in error in frame padding, dropped frame %u\n", seq);
                     send_ack(seq, 2);
@@ -1121,9 +1041,6 @@ int main(int argc, char **argv)
                 continue;
             }
             if (read_exact((unsigned char *)fb.pixels, (int)len) < 0) {
-                if (ui_quit) {
-                    break;              /* the exit gesture, not a failure */
-                }
                 if (raw_usb_error()) {
                     /* the frame is lost mid-transfer. ack it stale so the host's window
                      * moves on, resync, and take the next header. the panel holds part
@@ -1188,7 +1105,6 @@ int main(int argc, char **argv)
         if (exit_reason) {
             con_printf(&con, "rawplay: %s\n", exit_reason);
         }
-        ui_button();
         printf("rawplay: %lu frames, %lu drawn, %lu stale, %llu kb in %lld ms (%.1f fps, "
                "%.1f ms/frame), %s%s, source %.1f fps, drop in/ack %lu/%lu%s%s\n", frames,
                drawn, superseded, rx_bytes / 1024, el / 1000, frames * 1000000.0 / el,

@@ -21,12 +21,8 @@ int raw_usb_start(void);
  * -1 is returned, raw_usb_quiet() says whether it was the quiet link or a dead device. */
 int raw_usb_read(void *dst, int n, int timeout_ms);
 
-/* ask the transport to give up waiting: the read in progress returns -1 at once. the exit
- * gesture uses this, so a link that never delivers a byte can still be left without
- * killing the app (the urbs are never aborted: this stack segfaults on that). */
-void raw_usb_stop(void);
 /* 1 when the last read ended because nothing arrived inside its timeout, 0 for a dead
- * device or a stop. the caller tells "no video from the host" from "link read failed". */
+ * device. the caller tells "no video from the host" from "link read failed". */
 int raw_usb_quiet(void);
 /* 1 when a bulk-in completion errored since the last resync: the current frame is lost
  * mid-transfer. the caller drops it (and acks it stale), calls raw_usb_resync() and picks

@@ -65,9 +65,7 @@ static int shorts;
 /* the read wait is bounded: a link that never delivers a byte must not sit the player in
  * an uninterruptible wait (a real unit has no console and the hmi is stopped behind it).
  * quiet_out distinguishes "nothing arrived inside the timeout" from a removed device, so
- * the caller can say which happened; stop is the exit gesture, and is the only way out of
- * a wait on a link that is neither dead nor timed out yet. */
-static volatile int stop;
+ * the caller can say which happened. */
 static int quiet_out;
 static long long last_activity;
 static int errs, logged_first;
@@ -147,13 +145,13 @@ static void sem_init_all(void)
     sem_init(&out_sem, 0, 0);
 }
 
-/* returns 1 when the flag is set, 0 on timeout, a dead link or a stop */
+/* returns 1 when the flag is set, 0 on timeout or a dead link */
 static int wait_flag(volatile int *flag, int ms)
 {
     struct timespec ts;
 
     for (;;) {
-        if (*flag || dead || stop) {
+        if (*flag || dead) {
             return *flag;
         }
         clock_gettime(CLOCK_REALTIME, &ts);
@@ -163,7 +161,7 @@ static int wait_flag(volatile int *flag, int ms)
             ts.tv_nsec -= 1000000000;
         }
         sem_timedwait(flag == &out_done ? &out_sem : &rx_sem, &ts);
-        if (*flag || dead || stop) {
+        if (*flag || dead) {
             return *flag;
         }
         if (ms <= 100) {
@@ -447,8 +445,8 @@ static void abandon_read(void)
 /* wait for the oldest completion, but not forever. this stack does not safely complete an
  * aborted bulk-in urb (a timeout followed by usbd_abort_pipe segfaults the completion
  * thread), so a read never aborts: it waits until the gadget answers, the device goes
- * away (dead), the caller asks it to stop (the exit gesture) or timeout_ms passes with
- * no byte at all. returns the completion length, or -1 (raw_usb_quiet() says why). */
+ * away (dead) or timeout_ms passes with no byte at all. returns the completion length,
+ * or -1 (raw_usb_quiet() says why). */
 static int wait_head(int timeout_ms)
 {
     for (;;) {
@@ -460,7 +458,7 @@ static int wait_head(int timeout_ms)
         }
         for (;;) {
             if (!wait_flag(&rx_done[slot], 100)) {
-                if (dead || stop) {
+                if (dead) {
                     return -1;
                 }
                 if (timeout_ms > 0 &&
@@ -619,7 +617,7 @@ int raw_usb_read(void *dst, int n, int timeout_ms)
 {
     int got = 0;
 
-    while (got < n && !dead && !stop) {
+    while (got < n && !dead) {
         int r;
 
         if (direct_mode && !direct_broken) {
@@ -640,12 +638,7 @@ int raw_usb_read(void *dst, int n, int timeout_ms)
         }
         got += r;
     }
-    return (dead || stop) ? -1 : got;
-}
-
-void raw_usb_stop(void)
-{
-    stop = 1;
+    return dead ? -1 : got;
 }
 
 int raw_usb_quiet(void)

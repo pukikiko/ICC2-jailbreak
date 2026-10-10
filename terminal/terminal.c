@@ -73,7 +73,7 @@ extern char **environ;
 /* the touch driver hands a fresh reader the samples from before it opened (the tap that
  * launched us) as one burst with the next touch; that burst arrives within a millisecond
  * or two, so a short hold is the replay. the threshold stays low because a quick mouse
- * click in the emulator can be well under the 50ms rawplay uses for its exit gesture. */
+ * click in the emulator can be well under 50ms. */
 #define MIN_TAP_MS 10
 
 struct cell {
