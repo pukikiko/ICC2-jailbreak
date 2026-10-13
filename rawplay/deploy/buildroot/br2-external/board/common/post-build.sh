@@ -12,6 +12,66 @@ if [ ! -s "$TARGET_DIR/etc/machine-id" ]; then
     printf 'b5a3f1c2d4e67890b5a3f1c2d4e67890\n' > "$TARGET_DIR/etc/machine-id"
 fi
 
+# BlueZ configuration that livi-helperd re-applies at runtime: the sap and
+# midi plugins squat protocol resources wireless CarPlay/Android Auto need
+# (sap holds the RFCOMM channel the AA handshake uses) and the head unit
+# advertises the car-kit device class. The helper rewrites both files when
+# they differ from what it wants, which cannot work on the read-only
+# rootfs and only logs an error per boot, so seed the exact content: its
+# generated drop-in and Class = 0x200418 in [General]. bluetoothd sits in
+# /usr/libexec on this image, but mirror the helper's search order.
+bluetoothd=
+for p in /usr/libexec/bluetooth/bluetoothd /usr/lib/bluetooth/bluetoothd /usr/sbin/bluetoothd; do
+    if [ -x "$TARGET_DIR$p" ]; then
+        bluetoothd=$p
+        break
+    fi
+done
+if [ -n "$bluetoothd" ]; then
+    mkdir -p "$TARGET_DIR/etc/systemd/system/bluetooth.service.d"
+    cat > "$TARGET_DIR/etc/systemd/system/bluetooth.service.d/livi-no-sap.conf" <<EOF
+[Service]
+ExecStart=
+ExecStart=$bluetoothd --noplugin=sap,midi
+EOF
+fi
+if [ -f "$TARGET_DIR/etc/bluetooth/main.conf" ]; then
+    if grep -q '^#\?Class[[:space:]]*=' "$TARGET_DIR/etc/bluetooth/main.conf"; then
+        sed -i '0,/^#\?Class[[:space:]]*=/{s/^#\?Class[[:space:]]*=.*/Class = 0x200418/}' \
+            "$TARGET_DIR/etc/bluetooth/main.conf"
+    else
+        sed -i '/^\[General\]/a Class = 0x200418' \
+            "$TARGET_DIR/etc/bluetooth/main.conf"
+    fi
+fi
+
+# the wifi-ap unit runs livi-helperd as root (SUDO_USER=root, rendered into
+# the unit by livi-lite), and the helper's DeviceConfig then resolves its
+# config to /root/.config/LIVI/config.json: $HOME is unset for system
+# services without User=, and USER/SUDO_USER=root are filtered out. Point
+# that at the same live config the rootfs symlinks for /home/user/.config
+# (the /data bind mount livi-persist sets up), so the AP beacons the
+# configured carName/wifiPassword/wifiChannel instead of the defaults.
+mkdir -p "$TARGET_DIR/root/.config"
+ln -sfn /data/livi-config/LIVI "$TARGET_DIR/root/.config/LIVI"
+
+# Debug images ship dropbear so the appliance can be poked from its own AP
+# (10.10.0.1) without a serial console. The root account intentionally has no
+# password, and dropbear refuses blank-password logins unless -B is given;
+# the stock unit reads DROPBEAR_ARGS from /etc/default/dropbear.
+if [ -x "$TARGET_DIR/usr/sbin/dropbear" ]; then
+    mkdir -p "$TARGET_DIR/etc/default"
+    printf 'DROPBEAR_ARGS="-B"\n' > "$TARGET_DIR/etc/default/dropbear"
+fi
+
+# livi-helperd publishes and browses CarPlay's mDNS records with avahi's
+# command line tools, which need the daemon; enable it when it is shipped.
+if [ -f "$TARGET_DIR/usr/lib/systemd/system/avahi-daemon.service" ]; then
+    mkdir -p "$TARGET_DIR/etc/systemd/system/multi-user.target.wants"
+    ln -sf ../../../../usr/lib/systemd/system/avahi-daemon.service \
+        "$TARGET_DIR/etc/systemd/system/multi-user.target.wants/avahi-daemon.service"
+fi
+
 # an appliance does not need a login prompt on the release image. the debug
 # defconfig sets a serial getty explicitly and this does not touch it.
 rm -f "$TARGET_DIR/etc/systemd/system/multi-user.target.wants/serial-getty@"*.service

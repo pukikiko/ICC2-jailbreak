@@ -69,11 +69,37 @@ if ! mountpoint -q /var/lib/bluetooth; then
     mount --bind "$DATA/bluetooth" /var/lib/bluetooth
 fi
 
-# seed a fresh data partition with the shipped settings, including the
-# wirelessAaEnabled park the phone deployment uses
+# seed a fresh data partition with the shipped settings, then enforce the
+# appliance defaults on every boot: wireless Android Auto on
+# (wirelessAaEnabled), the Wi-Fi adapter reserved for the AP (Dedicated
+# interface -> wifiDedicatedInterface) and the Bluetooth/Wi-Fi/head-unit name
+# (carName = Ford Falcon). Seeding alone would leave an already-flashed /data
+# partition on the old values, so existing files are merged in place and never
+# replaced (pairing state and other user settings are preserved).
+ensure_livi_settings() {
+    cfg=$1
+    if grep -q '"wirelessAaEnabled"' "$cfg" 2>/dev/null; then
+        sed -i 's/"wirelessAaEnabled": *false/"wirelessAaEnabled": true/' "$cfg"
+    else
+        sed -i '1s/{/{\n  "wirelessAaEnabled": true,/' "$cfg"
+    fi
+    if grep -q '"wifiDedicatedInterface"' "$cfg" 2>/dev/null; then
+        sed -i 's/"wifiDedicatedInterface": *false/"wifiDedicatedInterface": true/' "$cfg"
+    else
+        sed -i '1s/{/{\n  "wifiDedicatedInterface": true,/' "$cfg"
+    fi
+    if grep -q '"carName"' "$cfg" 2>/dev/null; then
+        sed -i 's/"carName": *"[^"]*"/"carName": "Ford Falcon"/' "$cfg"
+    else
+        sed -i '1s/{/{\n  "carName": "Ford Falcon",/' "$cfg"
+    fi
+}
 for d in LIVI LIVI-vnc; do
-    if [ ! -f "/home/user/.config/$d/config.json" ]; then
+    if [ ! -f "/home/user/.config/$d/config.json" ] \
+        || ! grep -q '{' "/home/user/.config/$d/config.json" 2>/dev/null; then
         cp /usr/share/livi/config.json "/home/user/.config/$d/config.json"
+    else
+        ensure_livi_settings "/home/user/.config/$d/config.json"
     fi
 done
 

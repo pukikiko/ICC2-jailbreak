@@ -66,8 +66,23 @@ livi-cmd: deploy/livi-cmd.c
 	mkdir -p out
 	$(CC) -O2 -Wall -Wextra -o out/livi-cmd deploy/livi-cmd.c
 
+# the generic-linux unit end: the pc as the client, standing in for the car. --usb
+# opens the real gadget (1209:1cc2) over libusb as the usb host; --sock listens for
+# `rawlink stream` with no usb hardware at all. needs libusb-1.0 and sdl2; it stays
+# out of `all` so hosts without them still build. test over the socket with:
+#   ./out/rawplay-linux --sock /tmp/livi-test.sock --headless --stats &
+#   ./out/rawlink stream /tmp/livi-test.sock --usb --test --stats --seconds 5
+LINUXCLI_CFLAGS := -O2 -Wall -Wextra -std=gnu11 -pthread \
+                   $(shell pkg-config --cflags libusb-1.0 sdl2)
+LINUXCLI_LIBS := $(shell pkg-config --libs libusb-1.0 sdl2)
+
+linux-client: rawplay-linux.c
+	mkdir -p out
+	$(CC) $(LINUXCLI_CFLAGS) -o out/rawplay-linux rawplay-linux.c $(LINUXCLI_LIBS)
+
 clean:
 	rm -f weston-touch.so mutter-devkit-touch.so out/rawlink out/test_gadget out/livi-cmd \
+	      out/rawplay-linux \
 	      out/weston-output-capture-client-protocol.h out/weston-output-capture-protocol.c
 
-.PHONY: all clean rawlink test-gadget livi-cmd
+.PHONY: all clean rawlink test-gadget livi-cmd linux-client

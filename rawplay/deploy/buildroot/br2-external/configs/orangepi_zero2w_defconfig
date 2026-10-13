@@ -91,9 +91,19 @@ BR2_PACKAGE_SYSTEMD_ANALYZE=y
 # and Mesa: the Electron-only libraries (GTK3/X11/CUPS/NSS/Pango) and Python
 # are gone.
 BR2_PACKAGE_LIVI_APPLIANCE=y
-# UWE5622 Wi-Fi/BT (out-of-tree modules + wcnmodem.bin + btattach service);
+# LIVI's video and audio hosts feed their GStreamer pipelines through appsrc
+# (h265parse ! avdec_h265 ! waylandsink, and the audio counterpart). Without
+# the base "app" plugin the pipelines fail to parse ("no element appsrc"),
+# the phone's session still establishes but the panel keeps showing LIVI's
+# own UI. This is the one plugin the pipeline needs beyond the defaults.
+BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_APP=y
+# LIVI-Lite's CarPlay stack (livi-cp) links OpenSSL on Linux, so the image
+# carries the libraries it links against.
+BR2_PACKAGE_OPENSSL=y
+BR2_PACKAGE_LIBOPENSSL=y
+# UWE5622 Wi-Fi/BT (out-of-tree modules + wcnmodem.bin + hciattach_opi service);
 # wpa_supplicant joins networks for bench work, hostapd (via livi-appliance)
-# serves the phone-facing AP, btattach (BlueZ tools) binds /dev/ttyBT
+# serves the phone-facing AP, hciattach_opi (sprd protocol) binds /dev/ttyBT0
 BR2_PACKAGE_UWE5622=y
 BR2_PACKAGE_WPA_SUPPLICANT=y
 BR2_PACKAGE_BLUEZ5_UTILS_TOOLS=y

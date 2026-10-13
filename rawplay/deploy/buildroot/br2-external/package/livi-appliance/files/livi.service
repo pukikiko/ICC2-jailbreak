@@ -7,13 +7,20 @@
 #
 # livi-core's SIGTERM handler stops its children in order (UI, compositor,
 # helper) while wayland is still up; KillMode=mixed keeps systemd from
-# SIGTERMing the children first, and TimeoutStopSec is only the backstop for a
-# wedged decoder.
+# SIGTERMing the children first, and TimeoutStopSec is only the backstop for
+# a wedged decoder.
+#
+# dbus is ordering, not just a want: the helper connects to org.bluez once
+# at start and gives up for the rest of the session when that fails, so
+# the system bus must be up before livi-core runs. Board images add the
+# same ordering after hciattach_opi/hci0 with a drop-in (see the uwe5622
+# package), which qemu has no driver for.
 [Unit]
 Description=LIVI-Lite head unit UI on the Weston kiosk display
 DefaultDependencies=no
 After=local-fs.target livi-persist.service livi-weston.service livi-pulse.service systemd-journald.socket
-Wants=livi-weston.service livi-pulse.service
+After=dbus.service
+Wants=livi-weston.service livi-pulse.service dbus.service
 Conflicts=shutdown.target
 Before=shutdown.target
 StartLimitIntervalSec=0

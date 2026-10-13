@@ -36,16 +36,19 @@ define UWE5622_BUILD_CMDS
 		CONFIG_TTY_OVERY_SDIO=m \
 		UNISOC_BSP_INCLUDE=$(@D)/unisocwcn/include \
 		KBUILD_EXTRA_SYMBOLS=$(@D)/unisocwcn/Module.symvers
-	# wcnmodem.bin is the only firmware the integrate (marlin) path loads
-	# via request_firmware ("wcnmodem.bin" on the firmware path); the
-	# driver's compiled-in arrays are 8-byte stubs, so without this file
-	# the chip never boots. Decode it from the .hex the driver ships.
-	python3 -c "import re,sys; \
-		tok = re.findall(r'0x([0-9A-Fa-f]{2})', \
-			open('$(@D)/unisocwcn/fw/wcnmodem.bin.hex').read()); \
-		open('$(@D)/wcnmodem.bin','wb').write(bytes(int(b,16) for b in tok))"
 endef
 
+# The firmware the marlin bootloader loads from /lib/firmware/uwe5622/.
+# It is the raw Marlin3Lite image Armbian ships for this chip (the same
+# file as armbian/firmware uwe5622/wcnmodem.bin, sha256
+# 119b87ce30875734a67462f7293fb8fe85acf3270fe8b78c978ae24be7715a80),
+# plus the per-chip NVM (RF calibration) config. Do not use the
+# fw/wcnmodem.bin.hex from the driver tree: that pack only carries images
+# for the Marlin3E/3 chips (tags 3EAA/30AC), and this build's chip is a
+# Marlin3Lite AB (0x2355b001) whose tag search cannot match them.
+# The wifi_2355b001_1ant.ini lookup uses the un-suffixed path
+# /lib/firmware/wifi_<chipid>_<ant>ant.ini, so it ships both next to the
+# firmware and as a /lib/firmware symlink, like Armbian does.
 define UWE5622_INSTALL_TARGET_CMDS
 	mkdir -p $(TARGET_DIR)/lib/modules/$(LINUX_VERSION)/extra \
 		$(TARGET_DIR)/lib/firmware/uwe5622 $(TARGET_DIR)/lib/firmware \
@@ -56,13 +59,53 @@ define UWE5622_INSTALL_TARGET_CMDS
 		$(TARGET_DIR)/lib/modules/$(LINUX_VERSION)/extra/sprdwl_ng.ko
 	$(INSTALL) -D -m 0644 $(@D)/tty-sdio/sprdbt_tty.ko \
 		$(TARGET_DIR)/lib/modules/$(LINUX_VERSION)/extra/sprdbt_tty.ko
-	$(INSTALL) -D -m 0644 $(@D)/wcnmodem.bin \
+	$(INSTALL) -D -m 0644 $(UWE5622_PKGDIR)/files/wcnmodem.bin \
 		$(TARGET_DIR)/lib/firmware/uwe5622/wcnmodem.bin
+	$(INSTALL) -D -m 0644 $(UWE5622_PKGDIR)/files/wifi_2355b001_1ant.ini \
+		$(TARGET_DIR)/lib/firmware/uwe5622/wifi_2355b001_1ant.ini
 	ln -sf uwe5622/wcnmodem.bin $(TARGET_DIR)/lib/firmware/wcnmodem.bin
+	ln -sf uwe5622/wifi_2355b001_1ant.ini \
+		$(TARGET_DIR)/lib/firmware/wifi_2355b001_1ant.ini
 	printf 'uwe5622_bsp_sdio\nsprdwl_ng\nsprdbt_tty\n' > \
 		$(TARGET_DIR)/etc/modules-load.d/uwe5622.conf
 	$(INSTALL) -D -m 0644 $(UWE5622_PKGDIR)/files/uwe5622-bluetooth.service \
 		$(TARGET_DIR)/usr/lib/systemd/system/uwe5622-bluetooth.service
+	# hciattach_opi: the Spreadtrum-patched BlueZ hciattach with the "sprd"
+	# vendor attach protocol this chip needs to start its Bluetooth radio.
+	# Plain btattach -P h4 registers the controller but leaves the radio
+	# unresponsive to inquiry. This is Armbian's prebuilt aarch64 build,
+	# not Orange Pi's: Orange Pi's build hardcodes the placeholder BD_ADDR
+	# 10:11:12:13:14:15, while Armbian's calls its set_mac_address() and
+	# reads a real one. That address path (Android
+	# /sys/class/addr_mgt/addr_bt, normally filled by Armbian's sunxi_addr
+	# module) is patched in place to /run/livi/bt-addr, which the unit
+	# fills from the Wi-Fi MAC. Same byte length, NUL padded. Links only
+	# glibc, >= 2.17. See files/uwe5622-bluetooth.service.
+	$(INSTALL) -D -m 0755 $(UWE5622_PKGDIR)/files/hciattach_opi \
+		$(TARGET_DIR)/usr/bin/hciattach_opi
+	$(INSTALL) -D -m 0755 $(UWE5622_PKGDIR)/files/livi-bt-addr \
+		$(TARGET_DIR)/usr/lib/livi/livi-bt-addr
+	# The pskey and RF front-end tables the sprd init programs into the
+	# chip (its zeroed values otherwise leave BT without a feature set and
+	# with RF_switch_mode 0 - the radio never comes up). Armbian's blob
+	# reads them from /lib/firmware, Orange Pi's from /vendor/etc; ship
+	# both paths. Files are the official ones from armbian/firmware.
+	$(INSTALL) -D -m 0644 $(UWE5622_PKGDIR)/files/bt_configure_pskey.ini \
+		$(TARGET_DIR)/lib/firmware/bt_configure_pskey.ini
+	$(INSTALL) -D -m 0644 $(UWE5622_PKGDIR)/files/bt_configure_rf.ini \
+		$(TARGET_DIR)/lib/firmware/bt_configure_rf.ini
+	$(INSTALL) -D -m 0644 $(UWE5622_PKGDIR)/files/bt_configure_pskey.ini \
+		$(TARGET_DIR)/vendor/etc/bt_configure_pskey.ini
+	$(INSTALL) -D -m 0644 $(UWE5622_PKGDIR)/files/bt_configure_rf.ini \
+		$(TARGET_DIR)/vendor/etc/bt_configure_rf.ini
+	# livi-helperd connects to org.bluez once when livi-core starts and
+	# gives up for the rest of the session if that fails, so on this board
+	# livi must wait until hciattach_opi has registered hci0 (the attach unit
+	# waits for the node before its start job completes). The drop-in
+	# keeps the ordering out of the shared livi.service, which the qemu
+	# image uses without any Bluetooth hardware.
+	$(INSTALL) -D -m 0644 $(UWE5622_PKGDIR)/files/livi.service.d-uwe5622.conf \
+		$(TARGET_DIR)/etc/systemd/system/livi.service.d/uwe5622.conf
 	mkdir -p $(TARGET_DIR)/etc/systemd/system/multi-user.target.wants
 	ln -sf ../../../../usr/lib/systemd/system/uwe5622-bluetooth.service \
 		$(TARGET_DIR)/etc/systemd/system/multi-user.target.wants/uwe5622-bluetooth.service

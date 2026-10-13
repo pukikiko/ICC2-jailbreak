@@ -57,6 +57,13 @@ BR2_PACKAGE_SYSTEMD_ANALYZE=y
 # Electron-only libraries (GTK3/X11/CUPS/NSS/Pango) and Python are gone.
 BR2_PACKAGE_LIVI_APPLIANCE=y
 BR2_PACKAGE_UNIT_SIM=y
+# LIVI's media hosts feed their pipelines through appsrc (see the release
+# defconfig); without base's "app" plugin every session shows LIVI's UI only.
+BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_APP=y
+# LIVI-Lite's CarPlay stack (livi-cp) links OpenSSL on Linux, so the image
+# carries the libraries it links against.
+BR2_PACKAGE_OPENSSL=y
+BR2_PACKAGE_LIBOPENSSL=y
 # weston 15's headless backend links pango (text in the debug/headless
 # path); the Electron image had it in via GTK, the native image needs it explicit
 BR2_PACKAGE_PANGO=y

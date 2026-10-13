@@ -1,0 +1,15 @@
+# Debug-image only (see livi-appliance.mk): a one-shot dump of the radio
+# state to the journal some seconds after boot, when the wireless AP has come
+# up, so a serial capture carries the diagnostics without an interactive
+# console. The release image never installs this unit.
+[Unit]
+Description=LIVI radio diagnostics dump (debug image)
+After=livi.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/livi/livi-diag
+
+[Install]
+WantedBy=multi-user.target

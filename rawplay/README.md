@@ -653,6 +653,16 @@ any more: the frame is dropped and acked stale and the reader resumes at the nex
 panel's power button (the car guard around the homebrew session) is what ends a run. A
 heartbeat goes out every second and the mode message is refreshed after each one.
 
+To test the gadget with a PC standing in for the car, `rawplay/rawplay-linux.c` is
+the same unit end for generic linux (`make -C rawplay linux-client`, needs
+libusb-1.0 and sdl2): `rawplay-linux --usb` opens 1209:1cc2 as the USB host, finds
+the `0xff` vendor interface by class (whatever its number and endpoint addresses
+are) and shows the video in an SDL window with the mouse/keys going back as the
+same `LI` messages; `--sock PATH` instead listens for `rawlink stream PATH` so
+the sender and the protocol can be exercised with no USB hardware at all.
+`--headless` parses, acks and stats without a window, and `--dump DIR` saves
+frames as ppm for the pixel checks.
+
 ### Conventions
 
 * C style: no tabs, 4 spaces, `/* */` comments that explain *why*; `rawplay/rawplay.c` and

@@ -14,6 +14,7 @@ BR2_INIT_SYSTEMD=y
 BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_LIVI_APPLIANCE_PATH)/board/common/busybox.fragment"
 BR2_TARGET_GENERIC_HOSTNAME="livi-debug"
 BR2_TARGET_GENERIC_ISSUE="LIVI appliance (debug)"
+BR2_TARGET_GENERIC_GETTY=y
 BR2_TARGET_GENERIC_GETTY_PORT="ttyS0"
 BR2_TARGET_GENERIC_GETTY_BAUDRATE_115200=y
 # BR2_TARGET_GENERIC_REMOUNT_ROOTFS_RW is not set
@@ -77,9 +78,16 @@ BR2_PACKAGE_SYSTEMD_ANALYZE=y
 
 BR2_PACKAGE_LIVI_APPLIANCE=y
 BR2_PACKAGE_LIVI_APPLIANCE_DEBUG=y
-# UWE5622 Wi-Fi/BT (out-of-tree modules + wcnmodem.bin + btattach service);
+# LIVI's media hosts feed their pipelines through appsrc (see the release
+# defconfig); without base's "app" plugin every session shows LIVI's UI only.
+BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_APP=y
+# LIVI-Lite's CarPlay stack (livi-cp) links OpenSSL on Linux, so the image
+# carries the libraries it links against.
+BR2_PACKAGE_OPENSSL=y
+BR2_PACKAGE_LIBOPENSSL=y
+# UWE5622 Wi-Fi/BT (out-of-tree modules + wcnmodem.bin + hciattach_opi service);
 # wpa_supplicant joins networks for bench work, hostapd (via livi-appliance)
-# serves the phone-facing AP, btattach (BlueZ tools) binds /dev/ttyBT
+# serves the phone-facing AP, hciattach_opi (sprd protocol) binds /dev/ttyBT0
 BR2_PACKAGE_UWE5622=y
 BR2_PACKAGE_WPA_SUPPLICANT=y
 BR2_PACKAGE_BLUEZ5_UTILS_TOOLS=y

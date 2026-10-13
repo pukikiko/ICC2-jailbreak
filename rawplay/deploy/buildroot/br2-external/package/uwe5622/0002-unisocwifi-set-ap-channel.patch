@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: LIVI appliance
+Date: Mon, 12 Oct 2026 00:30:00 +1030
+Subject: [PATCH] unisocwifi: set the AP channel before starting the AP
+
+hostapd only writes the DS Parameter Set element (which carries the
+channel) into beacons for 2.4 GHz (hostapd_eid_ds_params() returns early
+for hw_mode=a), and the firmware apparently takes the AP channel from that
+element: with hw_mode=a hostapd reports the interface AP-ENABLED while
+nothing is ever radiated, on any 5 GHz channel. 2.4 GHz works, 5 GHz
+receive works, so it is only the AP transmit path that never learns which
+channel to use.
+
+Set the channel explicitly with WIFI_CMD_SET_CHANNEL right before
+WIFI_CMD_START_AP, the way the IBSS join path already does. A failure is
+logged and does not abort the AP start.
+---
+ unisocwifi/cfg80211.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+--- a/unisocwifi/cfg80211.c
++++ b/unisocwifi/cfg80211.c
+@@ -1086,6 +1086,24 @@
+ 			(settings->hidden_ssid != 0 ? settings->ssid_len : 0),
+ 		       tail, tail_len);
+ 
++	/* The firmware picks the AP channel up from the beacon's DS Parameter
++	 * Set element, which hostapd emits for 2.4 GHz but not for 5 GHz
++	 * (hostapd_eid_ds_params() only writes it for g/b modes). Without it
++	 * the AP reports ENABLED and never radiates on 5 GHz. Set the channel
++	 * explicitly first, the way the IBSS path already does.
++	 */
++	if (settings->chandef.chan) {
++		int cret;
++		u8 channel = ieee80211_frequency_to_channel(
++				settings->chandef.chan->center_freq);
++
++		cret = sprdwl_set_channel(vif->priv, vif->ctx_id, channel);
++		if (cret)
++			wl_ndev_log(L_ERR, ndev,
++				    "%s set channel %u failed(%d)\n",
++				    __func__, channel, cret);
++	}
++
+ 	ret = sprdwl_start_ap(vif->priv, vif->ctx_id, (unsigned char *)mgmt,
+ 			      mgmt_len);
+ 	kfree(mgmt);

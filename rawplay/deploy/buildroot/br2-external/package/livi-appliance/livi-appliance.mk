@@ -68,6 +68,14 @@ define LIVI_APPLIANCE_INSTALL_TARGET_CMDS
         echo "livi-appliance: no usb.img (need mtools/dosfstools host tools)" >&2; \
         exit 1; \
     }
+    # Debug images only: a one-shot radio status dump (wifi AP/regulatory,
+    # BlueZ adapter properties, modules) that lands in the journal a few
+    # seconds after boot, so a serial capture carries the diagnostics without
+    # an interactive console. The release image installs neither the script
+    # nor the unit.
+    $(if $(BR2_PACKAGE_LIVI_APPLIANCE_DEBUG),$(INSTALL) -D -m 0755 $(LIVI_APPLIANCE_PKGDIR)/files/livi-diag $(TARGET_DIR)/usr/lib/livi/livi-diag)
+    $(if $(BR2_PACKAGE_LIVI_APPLIANCE_DEBUG),$(INSTALL) -D -m 0644 $(LIVI_APPLIANCE_PKGDIR)/files/livi-diag.service $(TARGET_DIR)/usr/lib/systemd/system/livi-diag.service)
+    $(if $(BR2_PACKAGE_LIVI_APPLIANCE_DEBUG),ln -sf ../../../../usr/lib/systemd/system/livi-diag.service $(TARGET_DIR)/etc/systemd/system/multi-user.target.wants/livi-diag.service)
 endef
 
 $(eval $(generic-package))

@@ -1,0 +1,65 @@
+#!/bin/sh
+# Debug-image only (livi-appliance.mk installs this with
+# BR2_PACKAGE_LIVI_APPLIANCE_DEBUG). One-shot radio status dump to stdout so
+# it lands in the journal and thus in any serial capture, long after boot
+# when the wireless AP is up. The release image never ships this.
+
+# The AP is started by livi-core once it has read the settings; wait for
+# hostapd's control socket (created at hostapd start), then let the stack
+# settle so the dump shows the running state.
+i=0
+while [ ! -S /var/run/hostapd/wlan0 ] && [ $i -lt 120 ]; do
+    sleep 0.5
+    i=$((i + 1))
+done
+sleep 3
+
+echo "=== livi-diag: wifi ==="
+echo "--- iw dev"
+iw dev
+echo "--- iw dev wlan0 info"
+iw dev wlan0 info
+echo "--- wlan0 address"
+cat /sys/class/net/wlan0/address
+echo "--- ip addr"
+ip -brief addr show dev wlan0
+echo "--- iw reg get"
+iw reg get
+echo "--- hostapd status"
+hostapd_cli -p /var/run/hostapd -i wlan0 status
+echo "--- live ap state (from the helper)"
+/usr/local/sbin/livi-helperd --wifi-ap-status
+echo "--- iw phy bands"
+iw phy 2>/dev/null | grep -E "Wiphy|Band|Frequencies| MHz \[[0-9]+\]" | head -50
+echo "--- hostapd log"
+tail -n 40 /tmp/livi-hostapd.log 2>/dev/null
+echo "--- rfkill"
+rfkill list
+echo "=== livi-diag: bluetooth ==="
+echo "--- /sys/class/bluetooth"
+ls -l /sys/class/bluetooth/ 2>/dev/null
+echo "--- bt address stability (all four must agree across reboots)"
+echo "persisted (/data/livi-config/bt-addr):"
+cat /data/livi-config/bt-addr 2>/dev/null
+echo "attach (/run/livi/bt-addr):"
+cat /run/livi/bt-addr 2>/dev/null
+echo "wlan0:"
+cat /sys/class/net/wlan0/address 2>/dev/null
+echo "hci0 (via hciconfig):"
+hciconfig hci0 2>/dev/null | grep -E "BD Address|UP|DOWN" || hciconfig -a hci0 2>/dev/null | head -8
+echo "--- bluez adapter dirs (pairings are keyed under the adapter address;"
+echo "--- more than one dir means the address flapped and old keys are orphaned)"
+ls -l /var/lib/bluetooth/ 2>/dev/null
+echo "--- bluez objects"
+busctl tree org.bluez 2>/dev/null | head -20
+echo "--- adapter properties"
+busctl --system get-property org.bluez /org/bluez/hci0 org.bluez.Adapter1 Powered
+busctl --system get-property org.bluez /org/bluez/hci0 org.bluez.Adapter1 Discoverable
+busctl --system get-property org.bluez /org/bluez/hci0 org.bluez.Adapter1 Pairable
+busctl --system get-property org.bluez /org/bluez/hci0 org.bluez.Adapter1 Address
+busctl --system get-property org.bluez /org/bluez/hci0 org.bluez.Adapter1 Alias
+busctl --system get-property org.bluez /org/bluez/hci0 org.bluez.Adapter1 Name
+busctl --system get-property org.bluez /org/bluez/hci0 org.bluez.Adapter1 Class
+echo "--- bt modules"
+grep -E "rfcomm|bnep|hidp|bluetooth" /proc/modules
+echo "=== livi-diag end ==="

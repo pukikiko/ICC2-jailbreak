@@ -45,15 +45,14 @@ OUT="$CARGO_TARGET_DIR/release"
 build() {
     manifest=$1
     shift
-    echo "livi-lite: cargo build --release --locked -p $*"
+    echo "livi-lite: cargo build --release --locked $*"
     "$CARGO" build --release --locked --manifest-path "$manifest" "$@"
 }
 
-# The four standalone workspaces that make the appliance. Order is only for
-# readable logs; cargo builds dependencies on demand either way.
-build "$SRC/native/livi-gst-video/rust/Cargo.toml" -p gst-video-host
-build "$SRC/native/livi-compositor/rust/Cargo.toml" -p livi-compositor
-build "$SRC/native/livi-helperd/Cargo.toml" -p livi-helperd -p livi-core
+# The native crates are one workspace (native/Cargo.toml); the Slint UI is
+# still its own. Order is only for readable logs; cargo builds dependencies
+# on demand either way.
+build "$SRC/native/Cargo.toml" -p gst-video-host -p livi-compositor -p livi-helperd -p livi-core
 build "$SRC/native/livi-ui/Cargo.toml" -p livi-ui
 
 for bin in livi-core livi-ui livi-helperd livi-gst-host livi-compositor; do

@@ -8,7 +8,7 @@ Description=LIVI persistent state (config, bluetooth pairings, machine-id)
 DefaultDependencies=no
 After=local-fs.target systemd-journald.socket
 Conflicts=shutdown.target
-Before=shutdown.target bluetooth.service livi-pulse.service livi-weston.service rawlink.service livi.service
+Before=shutdown.target bluetooth.service uwe5622-bluetooth.service livi-pulse.service livi-weston.service rawlink.service livi.service
 
 [Service]
 Type=oneshot

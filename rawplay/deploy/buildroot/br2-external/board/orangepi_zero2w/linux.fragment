@@ -25,6 +25,13 @@ CONFIG_NULL_TTY=y
 CONFIG_BT=y
 CONFIG_BT_BREDR=y
 CONFIG_BT_LE=y
+# RFCOMM is the classic-Bluetooth channel wireless CarPlay and Android Auto
+# settle their session on before the phone joins the head unit's AP. It is
+# not in the arm64 defconfig, and without it BlueZ's iAP/AA profile servers
+# fail with "socket(STREAM, RFCOMM): Protocol not supported" and nothing of
+# the car shows up in a phone's Bluetooth scan. Built as a module: BlueZ's
+# first RFCOMM socket autoloads it through the kernel's bt-proto-3 alias.
+CONFIG_BT_RFCOMM=m
 CONFIG_CFG80211=y
 CONFIG_MAC80211=y
 # no tracing/debug in the boot path

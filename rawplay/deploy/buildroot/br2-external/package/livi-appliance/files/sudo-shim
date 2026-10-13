@@ -5,6 +5,16 @@
 # to exist. Real sudo is a privilege-escalation surface with no purpose on a
 # system that is already root: this shim drops option words and execs the
 # rest. It deliberately does not implement -u or a shell.
+#
+# `sudo -l` (livi-core probes its own grants with `sudo -n -l`): print the
+# sudoers drop-ins the image installed, the way real sudo would list the
+# caller's rules. The checks only look for their command in the output.
+for arg in "$@"; do
+    if [ "$arg" = "-l" ]; then
+        cat /etc/sudoers.d/* 2>/dev/null
+        exit 0
+    fi
+done
 while [ $# -gt 0 ]; do
     case "$1" in
         -*) shift ;;

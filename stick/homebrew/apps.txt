@@ -8,3 +8,5 @@ bus watch|/fs/usb0/homebrew/apps/buswatch
 iccbuttons|/fs/usb0/homebrew/apps/iccbuttons
 framebuffer demo|/fs/usb0/homebrew/apps/fbdemo 400
 rawplay direct|/fs/usb0/homebrew/apps/rawplay.sh 0 --direct
+soft restart|/fs/usb0/homebrew/apps/softrestart.sh
+restart|/fs/usb0/homebrew/apps/restart.sh

@@ -9,7 +9,8 @@ config BR2_PACKAGE_UWE5622
 	  board profile), sprdwl_ng (cfg80211 Wi-Fi: station + AP for the
 	  helper's hostapd path) and sprdbt_tty (Bluetooth over SDIO,
 	  attached to BlueZ by uwe5622-bluetooth.service). The firmware
-	  (wcnmodem.bin, decoded from the driver's own .hex) ships in
+	  (wcnmodem.bin, the raw Marlin3Lite image from armbian/firmware,
+	  plus the wifi_2355b001_1ant.ini NVM config) ships in
 	  /lib/firmware; the SDIO bus itself is enabled by the
 	  uwe5622-overlay.dtbo applied in boot.cmd. Board images only:
 	  qemu keeps its hwsim radios.

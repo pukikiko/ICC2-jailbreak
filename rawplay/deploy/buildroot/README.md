@@ -190,9 +190,18 @@ could not be verified it says so.
   without this file the chip never boots). It is installed both as
   `/lib/firmware/wcnmodem.bin` (the `request_firmware` path the marlin
   boot uses) and `/lib/firmware/uwe5622/wcnmodem.bin`.
-* Bluetooth is HCI-H4 over the same SDIO bus (no UART): `sprdbt_tty`
-  presents `/dev/ttyBT`, `uwe5622-bluetooth.service` binds it with
-  `btattach -P h4`, and `bluetooth.service` is enabled for `bluetoothd`.
+* Bluetooth is HCI over the same SDIO bus (no UART): `sprdbt_tty`
+  presents `/dev/ttyBT0`, `uwe5622-bluetooth.service` binds it with the
+  Spreadtrum-patched `hciattach_opi ... sprd` at 1.5 Mbaud (a plain
+  `btattach -P h4` registers the controller but leaves the radio deaf to
+  inquiry; the `sprd` vendor init is what turns the radio on), and
+  `bluetooth.service` is enabled for `bluetoothd`. The BT address is
+  stable across reboots: `livi-bt-addr` reuses `/data/livi-config/bt-addr`
+  when valid, derives it once from the Wi-Fi MAC (+1, wrap-safe, unicast),
+  else from the persisted machine-id; `uwe5622-bluetooth.service` runs
+  after `livi-persist.service` so `/data` is mounted first. A flapping
+  adapter address orphans every BlueZ pairing (keys are stored under the
+  adapter address), so stability is what keeps phones bonded.
   Wi-Fi station + AP come from the same chip: `wpa_supplicant` joins
   networks for bench work while the helper's `hostapd`/`dnsmasq`/`iw`
   path (already in the image) serves the phone-facing AP.
@@ -560,10 +569,114 @@ information out of a first power-on.
    decision" is resolved; the null sink proves the daemon and `pactl` path.
 6. Wireless: `ip link` should show `wlan0` (firmware load in `dmesg`:
    `loading image [wcnmodem.bin] successfully`), `bluetoothctl list`
-   should show `hci0` once `uwe5622-bluetooth.service` binds `/dev/ttyBT`.
+   should show `hci0` once `uwe5622-bluetooth.service` binds `/dev/ttyBT0`.
    Then join a network (`wpa_supplicant`/`wpa_cli`) and let the helper
    bring up its AP for a phone. If either radio misbehaves, see "Needs a
    decision" item 1.
+7. Bluetooth address stability (do this once, it saves a re-pair loop):
+   `cat /data/livi-config/bt-addr /run/livi/bt-addr`, `hciconfig hci0 |
+   grep "BD Address"` and `bluetoothctl show | grep Address` must all agree,
+   and stay identical across a reboot. `ls /var/lib/bluetooth` must show a
+   single adapter directory. More than one directory means the address
+   flapped and the older directories' pairings are orphaned: remove the
+   phone's pairing to the car on both sides (`bluetoothctl remove
+   <phone>` + forget "Ford Falcon" on the phone) and pair fresh.
+
+### Bluetooth connection errors ("already connected", "Bad flag 0x2")
+
+* `bluetoothd: device_add_connection() Device XX is already connected` +
+  `Device is already marked as connected`: BlueZ already holds an ACL for
+  that phone and the kernel reported another one. In practice the phone is
+  retrying because the previous attempt never settled a profile: the
+  helper's RFCOMM handshake (iAP2/AAP) did not complete, the link key is
+  stale (see item 7: an adapter-address flap orphans `/var/lib/bluetooth`
+  keys on every boot), or the helper was not yet advertising (it holds BT
+  advertising back until its AP is ready). The USB `rawstream` line in the
+  same journal is unrelated: video flows over the gadget, Bluetooth is the
+  separate phone link. Remedy: check item 7 first, then
+  `bluetoothctl info <phone>` (look for `Connected: yes` with no profiles),
+  `journalctl -u livi | grep '\[helper'` (helper up?), `bluetoothctl show`
+  (`Powered`, `Discoverable`, `Pairable`, `Alias`), and a `btmon` capture
+  across the retry. Then remove both-side pairings and pair fresh; a
+  phone that was bonded to a flapped address can never come back without
+  a fresh bond.
+* `Bluetooth: hci0: Bad flag given (0x2) vs supported (0x0)` +
+  `set_device_privacy_complete() ... Invalid Parameters`: benign on this
+  controller. `0x2` is the LE device-privacy (RPA) flag BlueZ 5.79 sets for
+  dual-mode phones; the Marlin/UWE5622 reports `supported 0x0` (no LL
+  privacy), so the kernel mgmt layer rejects the flag with `EINVAL`. It
+  does not block BR/EDR pairing or the iAP2/AAP RFCOMM session wireless
+  CarPlay/Android Auto use; the same pair of lines appears on Intel and
+  other controllers without LL privacy. Do not chase it: fix the pairing
+  state above instead. `livi-diag` (debug image) dumps the adapter
+  address, the persisted/attach/wlan0 addresses and the BlueZ adapter
+  dirs for exactly this triage.
+
+### Android Auto wireless: how the session starts, and the two traps
+
+Measured on the board (Pixel 10 Pro XL, btmon + bluetoothd -d + the helper's
+own log), the wireless AA chain is:
+
+1. the car pages the phone over **HFP** (`ConnectProfile` on the phone's HFP
+   AG UUID - this is what the helper's reconnect loop does for
+   `androidauto` targets, and what tapping a phone in the LIVI UI does);
+2. the phone's AA app answers the page, opens the car's **AA RFCOMM ch 8**
+   SDP record and runs the **WPP bootstrap** (Wi-Fi info is handed over
+   here);
+3. the phone joins the car's AP and opens **TCP 5277**; TLS, protocol 6.1.
+   The helper logs `[aa] phone connected`, `identified instanceId=...`,
+   `tls up`, `[core] Android Auto projects over wifi`.
+
+Two traps this exposed:
+
+* **A first-time phone is woken automatically.** Reconnect targets come from
+  LIVI's registry (`/data/livi-config/LIVI/devices.json`), which only gains
+  the phone after its first successful session - and the phone will not
+  start HFP by itself (the helper registers HFP as client-only, so there is
+  no HF record in the car's SDP for a phone-side connect). The helper's
+  reconnect loop therefore also wakes every **paired** phone that is not in
+  the registry yet (`livi-runtime/src/reconnect.rs` in the LIVI-Lite
+  checkout): within a second of the pairing connect, or on the next scan
+  when the phone is away, it pages the phone's HFP AG (Android Auto) and
+  iAP (CarPlay wireless) profiles and the phone's own app starts the
+  session; from then on the phone is a registry target and the normal
+  round-robin owns it. Everyday users just pair and the projection starts
+  (verified on the board). The change lives in the LIVI-Lite checkout and a
+  reference copy is kept at
+  `buildroot/livi-lite-patches/0001-reconnect-wake-paired-phones.patch`
+  (the livi-lite package uses the local/override site method, so Buildroot
+  never applies patches for it - apply this by hand to a fresh checkout
+  before building). Without that helper patch the first session
+  needs a kick from the car side (LIVI UI, or
+  `busctl call org.bluez /org/bluez/hci0/dev_XX org.bluez.Device1
+  ConnectProfile s 0000111f-0000-1000-8000-00805f9b34fb`). The
+  boot-time paging-list send races the helper's socket and can fail once
+  (`paging list not sent: ... Connection refused`); the `HelperConnected`
+  event re-sends with `again=true`, so the first list always lands.
+* **`systemctl restart livi` during an active AA session can deadlock the
+  kernel's RFCOMM layer.** The phone's AA RFCOMM ch 8 close races
+  `krfcommd`; captured on this board: `krfcommd` stuck in `rfcomm_run`,
+  `bluetoothd` stuck in `__lock_sock` (D state, SIGKILL cannot take them).
+  BT then stops answering (D-Bus property gets time out, SDP stops
+  responding) until a reboot. Stop the session (or just reboot) before
+  restarting livi if BT goes zombie-like.
+
+### GStreamer: the "app" plugin is what makes the phone's screen appear
+
+LIVI's media hosts feed their GStreamer pipelines through `appsrc` (e.g.
+`appsrc ! h265parse ! avdec_h265 ! videoconvert ! waylandsink`). The two
+board defconfigs originally left `BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_APP`
+unset, so on a real session the pipeline failed to parse (`gst-host.log`:
+`pipeline parse FAILED: no element "appsrc"`, `create player ... FAILED`)
+while the BT/Wi-Fi session itself established normally - the panel then
+kept showing LIVI's own "phone connected" UI and the bug looked like an AA
+failure. The plugin is enabled in all three defconfigs now; after a build
+that includes it the panel shows the projected Android Auto UI (verified
+on the board with the plugin bind-mounted in before the image rebuild).
+Debugging shortcut: `strings /data/livi-config/gst-registry.aarch64.bin |
+grep -c appsrc` - `0` means the plugin is missing; delete the registry
+after installing the plugin so it is rescanned (`GST_REGISTRY_UPDATE=no`
+otherwise keeps the stale cache).
 
 ## Needs a decision
 

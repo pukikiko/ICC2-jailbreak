@@ -1,0 +1,86 @@
+#!/bin/sh
+# Write the Bluetooth device address that hciattach_opi reads from
+# /run/livi/bt-addr (the vendored blob is patched to that path; see
+# uwe5622-bluetooth.service). Armbian fills the original
+# /sys/class/addr_mgt/addr_bt from the SoC SID via their sunxi_addr module,
+# which mainline does not have.
+#
+# The address MUST be stable across reboots: BlueZ keys every pairing under
+# /var/lib/bluetooth/<adapter-addr>/<peer-addr>/ (persisted on /data by
+# livi-persist), and the phone remembers the adapter it bonded with. A
+# flapping adapter address orphans all stored link keys on every boot: the
+# phone's reconnect then authenticates against nothing, BlueZ logs
+# "device_add_connection() ... is already connected" /
+# "Device is already marked as connected" while the peer retries, and no
+# iAP2/AAP profile ever settles. So: reuse the persisted address when it is
+# valid, generate once otherwise, and only then fall back to deriving.
+#
+# Generation order: combo chip's Wi-Fi MAC with the last octet incremented
+# (unique per unit), else stable bytes from /etc/machine-id (itself
+# persisted on /data by livi-persist, so per-unit and stable). The persisted
+# copy lives at /data/livi-config/bt-addr (next to the LIVI settings, not
+# inside /data/bluetooth, so BlueZ never sees it as adapter state);
+# /run/livi/bt-addr is what the attach blob reads. The last-octet
+# increment wraps modulo 256 (0xff -> 0x00) and the first octet is forced to
+# unicast (I/G bit cleared) so the result is always a valid BD_ADDR.
+set -eu
+RUN_ADDR=/run/livi/bt-addr
+PERSIST_ADDR=/data/livi-config/bt-addr
+
+is_valid_bt_addr() {
+    case "$1" in
+        [0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f])
+            return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+mkdir -p /run/livi
+# 1. stable path: a valid persisted address wins over everything.
+if [ -r "$PERSIST_ADDR" ]; then
+    persisted=$(tr -d '[:space:]' < "$PERSIST_ADDR" 2>/dev/null || true)
+    if is_valid_bt_addr "$persisted"; then
+        printf '%s\n' "$persisted" > "$RUN_ADDR"
+        exit 0
+    fi
+fi
+# 2. derive from the Wi-Fi MAC when it looks real.
+mac=$(cat /sys/class/net/wlan0/address 2>/dev/null || true)
+if is_valid_bt_addr "$mac" && [ "$mac" != "00:00:00:00:00:00" ]; then
+    prefix=${mac%:*}
+    last=${mac##*:}
+    # modulo-256 increment: 0xff wraps to 0x00 instead of printing 0x100
+    new_last=$(printf '%02x' $(( (0x$last + 1) & 0xff )))
+    # force unicast: clear the I/G bit of the first octet
+    first=${mac%%:*}
+    first=$(printf '%02x' $(( 0x$first & 0xfe )))
+    rest=${prefix#*:}
+    addr="$first:$rest:$new_last"
+    if is_valid_bt_addr "$addr"; then
+        printf '%s\n' "$addr" > "$RUN_ADDR"
+        # persist for the next boot; a read-only /data just fails quietly
+        mkdir -p "$(dirname "$PERSIST_ADDR")" 2>/dev/null || true
+        printf '%s\n' "$addr" > "$PERSIST_ADDR" 2>/dev/null || true
+        exit 0
+    fi
+fi
+# 3. stable fallback: bytes from the persisted machine-id (per-unit, stable).
+if [ -r /etc/machine-id ]; then
+    id=$(tr -d '[:space:]-' < /etc/machine-id 2>/dev/null || true)
+    case "$id" in
+    [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]*)
+        b0hex=$(printf '%s' "$id" | cut -c1-2)
+        b0=$(printf '%02x' $(( (0x$b0hex & 0xfe) | 0x02 )))
+        addr="$b0:$(printf '%s' "$id" | cut -c3-4):$(printf '%s' "$id" | cut -c5-6):$(printf '%s' "$id" | cut -c7-8):$(printf '%s' "$id" | cut -c9-10):$(printf '%s' "$id" | cut -c11-12)"
+        if is_valid_bt_addr "$addr"; then
+            printf '%s\n' "$addr" > "$RUN_ADDR"
+            mkdir -p "$(dirname "$PERSIST_ADDR")" 2>/dev/null || true
+            printf '%s\n' "$addr" > "$PERSIST_ADDR" 2>/dev/null || true
+            exit 0
+        fi
+        ;;
+    esac
+fi
+# 4. last resort: fixed address so the radio still comes up (collides across
+# units; pairings made with it will not survive a unit swap).
+printf '10:11:12:13:14:15\n' > "$RUN_ADDR"

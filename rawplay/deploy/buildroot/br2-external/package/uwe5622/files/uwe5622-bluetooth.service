@@ -1,20 +1,55 @@
-# Attach the UWE5622's Bluetooth TTY to BlueZ. sprdbt_tty speaks HCI-H4
-# over SDIO (no UART involved) on /dev/ttyBT once the modules are up;
-# btattach (BlueZ tools) binds it to the stack in the foreground and
-# bluetoothd picks the controller up from there. The wait loop is
-# deliberate: module load and the chip's firmware boot take a few seconds,
-# and there is no udev coldplug to order on (masked by
-# board/common/post-build.sh).
+# Attach the UWE5622's Bluetooth TTY to BlueZ.
+#
+# The chip needs its vendor attach, not a plain H4 one: every mainline-ish
+# distribution that supports this combo (Armbian's aw859a-bluetooth.service,
+# DietPi, Orange Pi, CoreELEC) runs the Spreadtrum-patched `hciattach_opi`
+# with the `sprd` protocol at 1.5 Mbaud. With `btattach -P h4` the controller
+# registers and powers on, but its radio never starts answering inquiry, so
+# no phone ever discovers the head unit. The `sprd` init (vendor commands,
+# baud rate, post process) is what turns the radio on.
+#
+# rfkill comes first: sprdbt_tty soft-blocks Bluetooth at module load, and the
+# chip only finishes its BT bring-up when the switch is unblocked.
+#
+# The tty exists as soon as modules-load has inserted sprdbt_tty, but wait
+# anyway (a re-plug or slower boot order keeps this correct). The hci0 wait
+# in ExecStartPost is what makes `After=uwe5622-bluetooth.service` mean "BlueZ
+# has an adapter" for the livi drop-in, because the helper makes its one
+# BlueZ connection at startup and gives up for the rest of the session when
+# the controller is not there yet.
+#
+# hciattach_opi also loads the chip's pskey and RF front-end tables from
+# /vendor/etc (installed by this package) and writes the BT address. The
+# address normally comes from Armbian's sunxi_addr module via
+# /sys/class/addr_mgt/addr_bt; that module does not exist here, so the blob
+# is patched to read /run/livi/bt-addr instead, which the last ExecStartPre
+# fills with a stable address (persisted on /data, derived from the Wi-Fi
+# MAC once, else from the persisted machine-id; see livi-bt-addr). The
+# address must be stable: BlueZ keys pairings under the adapter address and
+# a flapping address orphans every bonding, which surfaces as
+# "device_add_connection() ... is already connected" /
+# "Device is already marked as connected" while the phone retries.
+#
+# Ordering: livi-persist first, so /data (where the stable address lives)
+# is mounted before livi-bt-addr reads/writes it. livi-persist.service
+# carries the matching Before=.
 [Unit]
 Description=Attach UWE5622 Bluetooth TTY to BlueZ
-After=systemd-modules-load.service bluetooth.service
-Wants=bluetooth.service
+After=systemd-modules-load.service bluetooth.service livi-persist.service
+Wants=bluetooth.service livi-persist.service
 
 [Service]
 Type=simple
-ExecStartPre=/bin/sh -c 'i=0; while [ ! -c /dev/ttyBT ] && [ $i -lt 100 ]; do sleep 0.2; i=$((i+1)); done; test -c /dev/ttyBT'
-ExecStart=/usr/bin/btattach -B /dev/ttyBT -P h4
-Restart=always
+ExecStartPre=/usr/sbin/rfkill unblock bluetooth
+ExecStartPre=/bin/sh -c 'i=0; while [ ! -c /dev/ttyBT0 ] && [ $i -lt 100 ]; do sleep 0.2; i=$((i+1)); done; test -c /dev/ttyBT0'
+ExecStartPre=/usr/lib/livi/livi-bt-addr
+ExecStart=/usr/bin/hciattach_opi -s 1500000 /dev/ttyBT0 sprd
+ExecStartPost=/bin/sh -c 'i=0; while [ ! -e /sys/class/bluetooth/hci0 ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done'
+# hciattach_opi daemonizes itself after the attach; the service has done its
+# job once it exits, and the daemon stays in the unit's cgroup.
+RemainAfterExit=yes
+TimeoutSec=0
+Restart=on-failure
 RestartSec=2
 
 [Install]

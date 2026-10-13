@@ -13,10 +13,18 @@ config BR2_PACKAGE_LIVI_APPLIANCE
     select BR2_PACKAGE_WESTON_SHELL_KIOSK
     select BR2_PACKAGE_BASH
     select BR2_PACKAGE_BLUEZ5_UTILS
+    # bluetoothctl: livi-core's package probe looks for it; the helper itself
+    # talks to BlueZ over D-Bus.
+    select BR2_PACKAGE_BLUEZ5_UTILS_CLIENT
     select BR2_PACKAGE_DBUS
+    # avahi: the helper publishes and browses CarPlay's mDNS records through
+    # avahi-publish-service/avahi-browse, which need the daemon running.
+    select BR2_PACKAGE_AVAHI
+    select BR2_PACKAGE_AVAHI_DAEMON
     select BR2_PACKAGE_HOSTAPD
     select BR2_PACKAGE_DNSMASQ
     select BR2_PACKAGE_IW
+    select BR2_PACKAGE_WIRELESS_REGDB
     select BR2_PACKAGE_IPROUTE2
     select BR2_PACKAGE_UTIL_LINUX
     select BR2_PACKAGE_UTIL_LINUX_RFKILL

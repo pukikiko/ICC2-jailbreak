@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: LIVI appliance
+Date: Sun, 11 Oct 2026 21:00:00 +1030
+Subject: [PATCH] Bluetooth: hci_sync: ignore EINVAL from WRITE_DEF_LINK_POLICY
+
+The Marlin (UWE5622/AW859A) controller on the Orange Pi Zero 2W reports
+HCI_OP_WRITE_DEF_LINK_POLICY (0x080f) as supported but answers the
+command with Invalid HCI Command Parameters (-EINVAL) during HCI
+initialisation. hci_init_stage_sync() treats any stage failure as fatal,
+so the controller never finishes setup, the kernel never sends the mgmt
+Index Added event, and BlueZ ends up with no adapter at all
+("BlueZ never published /org/bluez/hci0" from livi-helperd).
+
+The command only installs the default link policy (RSWITCH/HOLD/SNIFF/
+PARK power-save modes), so dropping the error is safe. Armbian carries
+the same workaround for this hardware (drv-net-bluetooth-hci-ignore-
+def-link-policy-error.patch in its sunxi patch stack).
+---
+ net/bluetooth/hci_sync.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+--- a/net/bluetooth/hci_sync.c
++++ b/net/bluetooth/hci_sync.c
+@@ -270,6 +270,13 @@
+ 		if (!event)
+ 			bt_dev_err(hdev, "Opcode 0x%4.4x failed: %ld", opcode,
+ 				   PTR_ERR(skb));
++
++		/* Ignore -22 for WRITE_DEF_LINK_POLICY - some controllers
++		 * report it as supported but reject it (e.g., Marlin/uwe5622)
++		 */
++		if (PTR_ERR(skb) == -EINVAL && opcode == 0x080f)
++			return 0;
++
+ 		return PTR_ERR(skb);
+ 	}
+ 

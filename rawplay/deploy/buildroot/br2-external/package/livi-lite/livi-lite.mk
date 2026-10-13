@@ -11,6 +11,11 @@
 LIVI_LITE_SRC ?= $(BR2_EXTERNAL_LIVI_APPLIANCE_PATH)/../../../../../LIVI-Lite
 LIVI_LITE_SITE = $(LIVI_LITE_SRC)
 LIVI_LITE_SITE_METHOD = local
+# The sibling checkout is a developer tree: local cargo target dirs (tens of
+# GB), node_modules and the JS-staged out/ and build/ trees are not inputs to
+# the package build, so never rsync them into the package build dir.
+LIVI_LITE_OVERRIDE_SRCDIR_RSYNC_EXCLUSIONS = \
+	--exclude target --exclude node_modules --exclude out --exclude build
 LIVI_LITE_LICENSE = GPL-3.0-or-later
 LIVI_LITE_LICENSE_FILES = LICENSE
 
@@ -18,8 +23,9 @@ LIVI_LITE_LICENSE_FILES = LICENSE
 # (BR2_PACKAGE_HOST_RUST is the from-source alternative). The C libraries are
 # what the Rust build scripts link against in the target sysroot; gst1-libav
 # is the software decoder fallback (avdec_h264/h265), which is what a
-# headless appliance without a V4L2/VA-API decoder uses.
-LIVI_LITE_DEPENDENCIES = host-rustc host-pkgconf host-cmake \
+# headless appliance without a V4L2/VA-API decoder uses. openssl is livi-cp's
+# Linux TLS stack (the manifest's probe list only checks the runtime side).
+LIVI_LITE_DEPENDENCIES = host-rustc host-pkgconf host-cmake openssl \
 	gstreamer1 gst1-plugins-base gst1-plugins-good gst1-plugins-bad \
 	gst1-libav wayland libxkbcommon
 
@@ -51,6 +57,41 @@ define LIVI_LITE_INSTALL_TARGET_CMDS
 		$(TARGET_DIR)/etc/udev/rules.d/99-LIVI.rules
 	$(INSTALL) -D -m 0755 $(@D)/assets/linux/livi-touch-filter \
 		$(TARGET_DIR)/usr/local/lib/livi/livi-touch-filter
+	# The wireless-projection AP has the same first-run-install problem as
+	# the udev rule, with three files instead of one: livi-core checks
+	# /etc/systemd/system/livi-wifi-ap.service, its sudoers rule and the
+	# root's copy of the helper at /usr/local/sbin/livi-helperd, and
+	# installs all three itself through sudo when any is missing or stale.
+	# The appliance rootfs is read-only and its sudo is a shim that execs
+	# directly (livi-appliance), so seed what livi-core would install. It
+	# renders for the user it runs as (root, see livi.service) and with
+	# the systemctl path it resolves on the image; the root's helper copy
+	# is a link, which satisfies the byte-for-byte comparison.
+	mkdir -p $(TARGET_DIR)/etc/sudoers.d $(TARGET_DIR)/usr/local/sbin
+	$(INSTALL) -D -m 0644 $(@D)/assets/linux/livi-wifi-ap.service.template \
+		$(TARGET_DIR)/etc/systemd/system/livi-wifi-ap.service
+	$(SED) 's|__USERNAME__|root|g;s|__SYSTEMCTL__|/usr/bin/systemctl|g' \
+		$(TARGET_DIR)/etc/systemd/system/livi-wifi-ap.service
+	$(INSTALL) -D -m 0644 $(@D)/assets/linux/99-LIVI-wifi-ap.sudoers.template \
+		$(TARGET_DIR)/etc/sudoers.d/99-LIVI-wifi-ap
+	$(SED) 's|__USERNAME__|root|g;s|__SYSTEMCTL__|/usr/bin/systemctl|g' \
+		$(TARGET_DIR)/etc/sudoers.d/99-LIVI-wifi-ap
+	chmod 0440 $(TARGET_DIR)/etc/sudoers.d/99-LIVI-wifi-ap
+	ln -sf /opt/livi/resources/driver/livi-helperd \
+		$(TARGET_DIR)/usr/local/sbin/livi-helperd
+	# The rule that lets LIVI run the helper as root. The phone installer
+	# seeds the same file for its user, aimed at the installed helper; the
+	# template's /home/__USERNAME__ path is the AppImage layout, so point it
+	# at the helper this image installs, for the root the service runs as.
+	$(INSTALL) -D -m 0644 $(@D)/assets/linux/99-LIVI-helper.sudoers.template \
+		$(TARGET_DIR)/etc/sudoers.d/99-LIVI-helper
+	$(SED) 's|/home/__USERNAME__/.config/LIVI/driver/livi-helperd|/opt/livi/resources/driver/livi-helperd|;s|__USERNAME__|root|g' \
+		$(TARGET_DIR)/etc/sudoers.d/99-LIVI-helper
+	chmod 0440 $(TARGET_DIR)/etc/sudoers.d/99-LIVI-helper
+	# AppStream metadata from the same assets dir; keep it in its canonical
+	# location even though the appliance has no software centre.
+	$(INSTALL) -D -m 0644 $(@D)/assets/linux/dev.f-io.livi.metainfo.xml \
+		$(TARGET_DIR)/usr/share/metainfo/dev.f-io.livi.metainfo.xml
 endef
 
 $(eval $(generic-package))
