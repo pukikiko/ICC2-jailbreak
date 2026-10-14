@@ -30,14 +30,15 @@ data partition, and all boot-path drivers are built in.
 
 > Status: the **qemu image builds, boots, reaches T6 and passes
 > `tests/smoke.sh`** with LIVI-Lite (measured table below). The **Orange Pi
-> defconfig and board files are in place and validated** (the defconfig parses
-> cleanly and shares every package with the tested qemu image), but a full
-> board build was **not** run in this session and the image has **not** been
-> run on hardware (none was available); everything below that concerns the
-> board is source-verified and marked as such. One blocking hardware fact
-> (audio) is in "Needs a decision" and is the reason the board image cannot
-> yet do sound. Wi-Fi/BT now ships in the image (below) but is likewise
-> untested on hardware.
+> image has been run on hardware**: the board boots, the UWE5622 comes up
+> (wlan0 + hostapd AP + hci0), rawlink streams to the car and LIVI presents
+> its UI, and the H616 **video engine decodes H.264/HEVC in hardware**
+> through the cedrus backports below (verified live; see "Hardware video
+> decoding"). The Mali-G31 stack (panfrost + Mesa, the upstream H616
+> power-domain fix, weston GL, dmabuf zero-copy) ships in the board image
+> too; its first hardware outing hit the known pre-fix GPU hang, the fix is
+> backported and the GPU path is the one to watch on the next bench run
+> (see "The Mali GPU" below). Audio is still blocked ("Needs a decision").
 >
 > The boot path is trimmed (see "Boot-time work" below): the stock PulseAudio
 > unit that stalled LIVI for ~30 s is masked, the appliance units no longer
@@ -56,13 +57,19 @@ rawplay/deploy/buildroot/
     configs/               qemu_aarch64_virt_defconfig, orangepi_zero2w[_debug]_defconfig
     board/common/          post-build.sh (machine-id, unit masks, udev/getty policy)
     board/orangepi_zero2w/ linux.fragment, uboot.fragment, boot.cmd[.debug],
-                           genimage.cfg, post-image.sh, reference/ (Wi-Fi DT notes)
+                           genimage.cfg, post-image.sh, reference/ (Wi-Fi DT notes),
+                           kernel-patches/ (UWE5622 SDIO, HCI quirk, H616 video
+                           engine/GPU/PPU 0003-0007, H616 panfrost 0008-0010)
     board/qemu_aarch64_virt/ linux.fragment, post-image.sh
     package/rawlink/       builds ../../../rawplay/out/rawlink (local site method)
     package/weston-touch/  builds weston-touch.so against the image's libweston
     package/livi-lite/     cross-builds pukikiko/LIVI-Lite from source (local site)
-    package/livi-appliance/ units, shims, persist/pulse/seed scripts
+    package/livi-appliance/ units, shims, persist/pulse/seed scripts,
+                           livi-weston-run (renderer choice), livi-gpu.modules-load
     package/unit-sim/      qemu's car-side rawplay stand-in
+    patches/gst1-plugins-bad/ the v4l2codecs system-memory copy fix
+                           (BR2_GLOBAL_PATCH_DIR)
+  livi-lite-patches/       reference patches for a fresh LIVI-Lite checkout
   scripts/                 build.sh, run-qemu.sh, flash.sh, boottime.sh,
                            qemu_boot.py, throughput.sh
   tests/                   smoke.sh, unit-sim/, rawsink.py
@@ -154,13 +161,19 @@ could not be verified it says so.
   allocation fits. The gadget's four bulk endpoints are `0x83` EP3-IN,
   `0x04` EP4-OUT, `0x81` EP1-IN, `0x02` EP2-OUT — exactly endpoints 1..4, so
   the descriptor set fits the controller with no endpoint left over.
-* **Throughput is the project's biggest risk and is unmeasured.** The raw
-  link needs ~11.5 MB/s for 15 fps and ~23 MB/s for 30 fps of 768 000-byte
-  frames. PIO with single 512-byte FIFOs can plausibly miss the 30 fps
-  number; only a measurement on hardware settles it. `scripts/throughput.sh`
-  (board) + `tests/rawsink.py` (host PC) produce the number, and the README
-  must be updated with it before this deployment is called done for a car.
-  qemu proves nothing about this: dummy_hcd is virtual and the wire is free.
+* **Measured on hardware**: the link sustains **18.8 MB/s / 24.4 fps** of
+  768 000-byte frames (`scripts/throughput.sh` + `tests/rawsink.py` on a
+  bench host, and the same rate from the board's own `rawstream` stats).
+  PIO with single 512-byte FIFOs is the limit; there is no DMA path to
+  enable. The raw link needs ~23 MB/s for 30 fps, so **30 fps of raw frames
+  is out of reach on this board**: the panel can be fed ~24-25 fps, and the
+  wire time of one frame (~40 ms) is the latency floor for any full-frame
+  update. `rawlink-wait` therefore captures at 24 fps (just under the link)
+  so the sender's 2-frame window stays empty: measured 24 fps at 41 ms ack
+  latency, against 25 fps at 57 ms when capturing at 30 and queueing one
+  frame ahead. More than that (dirty-rect deltas, a DMA-capable UDC, or a
+  different wire format) is future work; qemu proves nothing here because
+  dummy_hcd is virtual and the wire is free.
 
 ### Wi-Fi/BT: Unisoc UWE5622 (AW859A), shipped out of tree on mainline
 
@@ -205,11 +218,151 @@ could not be verified it says so.
   Wi-Fi station + AP come from the same chip: `wpa_supplicant` joins
   networks for bench work while the helper's `hostapd`/`dnsmasq`/`iw`
   path (already in the image) serves the phone-facing AP.
-* **Untested on hardware** (no board in this session): the module build
-  against 6.12.111 is verified, the patched DTS compiles, and the
-  defconfig parses, but first power-on still has to show `wlan0` +
-  `hci0`. The driver is a vendor BSP port ("the driver is trash" per its
-  own porters): expect flakiness, not Intel quality.
+* **Run on hardware**: the board brings up `wlan0` (the firmware loads),
+  `hostapd` serves the AP and `hci0` appears; a phone associates, DHCPs and
+  the device is pageable. The driver is still a vendor BSP port ("the
+  driver is trash" per its own porters): expect flakiness, not Intel
+  quality.
+
+### Hardware video decoding: the H616 video engine (cedrus)
+
+The board's video engine decodes the phone's H.264/HEVC **in hardware**. The
+SoC's VE is the same Cedar block as the H6's; mainline gained the H616
+node/compatible in the "arm64: allwinner: h616: Support Video Engine" series
+(Chen-Yu Tsai, Jernej Skrabec), backported for the pinned 6.12 kernel as
+board patches:
+
+* `0003-arm64-dts-h616-add-video-engine.patch` — the `video-codec@1c0e000`
+  node and the VE SRAM section (one `allwinner,sram` claim, as 6.12's SRAM
+  driver reads a single phandle; the node lists the corrected v2 IOMMU
+  ports 3/2).
+* `0005-soc-sunxi-sram-add-h616-ve-sram.patch` — the H616 VE SRAM section
+  descriptor (`sunxi_sram_claim` must know it before cedrus probes).
+* `0006-media-cedrus-add-h616-variant.patch` — the cedrus compatible, with
+  the H6 variant data (H.264 + HEVC; the H616's VP9 decoder is not
+  reverse-engineered upstream yet).
+* `0007-pmdomain-sunxi-add-h616-prcm-ppu.patch` — the upstream H6/H616
+  PRCM power-domain driver. The VE does not need it; the GPU does, and
+  without it panfrost's probe hangs the board (verified).
+* `0004-arm64-dts-h616-add-gpu.patch` — the Mali-G31 node (with the
+  `prcm_ppu` power domain) and the Zero 2W `mali-supply` wiring. Verified:
+  `/dev/dri/renderD128` probes as `mali-g31`.
+* `0008..0010-drm-panfrost-*.patch` — Philippe Simons' "drm/panfrost:
+  enable G31 on H616" series (v2, dri-devel 2025-04). The H616's GPU
+  power domain needs the clocks and reset line sequenced around it; the
+  stock 6.12 driver leaves them alone, so the first real GPU work hung the
+  whole SoC (verified the hard way: the board wedged solid when weston
+  first rendered through panfrost). The series adds GPU_PM_RT, the H616
+  compatible that selects it and reorders init to domain → reset →
+  clocks. This is what makes the GPU usable at all on this board.
+
+The image turns both on with `BR2_PACKAGE_LIVI_APPLIANCE_GPU`, which
+installs `/etc/modules-load.d/livi-gpu.conf` (`sunxi-cedrus`, `panfrost`);
+the fragment enables `VIDEO_SUNXI`, the cedrus module, `SUN50I_IOMMU` and
+the PPU. GStreamer needs the stateless V4L2 decoders, so `gst1-plugins-bad`
+is built with `BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_V4L2CODECS` (the plugin
+registers elements only when `/dev/media0` exists — the qemu image carries
+it inert).
+
+LIVI's codec probe then reports hardware (verified on the board):
+
+    [core] gst-host codecs {"h264":{"hw":true,"sw":true},"h265":{"hw":true,"sw":true},...}
+
+and the video host picks its sink chain from the compositor's render node
+(LIVI-Lite's `presink`, see the reference patch):
+
+    GPU compositor: ... ! v4l2slh264dec ! queue leaky ! waylandsink
+    no GPU:         ... ! v4l2slh264dec ! queue leaky !
+                    videoconvert n-threads=4 ! video/x-raw,format=BGRx ! waylandsink
+
+The first is the zero-copy pair: the decoder's dmabuf reaches the
+GPU-backed compositor without a copy (the GStreamer patch keeps it a dmabuf
+because downstream advertised DMABuf caps), the frame is textured on the
+Mali and composited into LIVI's surface. The second is the fallback for a
+session whose EGL found no GPU, where the direct chain is `not-negotiated`
+(verified on the board). The decode is hardware in both cases; the first
+still needs its first clean bench run (the pre-fix GPU hang is what the
+panfrost backports address).
+
+The decode itself is fast — a 79 s phone capture (1967 frames, 800x480
+HEVC) decodes in ~2 s — but the no-GPU fallback showed two CPU-side costs
+on hardware, both fixed in this image:
+
+* **videoconvert was scalar.** With the compositor on llvmpipe/pixman the
+  frames are converted to the sink's shm format (BGRx) in software, and
+  without ORC the defconfigs built GStreamer's plain C path: ~170 ms per
+  800x480 frame (~6 fps, verified with `gst-launch-1.0`) with the decoder
+  throttled to the same rate. `BR2_PACKAGE_ORC=y` is now in all three
+  defconfigs; it is what makes both the converter and the software-decoder
+  fallback usable on this CPU.
+* **the decoder's dmabufs map uncached.** On this non-coherent SoC the V4L2
+  mmap is uncached, so any per-pixel conversion reading straight out of the
+  dmabuf pays uncached latency for every read. The global patch
+  `patches/gst1-plugins-bad/0001-v4l2codecs-copy-frames-for-system-memory-downstream.patch`
+  makes the v4l2 stateless decoders run their existing copy path when
+  downstream negotiated plain system memory (a GPU dmabuf sink keeps
+  zero-copy): the frame is read back once (~11 ms/frame) and the conversion
+  then reads cached memory.
+
+With both, the no-GPU pipeline
+
+    ... ! v4l2slh264dec ! queue leaky ! videoconvert n-threads=4 !
+    video/x-raw,format=BGRx ! waylandsink
+
+runs at ~27 ms/frame (~37 fps) against the phone's 25-30 fps stream,
+measured on the board with the captured phone stream. The "video
+incredibly behind" the first live test showed was this conversion rate, not
+the link; the capture used for the measurement came from the reference
+patch's own `LIVI_GST_DUMP=<path>` debug hook (it appends the pushed
+encoded bytes).
+
+### The Mali GPU (panfrost) and the zero-copy path
+
+* Mesa panfrost is enabled in both board defconfigs. Buildroot's graph
+  makes that pull the OpenCL/CLC precompiler (host clang/libclc and LLVM
+  built with RTTI); llvmpipe/softpipe stay as the software fallback, and
+  only the board images carry it.
+* `livi-weston-run` picks `--renderer=gl` as soon as
+  `/dev/dri/renderD128` exists (panfrost is in `livi-gpu.modules-load`),
+  otherwise pixman. A GL weston advertises the GPU/dmabuf to its clients,
+  and `livi-compositor`'s EGL then binds the Mali (its log says
+  `compositor display wayland-1 on /dev/dri/renderD128` instead of `-`).
+  That sets `LIVI_RENDER_NODE` for the video host, which selects the
+  zero-copy `v4l2sl*dec ! waylandsink` chain above.
+* State: the pieces are built, the kernel probe is verified and the GPU
+  session is run on hardware (weston logs `Using rendering device:
+  /dev/dri/renderD128`, `GL_RENDERER: Mali-G31 MC1 (Panfrost)`, and the
+  compositor binds it). The zero-copy decoder chain above still needs its
+  own bench run; if panfrost turns out unable to import cedrus's NV12
+  dmabufs, the fallback is the converter chain
+  (`LIVI_WESTON_RENDERER=pixman` forces the software session and the
+  readback path).
+* **The capture readback was the appliance's real bottleneck, and is fixed
+  by two weston patches** (`patches/weston/0001`, `0002`, applied through
+  `BR2_GLOBAL_PATCH_DIR`). `weston_capture_v1` reads the output back with
+  `glReadPixels`, and on panfrost a tiled render target costs ~80 ms per
+  800x480 frame with the GL_BGRA read the compositor picks; that capped
+  rawlink's capture at 5-9 fps no matter what the link could carry (measured
+  with a capture client on the board; pixman captures the same frame in
+  3.7 ms). Patch 0001 gives the headless GL output a **linear dmabuf
+  renderbuffer in the compositor's read format** (ARGB8888), so the readback
+  is a mapped copy: **15 ms**. A format that does not match the read format
+  costs as much again (XRGB8888 + GL_BGRA: 81 ms), and a tiled target with
+  the right format is still 82 ms; linear-in-the-read-format is the only
+  fast combination found. Patch 0002 skips the asynchronous PBO+fence path
+  for outputs that repaint only on capture (`--refresh-rate 0`): the client
+  is synchronously waiting for the frame, and the PBO round trip adds
+  another 16 ms on panfrost. Result on hardware: the panel now receives
+  every frame the link can carry (24 fps at 41 ms ack latency, from the
+  default 2-frame window captured at 24 fps).
+
+One upgrade detail:
+
+* `GST_REGISTRY_UPDATE=no` makes the persisted registry sticky, so a decoder
+  plugin an upgrade adds would never register. `livi-persist` drops
+  `/data/livi-config/gst-registry.aarch64.bin` when `/dev/media0` exists and
+  the cached file has no `v4l2slh264dec`; the next livi start rescans and
+  writes a fresh cache.
 
 ### Audio: the PCM5102A cannot bind on mainline H618 today
 
@@ -282,11 +435,34 @@ are the check on real hardware.
   default sink always set.
 * `livi-config.json` seeds `$HOME/.config/LIVI/config.json` (and the old
   `LIVI-vnc` dir, so an upgrade from an Electron install keeps its
-  settings); it carries 800x480 for the screen and the projection
-  (`projectionWidth`/`projectionHeight`), so Android Auto negotiates the
-  800x480 tier and the kiosk fullscreen check accepts the window.
-  `livi.service` also sets `LIVI_UI_SIZE=800x480`, which fresh installs
-  size their projection defaults from (and `livi-ui` opens at).
+  settings); besides 800x480 for the screen and the projection
+  (`projectionWidth`/`projectionHeight`, so Android Auto negotiates the
+  800x480 tier and the kiosk fullscreen check accepts the window) it carries
+  the appliance's network/video defaults:
+
+      "wifiType": "2.4ghz", "wifiChannel": 6, "country": "AU",
+      "wirelessAaEnabled": true, "wifiDedicatedInterface": true,
+      "carName": "Ford Falcon", "projectionFps": 24
+
+  The phone-facing AP therefore comes up on 2.4 GHz channel 6 under the
+  Australian regulatory domain (verified on the board: `[wifi-ap] AP up —
+  channel=6`), and the UI setting "FPS" starts at 24 (LIVI's own AA
+  handshake still negotiates 30/60 — its protocol's `VideoFrameRate` only
+  has those two; 24 is the app-side/CarPlay default). `livi-persist`
+  re-applies all of these on every boot, not only on a fresh `/data`, the
+  same way it always enforced `wirelessAaEnabled`/`carName`, so an upgrade
+  of an already-flashed card moves to the new defaults. `livi.service` also
+  sets `LIVI_UI_SIZE=800x480`, which fresh installs size their projection
+  defaults from (and `livi-ui` opens at).
+* The checkout next to this repo carries two local changes on top of
+  LIVI-Lite `main`, both kept as reference patches under
+  `livi-lite-patches/`: `0001-reconnect-wake-paired-phones.patch` (the
+  wireless first-session wake, see "Android Auto wireless") and
+  `0002-convert-hw-decoder-frames-for-a-gpu-less-compositor.patch` (the
+  hardware decoder's frames are converted for a GPU-less compositor, see
+  "Hardware video decoding"). Buildroot's livi-lite package uses the local
+  site method and never applies patches for it, so apply the references by
+  hand to a fresh checkout before building.
 
 ## Image design and why
 
@@ -664,7 +840,9 @@ Two traps this exposed:
 ### GStreamer: the "app" plugin is what makes the phone's screen appear
 
 LIVI's media hosts feed their GStreamer pipelines through `appsrc` (e.g.
-`appsrc ! h265parse ! avdec_h265 ! videoconvert ! waylandsink`). The two
+`appsrc ! h265parse ! avdec_h265 ! videoconvert ! waylandsink`; with the
+VPU image the probe picks `v4l2slh264dec`/`v4l2slh265dec` and the chain is
+covered in "Hardware video decoding"). The two
 board defconfigs originally left `BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_APP`
 unset, so on a real session the pipeline failed to parse (`gst-host.log`:
 `pipeline parse FAILED: no element "appsrc"`, `create player ... FAILED`)
@@ -676,17 +854,20 @@ on the board with the plugin bind-mounted in before the image rebuild).
 Debugging shortcut: `strings /data/livi-config/gst-registry.aarch64.bin |
 grep -c appsrc` - `0` means the plugin is missing; delete the registry
 after installing the plugin so it is rescanned (`GST_REGISTRY_UPDATE=no`
-otherwise keeps the stale cache).
+otherwise keeps the stale cache, and `livi-persist` now drops a cache that
+predates the v4l2 decoders by itself).
 
 ## Needs a decision
 
 1. **Wi-Fi/BT driver (was blocking wireless AA/CarPlay and Bluetooth
-   pairing; now shipped, untested on hardware).** The module is a Unisoc
+   pairing; shipped and now run on hardware).** The module is a Unisoc
    UWE5622/AW859A with no mainline driver, so the image builds
    `armbian/uwe5622` out of tree (`package/uwe5622`), enables the SDIO
    bus with a DTS-only kernel patch, ships `wcnmodem.bin`, and attaches
-   Bluetooth via `uwe5622-bluetooth.service`. If the hardware bring-up
-   shows the BSP driver is unusable, the fallbacks are, cheapest first:
+   Bluetooth via `uwe5622-bluetooth.service`. On the board `wlan0`/`hci0`
+   come up and the AP serves phones; the driver is still a vendor BSP port,
+   so flakiness stays possible. If it turns out unusable in a car, the
+   fallbacks are, cheapest first:
    a. a different board with a mainline Wi-Fi/BT part (AP6256-class) —
       the deployment stays the same;
    b. accept wired-only, which for LIVI means no phone session at all; not
@@ -714,16 +895,20 @@ otherwise keeps the stale cache).
 
 ## Limits / future work
 
-* The board image is untested on hardware in this session.
-* Board boot time is not yet measured; the qemu table says nothing about
-  the 10 s target. The largest remaining qemu cost is the nested
-  compositor's software EGL under TCG; on the board that is the Adreno-class
-  GPU (or llvmpipe on the CPU), and the same native stack starts core to
-  Slint UI in ~0.6 s on an idle x86_64 host.
+* The board runs on hardware (Wi-Fi/BT, AP, rawlink, LIVI, hardware video
+  decode — see the sections above); audio is the remaining blocked block.
+  The GPU/Mesa stack ships and the zero-copy video path is wired to it,
+  but its first clean bench run (after the panfrost H616 backports) is
+  still outstanding (see "The Mali GPU"). Board boot time is not yet
+  measured; the qemu table says nothing about the 10 s target. The largest
+  remaining qemu cost is the nested compositor's software EGL under TCG; on
+  the board that is llvmpipe on the CPU while no renderer node exists, and
+  the same native stack starts core to Slint UI in ~0.6 s on an idle x86_64
+  host.
 * `initcall_debug` parsing is only exercised by debug images; the qemu
   kernel does not use it.
-* Wi-Fi/BT and audio are blocked above; the helper's hostapd/BT paths are
-  therefore unexercised outside unit-sim's fake gadget.
+* Audio is blocked above; the helper's hostapd/BT paths are otherwise live
+  on the board now.
 * The GStreamer registry on `/data` removes the per-boot plugin scan after
   the first boot; a readahead/pre-warm pass over `/opt/livi` is the next
   lever on the board's SD card.

@@ -1,0 +1,102 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: LIVI appliance
+Date: Wed, 14 Oct 2026 18:30:00 +1030
+Subject: [PATCH] v4l2codecs: copy frames when downstream is system memory
+
+The v4l2codecs decoders always allocate their output from an internal
+DMABuf pool; only a downstream that needs neither a plain layout nor a
+system-memory handoff gets a copy. A converter (or any element that
+negotiates plain video/x-raw without the DMABuf feature) therefore reads
+every pixel straight out of an uncached dmabuf mapping. On the Allwinner
+H616 that makes videoconvert's NV12 -> BGRx step take ~170 ms per
+800x480 frame (~6 fps, measured on hardware), which stalls the whole
+video path even though the decode itself is hardware and fast.
+
+Set sysmem_output from the negotiated caps and have the existing
+copy_frames path land the frame in the base class's system-memory pool:
+one memcpy per frame (~5 ms) and every later conversion reads cached
+memory. A DMABuf consumer (a GPU-backed sink) keeps zero-copy.
+
+The same change is applied to the H.264 and H.265 decoders, the two the
+appliance's Android Auto/CarPlay path uses.
+---
+ sys/v4l2codecs/gstv4l2codech264dec.c | 12 ++++++++++++
+ sys/v4l2codecs/gstv4l2codech265dec.c | 12 ++++++++++++
+ 2 files changed, 24 insertions(+)
+
+--- a/sys/v4l2codecs/gstv4l2codech264dec.c
++++ b/sys/v4l2codecs/gstv4l2codech264dec.c
+@@ -86,6 +86,8 @@
+   GstV4l2CodecPool *src_pool;
+   gint min_pool_size;
+   gboolean has_videometa;
++  /* Downstream negotiated plain system memory, not DMABuf caps. */
++  gboolean sysmem_output;
+   gboolean streaming;
+   gboolean interlaced;
+   gboolean need_sequence;
+@@ -455,6 +457,14 @@
+     return FALSE;
+   }
+ 
++  /* The internal pool only hands out DMABufs. A downstream that negotiated
++   * plain system memory cannot consume them cheaply: on SoCs with
++   * non-coherent DMA the dmabuf mapping is uncached, so a converter's
++   * per-pixel reads stall (measured ~170 ms per 800x480 frame on the
++   * Allwinner H616). Read the frame back into the base class's
++   * system-memory pool instead, one memcpy per frame. */
++  self->sysmem_output = !gst_video_is_dma_drm_caps (caps);
++
+   if (gst_query_get_n_allocation_pools (query) > 0)
+     gst_query_parse_nth_allocation_pool (query, 0, NULL, NULL, &min, NULL);
+ 
+@@ -944,7 +954,10 @@
+   }
+ 
+   /* Check if we can zero-copy buffers */
+-  if (!self->has_videometa) {
++  if (self->sysmem_output) {
++    GST_INFO_OBJECT (self, "System memory downstream, copying frames");
++    self->copy_frames = TRUE;
++  } else if (!self->has_videometa) {
+     GstVideoInfo ref_vinfo;
+     gint i;
+ 
+--- a/sys/v4l2codecs/gstv4l2codech265dec.c
++++ b/sys/v4l2codecs/gstv4l2codech265dec.c
+@@ -87,6 +87,8 @@
+   GstV4l2CodecPool *src_pool;
+   gint min_pool_size;
+   gboolean has_videometa;
++  /* Downstream negotiated plain system memory, not DMABuf caps. */
++  gboolean sysmem_output;
+   gboolean streaming;
+   gboolean copy_frames;
+   gboolean need_sequence;
+@@ -484,6 +486,14 @@
+     return FALSE;
+   }
+ 
++  /* The internal pool only hands out DMABufs. A downstream that negotiated
++   * plain system memory cannot consume them cheaply: on SoCs with
++   * non-coherent DMA the dmabuf mapping is uncached, so a converter's
++   * per-pixel reads stall (measured ~170 ms per 800x480 frame on the
++   * Allwinner H616). Read the frame back into the base class's
++   * system-memory pool instead, one memcpy per frame. */
++  self->sysmem_output = !gst_video_is_dma_drm_caps (caps);
++
+   if (gst_query_get_n_allocation_pools (query) > 0)
+     gst_query_parse_nth_allocation_pool (query, 0, NULL, NULL, &min, NULL);
+ 
+@@ -970,7 +980,10 @@
+   }
+ 
+   /* Check if we can zero-copy buffers */
+-  if (!self->has_videometa) {
++  if (self->sysmem_output) {
++    GST_INFO_OBJECT (self, "System memory downstream, copying frames");
++    self->copy_frames = TRUE;
++  } else if (!self->has_videometa) {
+     GstVideoInfo ref_vinfo;
+     gint i;
+ 

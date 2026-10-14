@@ -69,30 +69,40 @@ if ! mountpoint -q /var/lib/bluetooth; then
     mount --bind "$DATA/bluetooth" /var/lib/bluetooth
 fi
 
+# replace a scalar setting's value in place, or insert the key into the
+# object when it is missing entirely
+set_livi_value() {
+    cfg=$1 key=$2 value=$3
+    if grep -q "\"$key\"" "$cfg" 2>/dev/null; then
+        sed -i "s/\"$key\": *[^,}]*/\"$key\": $value/" "$cfg"
+    else
+        sed -i "1s/{/{\n  \"$key\": $value,/" "$cfg"
+    fi
+}
+
+set_livi_string() {
+    set_livi_value "$1" "$2" "\"$3\""
+}
+
 # seed a fresh data partition with the shipped settings, then enforce the
 # appliance defaults on every boot: wireless Android Auto on
 # (wirelessAaEnabled), the Wi-Fi adapter reserved for the AP (Dedicated
-# interface -> wifiDedicatedInterface) and the Bluetooth/Wi-Fi/head-unit name
-# (carName = Ford Falcon). Seeding alone would leave an already-flashed /data
-# partition on the old values, so existing files are merged in place and never
-# replaced (pairing state and other user settings are preserved).
+# interface -> wifiDedicatedInterface), the Bluetooth/Wi-Fi/head-unit name
+# (carName = Ford Falcon), the phone-facing AP on 2.4 GHz channel 6 under the
+# Australian regulatory domain (wifiType/wifiChannel/country) and the
+# projected video at 24 fps (projectionFps). Seeding alone would leave an
+# already-flashed /data partition on the old values, so existing files are
+# merged in place and never replaced (pairing state and other user settings
+# are preserved).
 ensure_livi_settings() {
     cfg=$1
-    if grep -q '"wirelessAaEnabled"' "$cfg" 2>/dev/null; then
-        sed -i 's/"wirelessAaEnabled": *false/"wirelessAaEnabled": true/' "$cfg"
-    else
-        sed -i '1s/{/{\n  "wirelessAaEnabled": true,/' "$cfg"
-    fi
-    if grep -q '"wifiDedicatedInterface"' "$cfg" 2>/dev/null; then
-        sed -i 's/"wifiDedicatedInterface": *false/"wifiDedicatedInterface": true/' "$cfg"
-    else
-        sed -i '1s/{/{\n  "wifiDedicatedInterface": true,/' "$cfg"
-    fi
-    if grep -q '"carName"' "$cfg" 2>/dev/null; then
-        sed -i 's/"carName": *"[^"]*"/"carName": "Ford Falcon"/' "$cfg"
-    else
-        sed -i '1s/{/{\n  "carName": "Ford Falcon",/' "$cfg"
-    fi
+    set_livi_value "$cfg" wirelessAaEnabled true
+    set_livi_value "$cfg" wifiDedicatedInterface true
+    set_livi_string "$cfg" carName "Ford Falcon"
+    set_livi_string "$cfg" wifiType "2.4ghz"
+    set_livi_value "$cfg" wifiChannel 6
+    set_livi_string "$cfg" country "AU"
+    set_livi_value "$cfg" projectionFps 24
 }
 for d in LIVI LIVI-vnc; do
     if [ ! -f "/home/user/.config/$d/config.json" ] \
@@ -102,6 +112,17 @@ for d in LIVI LIVI-vnc; do
         ensure_livi_settings "/home/user/.config/$d/config.json"
     fi
 done
+
+# GST_REGISTRY_UPDATE=no makes the plugin cache sticky: a decoder plugin an
+# upgrade adds would never register because the cache is never rescanned.
+# When the video engine is in the kernel and the cached registry predates
+# the v4l2 stateless decoders, drop it; with no cache livi's next start
+# rescans anyway and writes a fresh one.
+reg=$DATA/livi-config/gst-registry.aarch64.bin
+if [ -e /dev/media0 ] && [ -s "$reg" ] && ! grep -aq v4l2slh264dec "$reg" 2>/dev/null; then
+    rm -f "$reg"
+    echo "livi-persist: dropped the stale GStreamer registry (no v4l2 decoder)" >&2
+fi
 
 # systemd wants a real machine-id and BlueZ keys some state on it. persist
 # one so pairings keep working, and fall back to generating a fresh one.

@@ -37,6 +37,8 @@ define LIVI_APPLIANCE_INSTALL_TARGET_CMDS
         $(TARGET_DIR)/etc/fstab
     $(INSTALL) -D -m 0644 $(LIVI_APPLIANCE_PKGDIR)/files/livi-weston.service \
         $(TARGET_DIR)/usr/lib/systemd/system/livi-weston.service
+    $(INSTALL) -D -m 0755 $(LIVI_APPLIANCE_PKGDIR)/files/livi-weston-run \
+        $(TARGET_DIR)/usr/lib/livi/livi-weston-run
     $(INSTALL) -D -m 0644 $(LIVI_APPLIANCE_PKGDIR)/files/livi.service \
         $(TARGET_DIR)/usr/lib/systemd/system/livi.service
     $(INSTALL) -D -m 0644 $(LIVI_APPLIANCE_PKGDIR)/files/rawlink.service \
@@ -68,6 +70,10 @@ define LIVI_APPLIANCE_INSTALL_TARGET_CMDS
         echo "livi-appliance: no usb.img (need mtools/dosfstools host tools)" >&2; \
         exit 1; \
     }
+    # Board accelerators (BR2_PACKAGE_LIVI_APPLIANCE_GPU): cedrus so
+    # /dev/media0 exists before LIVI starts and the v4l2 decoders register,
+    # panfrost so /dev/dri/renderD128 exists before weston picks GL.
+    $(if $(BR2_PACKAGE_LIVI_APPLIANCE_GPU),$(INSTALL) -D -m 0644 $(LIVI_APPLIANCE_PKGDIR)/files/livi-gpu.modules-load.conf $(TARGET_DIR)/etc/modules-load.d/livi-gpu.conf)
     # Debug images only: a one-shot radio status dump (wifi AP/regulatory,
     # BlueZ adapter properties, modules) that lands in the journal a few
     # seconds after boot, so a serial capture carries the diagnostics without

@@ -1,0 +1,32 @@
+#!/bin/sh
+# The weston session's renderer: GL when the board has a GPU render node,
+# pixman otherwise.
+#
+# The nested LIVI compositor builds its EGL display from this weston's
+# wayland socket. A pixman weston advertises no wl_drm/dmabuf, so Mesa (and
+# with it the compositor) falls back to llvmpipe; a GL weston advertises
+# the real GPU and the compositor's EGL picks it. A GPU-backed compositor is
+# what lets a hardware decoder's dmabufs import zero-copy instead of being
+# read back; the image's own GPU/Mesa step is not enabled yet (README.md,
+# "Hardware video decoding"), so today the board has no render node either
+# and this picks pixman.
+#
+# LIVI_WESTON_RENDERER overrides the choice (e.g. pixman for an A/B on a
+# board). The render node appears when the DRI driver is loaded and bound
+# (panfrost on the Orange Pi, via the board's kernel-patches nodes); qemu has
+# no /dev/dri at all and keeps running the known-good pixman shape.
+renderer=${LIVI_WESTON_RENDERER:-}
+if [ -z "$renderer" ]; then
+    for node in /dev/dri/renderD*; do
+        if [ -e "$node" ]; then
+            renderer=gl
+            break
+        fi
+    done
+    renderer=${renderer:-pixman}
+fi
+
+exec /usr/bin/weston --backend=headless --renderer="$renderer" \
+    --width 800 --height 480 --refresh-rate 0 --fake-seat --debug \
+    --shell=kiosk --socket=wayland-livi -i 0 \
+    --modules=/opt/livi/weston-touch.so

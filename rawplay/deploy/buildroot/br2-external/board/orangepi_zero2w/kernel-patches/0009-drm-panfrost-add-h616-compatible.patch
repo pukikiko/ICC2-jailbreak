@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Philippe Simons <simons.philippe@gmail.com>
+Date: Thu, 3 Apr 2025 07:52:09 +0200
+Subject: [PATCH] drm/panfrost: add the H616 compatible
+
+Backport of the second patch of the series: the Allwinner H616 ties the
+GPU_PM_RT feature to the SoC-specific compatible, so the GPU power
+domain toggles the clocks and reset line as the sequence requires. The
+board's GPU node already lists the compatible first.
+---
+ drivers/gpu/drm/panfrost/panfrost_drv.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+--- a/drivers/gpu/drm/panfrost/panfrost_drv.c
++++ b/drivers/gpu/drm/panfrost/panfrost_drv.c
+@@ -731,6 +731,13 @@
+  * and then initialize num_supplies with ARRAY_SIZE - 1.
+  */
+ static const char * const default_supplies[] = { "mali", NULL };
++static const struct panfrost_compatible allwinner_h616_data = {
++	.num_supplies = ARRAY_SIZE(default_supplies) - 1,
++	.supply_names = default_supplies,
++	.num_pm_domains = 1,
++	.pm_features = BIT(GPU_PM_RT),
++};
++
+ static const struct panfrost_compatible default_data = {
+ 	.num_supplies = ARRAY_SIZE(default_supplies) - 1,
+ 	.supply_names = default_supplies,
+@@ -815,6 +822,8 @@
+ 	{ .compatible = "arm,mali-t860", .data = &default_data, },
+ 	{ .compatible = "arm,mali-t880", .data = &default_data, },
+ 	{ .compatible = "arm,mali-bifrost", .data = &default_data, },
++	{ .compatible = "allwinner,sun50i-h616-mali",
++	  .data = &allwinner_h616_data },
+ 	{ .compatible = "arm,mali-valhall-jm", .data = &default_data, },
+ 	{ .compatible = "mediatek,mt8183-mali", .data = &mediatek_mt8183_data },
+ 	{ .compatible = "mediatek,mt8183b-mali", .data = &mediatek_mt8183_b_data },

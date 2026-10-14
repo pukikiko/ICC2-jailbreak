@@ -34,6 +34,22 @@ CONFIG_BT_LE=y
 CONFIG_BT_RFCOMM=m
 CONFIG_CFG80211=y
 CONFIG_MAC80211=y
+# the H616 video engine (H.264/HEVC decode) and its SRAM claim come from the
+# board kernel-patches backports; module sunxi-cedrus is loaded at boot by
+# livi-appliance when BR2_PACKAGE_LIVI_APPLIANCE_GPU is set. MEDIA_SUPPORT
+# stays the arm64 defconfig's =m, so the media core rides in modules.
+CONFIG_VIDEO_SUNXI=y
+CONFIG_VIDEO_SUNXI_CEDRUS=m
+# the VE's two IOMMU ports (the node lists both); without this the engine
+# runs on physical addresses and reference-frame reads can fault
+CONFIG_SUN50I_IOMMU=y
+# the GPU's PRCM power domain (patch 0007): without it panfrost's probe
+# hangs the board. Panfrost itself needs the H616 sequencing backports
+# (0008-0010) before the GPU can be used; the module is loaded at boot by
+# livi-appliance (the gpu modules-load) and weston then runs GL.
+CONFIG_SUN50I_H6_PRCM_PPU=y
+# panfrost (the Mali-G31 backport node) is already =m through the arm64
+# defconfig; 0008-0010 patch the module for the H616's power sequencing
 # no tracing/debug in the boot path
 # CONFIG_FTRACE is not set
 # CONFIG_FUNCTION_TRACER is not set

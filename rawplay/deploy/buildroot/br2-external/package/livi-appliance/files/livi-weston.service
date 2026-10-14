@@ -1,7 +1,12 @@
-# Weston (headless backend, kiosk, pixman): the LIVI stack's virtual 800x480
+# Weston (headless backend, kiosk): the LIVI stack's virtual 800x480
 # wayland session. weston composites LIVI's video plane into the headless
 # framebuffer and provides the socket the app, the touch module and rawlink's
 # capture use. no X server anywhere.
+#
+# The renderer comes from /usr/lib/livi/livi-weston-run: GL when the board
+# has a GPU render node (panfrost on the Orange Pi; the compositor's EGL and
+# the decoder dmabufs need it), pixman otherwise (qemu, llvmpipe). See the
+# script for LIVI_WESTON_RENDERER.
 #
 # --refresh-rate 0 makes the output repaint only when a capture is requested,
 # so the compositor costs nothing between frames; rawlink's --fps paces the
@@ -28,9 +33,7 @@ Type=simple
 Environment=HOME=/root
 Environment=XDG_RUNTIME_DIR=/run/livi
 ExecStartPre=-/bin/sh -c 'rm -f /run/livi/wayland-livi /run/livi/wayland-livi.lock'
-ExecStart=/usr/bin/weston --backend=headless --renderer=pixman --width 800 --height 480 \
-    --refresh-rate 0 --fake-seat --debug --shell=kiosk \
-    --socket=wayland-livi -i 0 --modules=/opt/livi/weston-touch.so
+ExecStart=/usr/lib/livi/livi-weston-run
 Restart=always
 RestartSec=1
 # the wayland socket lives in /run/livi; keep it across restarts so a

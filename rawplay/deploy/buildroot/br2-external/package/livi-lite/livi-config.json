@@ -8,6 +8,10 @@
   "carName": "Ford Falcon",
   "wirelessAaEnabled": true,
   "wifiDedicatedInterface": true,
+  "wifiType": "2.4ghz",
+  "wifiChannel": 6,
+  "country": "AU",
+  "projectionFps": 24,
   "dismissedPackages": [
     "bluez",
     "libspa-0.2-bluetooth",

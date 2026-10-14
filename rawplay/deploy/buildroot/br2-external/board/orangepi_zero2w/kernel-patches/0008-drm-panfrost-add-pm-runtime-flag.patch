@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Philippe Simons <simons.philippe@gmail.com>
+Date: Thu, 3 Apr 2025 07:52:08 +0200
+Subject: [PATCH] drm/panfrost: Add PM runtime flag
+
+Backport of the first patch of Philippe Simons' "drm/panfrost: enable
+G31 on H616" series (v2, dri-devel 2025-04-03). The H616's Mali-G31 sits
+behind a dedicated power domain; after probe the GPU is runtime-suspended
+and the domain off, and the first GPU use hangs the system when the
+domain is powered back on, because the clocks and the reset line are not
+sequenced around it (verified on the Zero 2W: the board wedges solid on
+the first render).
+
+GPU_PM_RT makes runtime suspend assert the reset line and disable the
+clocks after the domain goes down, and runtime resume deassert the reset
+and enable the clocks before the domain comes up.
+---
+ drivers/gpu/drm/panfrost/panfrost_device.c | 33 ++++++++++++++++++++++
+ drivers/gpu/drm/panfrost/panfrost_device.h |  3 ++
+ 2 files changed, 36 insertions(+)
+
+--- a/drivers/gpu/drm/panfrost/panfrost_device.h
++++ b/drivers/gpu/drm/panfrost/panfrost_device.h
+@@ -36,10 +36,13 @@
+  * enum panfrost_gpu_pm - Supported kernel power management features
+  * @GPU_PM_CLK_DIS:  Allow disabling clocks during system suspend
+  * @GPU_PM_VREG_OFF: Allow turning off regulators during system suspend
++ * @GPU_PM_RT: Allow disabling clocks and asserting the reset control during
++ *  system runtime suspend
+  */
+ enum panfrost_gpu_pm {
+ 	GPU_PM_CLK_DIS,
+ 	GPU_PM_VREG_OFF,
++	GPU_PM_RT,
+ };
+ 
+ struct panfrost_features {
+--- a/drivers/gpu/drm/panfrost/panfrost_device.c
++++ b/drivers/gpu/drm/panfrost/panfrost_device.c
+@@ -406,11 +406,36 @@
+ static int panfrost_device_runtime_resume(struct device *dev)
+ {
+ 	struct panfrost_device *pfdev = dev_get_drvdata(dev);
++	int ret;
++
++	if (pfdev->comp->pm_features & BIT(GPU_PM_RT)) {
++		ret = reset_control_deassert(pfdev->rstc);
++		if (ret)
++			return ret;
++
++		ret = clk_enable(pfdev->clock);
++		if (ret)
++			goto err_clk;
++
++		if (pfdev->bus_clock) {
++			ret = clk_enable(pfdev->bus_clock);
++			if (ret)
++				goto err_bus_clk;
++		}
++	}
+ 
+ 	panfrost_device_reset(pfdev);
+ 	panfrost_devfreq_resume(pfdev);
+ 
+ 	return 0;
++
++err_bus_clk:
++	if (pfdev->comp->pm_features & BIT(GPU_PM_RT))
++		clk_disable(pfdev->clock);
++err_clk:
++	if (pfdev->comp->pm_features & BIT(GPU_PM_RT))
++		reset_control_assert(pfdev->rstc);
++	return ret;
+ }
+ 
+ static int panfrost_device_runtime_suspend(struct device *dev)
+@@ -426,6 +451,14 @@
+ 	panfrost_gpu_suspend_irq(pfdev);
+ 	panfrost_gpu_power_off(pfdev);
+ 
++	if (pfdev->comp->pm_features & BIT(GPU_PM_RT)) {
++		if (pfdev->bus_clock)
++			clk_disable(pfdev->bus_clock);
++
++		clk_disable(pfdev->clock);
++		reset_control_assert(pfdev->rstc);
++	}
++
+ 	return 0;
+ }
+ 

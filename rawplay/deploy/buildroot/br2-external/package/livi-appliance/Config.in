@@ -53,4 +53,23 @@ config BR2_PACKAGE_LIVI_APPLIANCE_DEBUG
       scripts/boottime.sh parses), adds dropbear, and leaves kernel tracing
       enabled. It is measurably slower; never ship it.
 
+config BR2_PACKAGE_LIVI_APPLIANCE_GPU
+    bool "H616 GPU and video engine (panfrost + cedrus)"
+    help
+      Load the board's accelerator modules at boot: on the Orange Pi Zero
+      2W that is the H616 video engine (sunxi-cedrus) and the Mali-G31
+      (panfrost), whose device tree nodes and power domains come from the
+      board kernel-patches backports. The weston session then picks the GL
+      renderer, livi-compositor's EGL binds the GPU and a hardware-decoded
+      frame reaches it as a dmabuf without a copy.
+
+      With the GPU, GStreamer has the v4l2 stateless decoders
+      (v4l2slh264dec/v4l2slh265dec via gst1-plugins-bad) and LIVI decodes
+      the phone's H.264/HEVC in hardware; Mesa panfrost (plus the
+      OpenCL/CLC precompiler it requires) is enabled in the board
+      defconfigs. Without a render node LIVI falls back to converting the
+      decoder's frames to system memory for the software sink.
+
+      The qemu image has neither device and leaves this off.
+
 endif

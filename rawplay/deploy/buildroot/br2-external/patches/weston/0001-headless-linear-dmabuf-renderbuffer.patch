@@ -1,0 +1,48 @@
+--- a/libweston/backend-headless/headless.c
++++ b/libweston/backend-headless/headless.c
+@@ -320,9 +320,42 @@
+ 		return -1;
+ 	}
+ 
+-	output->renderbuffer =
+-		renderer->create_renderbuffer(&output->base, b->formats[0],
+-					      NULL, 0, NULL, NULL);
++	/* The headless output's main consumer is weston_capture_v1, which
++	 * reads pixels back with the compositor's read format. On GPUs whose
++	 * tiled render targets are expensive to read back (panfrost/Mali: a
++	 * glReadPixels of an 800x480 frame takes ~80 ms, and a format that
++	 * does not match the read format costs as much again) the capture
++	 * path caps the whole video chain at a handful of fps. A linear
++	 * dmabuf in the read format is mapped and copied directly instead,
++	 * bringing a capture down to ~15 ms. Fall back to the renderer's
++	 * internal renderbuffer when it cannot allocate or import one. */
++	if (renderer->dmabuf_alloc && renderer->create_renderbuffer_dmabuf &&
++	    b->compositor->read_format) {
++		const uint64_t modifiers[] = { DRM_FORMAT_MOD_LINEAR };
++		struct linux_dmabuf_memory *mem;
++
++		mem = renderer->dmabuf_alloc(renderer, options.fb_size.width,
++					     options.fb_size.height,
++					     b->compositor->read_format->format,
++					     modifiers, 1);
++		if (mem) {
++			output->renderbuffer =
++				renderer->create_renderbuffer_dmabuf(&output->base,
++								     mem,
++								     NULL, NULL);
++			if (!output->renderbuffer)
++				mem->destroy(mem);
++		}
++	}
++	if (!output->renderbuffer) {
++		const struct pixel_format_info *format = b->formats[0];
++
++		if (b->compositor->read_format)
++			format = b->compositor->read_format;
++		output->renderbuffer =
++			renderer->create_renderbuffer(&output->base, format,
++						      NULL, 0, NULL, NULL);
++	}
+ 	if (!output->renderbuffer)
+ 		goto err_renderbuffer;
+ 

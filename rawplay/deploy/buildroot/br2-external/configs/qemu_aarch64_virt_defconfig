@@ -60,6 +60,15 @@ BR2_PACKAGE_UNIT_SIM=y
 # LIVI's media hosts feed their pipelines through appsrc (see the release
 # defconfig); without base's "app" plugin every session shows LIVI's UI only.
 BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_APP=y
+# GStreamer's videoconvert is the video path's only CPU-heavy step: with the
+# nested compositor on llvmpipe/pixman the hardware decoder's NV12 frames are
+# converted to the sink's shm BGRx. Without ORC that conversion runs the
+# scalar C path (~170 ms per 800x480 frame, ~6 fps, verified on the board);
+# ORC gives it the SIMD kernels (the same conversion becomes a few ms).
+BR2_PACKAGE_ORC=y
+# the board image's hardware decoders come from this plugin; qemu has no
+# media device, so it builds the plugin but registers no elements
+BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_V4L2CODECS=y
 # LIVI-Lite's CarPlay stack (livi-cp) links OpenSSL on Linux, so the image
 # carries the libraries it links against.
 BR2_PACKAGE_OPENSSL=y

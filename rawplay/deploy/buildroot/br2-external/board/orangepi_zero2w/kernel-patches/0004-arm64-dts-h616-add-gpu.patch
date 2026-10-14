@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: LIVI appliance
+Date: Mon, 12 Oct 2026 20:05:00 +1030
+Subject: [PATCH] arm64: dts: h616: add the Mali GPU (panfrost)
+
+The H616/H618's Mali-G31 MP2 is panfrost-supported through the generic
+"arm,mali-bifrost" compatible that 6.12's panfrost already matches; the
+node (and its SoC-specific compatible) is the one mainline added for
+H616/H618.
+
+The GPU power rail hangs the SoC when the driver touches the registers
+with the PRCM power domain still gated (probe printed the clock rates
+and wedged, verified on the Zero 2W), so the node carries the upstream
+power-domains property and the prcm_ppu node, whose driver is patch
+0007. The Zero 2W board dts enables the GPU with mali-supply on the
+AXP313A's always-on dcdc1, the same wiring the upstream board dts uses.
+
+panfrost is the arm64 defconfig's =m and the board fragment enables the
+PPU it needs; the image does not load the module today (the compositor
+stays on llvmpipe/pixman, see README.md "Hardware video decoding"), but
+the node plus the power domain are what a Mesa/panfrost image needs, and
+they are verified on the Zero 2W: /dev/dri/renderD128 probes and binds
+the Mali-G31 with the domain powered.
+---
+ arch/arm64/boot/dts/allwinner/sun50i-h616.dtsi                | 21 +++++++++++++++++
+ arch/arm64/boot/dts/allwinner/sun50i-h618-orangepi-zero2w.dts |  5 ++++
+ 2 files changed, 26 insertions(+)
+
+--- a/arch/arm64/boot/dts/allwinner/sun50i-h616.dtsi
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h616.dtsi
+@@ -150,6 +150,21 @@
+ 		#size-cells = <1>;
+ 		ranges = <0x0 0x0 0x0 0x40000000>;
+ 
++		gpu: gpu@1800000 {
++			compatible = "allwinner,sun50i-h616-mali",
++				     "arm,mali-bifrost";
++			reg = <0x1800000 0x40000>;
++			interrupts = <GIC_SPI 95 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 96 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 97 IRQ_TYPE_LEVEL_HIGH>;
++			interrupt-names = "job", "mmu", "gpu";
++			clocks = <&ccu CLK_GPU0>, <&ccu CLK_BUS_GPU>;
++			clock-names = "core", "bus";
++			power-domains = <&prcm_ppu 2>;
++			resets = <&ccu RST_BUS_GPU>;
++			status = "disabled";
++		};
++
+ 		crypto: crypto@1904000 {
+ 			compatible = "allwinner,sun50i-h616-crypto";
+ 			reg = <0x01904000 0x800>;
+@@ -886,6 +901,12 @@
+ 			#reset-cells = <1>;
+ 		};
+ 
++		prcm_ppu: power-controller@7010250 {
++			compatible = "allwinner,sun50i-h616-prcm-ppu";
++			reg = <0x07010250 0x10>;
++			#power-domain-cells = <1>;
++		};
++
+ 		nmi_intc: interrupt-controller@7010320 {
+ 			compatible = "allwinner,sun50i-h616-nmi",
+ 				     "allwinner,sun9i-a80-nmi";
+--- a/arch/arm64/boot/dts/allwinner/sun50i-h618-orangepi-zero2w.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h618-orangepi-zero2w.dts
+@@ -93,6 +93,11 @@
+ 
+ /* USB 2 & 3 are on the FPC connector (or the exansion board) */
+ 
++&gpu {
++	mali-supply = <&reg_dcdc1>;
++	status = "okay";
++};
++
+ &mmc0 {
+ 	cd-gpios = <&pio 5 6 GPIO_ACTIVE_LOW>;	/* PF6 */
+ 	bus-width = <4>;

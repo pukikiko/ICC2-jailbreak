@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: LIVI appliance
+Date: Mon, 12 Oct 2026 20:15:00 +1030
+Subject: [PATCH] media: cedrus: add the H616 variant
+
+Backport of the upstream series patch: the H616 video engine uses the
+H6 variant data (H.264 and HEVC decode; the H616 also has a VP9 decoder
+the driver has no support for yet). This is what makes the video-codec
+node in 0003 probe as /dev/video0 and the GStreamer v4l2 stateless
+decoders usable.
+---
+ drivers/staging/media/sunxi/cedrus/cedrus.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+--- a/drivers/staging/media/sunxi/cedrus/cedrus.c
++++ b/drivers/staging/media/sunxi/cedrus/cedrus.c
+@@ -700,6 +700,10 @@
+ 		.compatible = "allwinner,sun50i-h6-video-engine",
+ 		.data = &sun50i_h6_cedrus_variant,
+ 	},
++	{
++		.compatible = "allwinner,sun50i-h616-video-engine",
++		.data = &sun50i_h6_cedrus_variant,
++	},
+ 	{ /* sentinel */ }
+ };
+ MODULE_DEVICE_TABLE(of, cedrus_dt_match);

@@ -1,0 +1,18 @@
+--- a/libweston/renderer-gl/gl-renderer.c
++++ b/libweston/renderer-gl/gl-renderer.c
+@@ -1315,7 +1315,14 @@
+ 			continue;
+ 		}
+ 
+-		if (gl_features_has(gr, FEATURE_ASYNC_READBACK)) {
++		/* An output that repaints only on capture has a client
++		 * synchronously waiting for each frame, so the asynchronous
++		 * PBO+fence readback is a pure latency add: measured on
++		 * panfrost/Mali, a 800x480 capture takes ~16 ms synchronous
++		 * and ~32 ms through the PBO. Read into the destination
++		 * buffer directly in that case. */
++		if (!output->repaint_only_on_capture &&
++		    gl_features_has(gr, FEATURE_ASYNC_READBACK)) {
+ 			gl_renderer_do_read_pixels_async(gr, go, output, ct, &rect);
+ 			continue;
+ 		}

@@ -21,7 +21,14 @@ if [ -d /sys/kernel/config/usb_gadget/g1 ]; then
     echo "" > /sys/kernel/config/usb_gadget/g1/UDC 2>/dev/null
 fi
 umount /dev/ffs-liviraw 2>/dev/null
+# --fps 24: the H618 MUSB is PIO (no DMA) and tops out at ~19 MB/s of bulk,
+# so the link carries ~24-25 of the 30 fps the panel's frames would need.
+# Capturing at 30 fps saturates the sender's 2-frame window and queueing adds
+# ~16 ms to every ack (measured: 57 ms at --fps 30, 41 ms at --fps 24 for the
+# same 24 fps on the wire). Pacing just under the link keeps the window at
+# one frame and the latency at the wire time. The panel target is 24 fps
+# (livi-config.json's projectionFps), so this matches the negotiated rate.
 # --stats is what the boot-time harness reads for T5 (first frames) even when
 # no reader is attached yet
 exec /opt/livi/rawlink run --wayland /run/livi/wayland-livi \
-    --stick /opt/livi/usb.img --stats
+    --stick /opt/livi/usb.img --fps 24 --stats
