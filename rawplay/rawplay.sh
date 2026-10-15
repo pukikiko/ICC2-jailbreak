@@ -45,7 +45,14 @@ stop_hmi() {
         :   # a live outer session owns it
     else
         rm -f /tmp/buttons-paused
-        /proc/boot/slay -s SIGSTOP buttons 2>/dev/null
+        # stop exactly the pids buttons has now: every later kill names pids, never the
+        # name. a name-based slay scans /proc and can catch a fresh ham respawn before it
+        # registers its CONDDEATH, after which nothing restarts it and the panel stays
+        # deaf in the hmi (see common/hmictl.c).
+        /proc/boot/slay -p buttons > /tmp/buttons.pids 2>/dev/null
+        while read p; do
+            [ -n "$p" ] && kill -STOP "$p" 2>/dev/null
+        done < /tmp/buttons.pids
         echo $$ > /tmp/buttons-paused
         BUTTONS_PAUSED=yes
     fi
@@ -63,8 +70,32 @@ resume_hmi() {
     if [ "$BUTTONS_PAUSED" = yes ] && [ -e /tmp/buttons-paused ]; then
         rm -f /tmp/buttons-paused
         # SIGKILL so the ham guard restarts it (see the header); it drops the backlog
-        # before the hmi comes back, so nothing queued is delivered in the resume gap
-        /proc/boot/slay -f -s9 buttons 2>/dev/null
+        # before the hmi comes back, so nothing queued is delivered in the resume gap.
+        # one listing, then only those pids: never a name-based slay that can catch the
+        # fresh respawn before it has registered with ham.
+        /proc/boot/slay -p buttons > /tmp/buttons.pids 2>/dev/null
+        while read p; do
+            [ -n "$p" ] && kill -9 "$p" 2>/dev/null
+        done < /tmp/buttons.pids
+        rm -f /tmp/buttons.pids
+        # ham starts a clean one; if it did not (the killed process never registered),
+        # start one here so the panel is not left deaf
+        i=0
+        alive=no
+        while [ $i -lt 6 ]; do
+            /proc/boot/slay -p buttons > /tmp/buttons.pids 2>/dev/null
+            if [ -s /tmp/buttons.pids ]; then
+                alive=yes
+                break
+            fi
+            sleep 1
+            i=$((i + 1))
+        done
+        rm -f /tmp/buttons.pids
+        if [ "$alive" = no ]; then
+            echo "rawplay.sh: buttons did not come back, starting one"
+            on -d /bin/buttons -G -+events >/dev/null 2>&1 &
+        fi
     fi
     if [ -n "$HMI_PID" ]; then
         kill -CONT "$HMI_PID" 2>/dev/null

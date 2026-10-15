@@ -233,9 +233,9 @@ sample (displayed frames only). At 30 fps it costs 240 B/s.
   the player stops reading (a stale ack makes the host drop what its two-frame window
   holds), so the video comes back on its own. The climate bar is raised by a `buttons`
   event, so the player brings the frozen `buttons` service back for the window the way the
-  session resume does: SIGKILL it and let `ham` start a clean one, never a SIGCONT (which
-  would replay every panel event queued during the video as one burst), then SIGSTOP the
-  fresh process when the window closes, before the HMI stops, so nothing it generates
+  session resume does: SIGKILL it by pid and let `ham` start a clean one, never a SIGCONT
+  (which would replay every panel event queued during the video as one burst), then SIGSTOP
+  the fresh process when the window closes, before the HMI stops, so nothing it generates
   queues. The main loop owns every stop/resume so no in-flight bulk-in can land in the
   panel buffer while the HMI draws. `rawplay.sh` always passes the flag: it or its caller
   has stopped the HMI by then.
@@ -254,11 +254,15 @@ sample (displayed frames only). At 30 fps it costs 240 B/s.
   HMI resumes (volume jumps, menus open by themselves). `rawplay.sh` and the launcher/menu
   SIGSTOP `buttons` for the session and SIGKILL the frozen process on the way out, so its
   `ham` guard starts a clean one and the queued frames die with the old connection. The
-  resumed HMI only ever sees the current panel state. The one exception is a climate
-  window: `buttons` is restarted for it (SIGKILL and a fresh `ham` process, so the queued
-  backlog dies with the old connection, not a SIGCONT that would replay it) and SIGSTOPped
-  again when it closes, still under the session's pause marker, so the session resume kills
-  it as usual.
+  kill names the pids a `slay -p buttons` listed, never the process name: a name-based slay
+  scans `/proc` and can catch the fresh `ham` respawn before it has registered, after which
+  nothing restarts it and the panel stays deaf in the HMI (no source, no power, no volume
+  knob) even though homebrew still sees it. After the kill, the resume checks that a
+  `buttons` is running and starts one itself when `ham` did not. The resumed HMI only ever
+  sees the current panel state. The one exception is a climate window: `buttons` is
+  restarted for it (SIGKILL by pid and a fresh `ham` process, so the queued backlog dies
+  with the old connection, not a SIGCONT that would replay it) and SIGSTOPped again when it
+  closes, still under the session's pause marker, so the session resume kills it as usual.
 
 ### 2.4 Host: `rawplay/rawlink`
 

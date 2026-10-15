@@ -244,13 +244,19 @@ whoever stops the hmi also SIGSTOPs the `buttons` service for the session: with 
 every panel event it sends blocks in the stopped queue and the whole backlog replays as one
 burst when the hmi comes back (volume jumps, menus open by themselves). the resume SIGKILLs
 the frozen process, and its `ham` guard (buttons registers a CONDDEATH restart, like the hmi)
-starts a clean one, which is also what drops the frames queued for the old connection. the
-launcher, the menu, `iccbuttons` and `rawplay.sh` all do this through `common/hmictl.c`
+starts a clean one, which is also what drops the frames queued for the old connection. every
+stop and kill names the pids a `slay -p buttons` listed, never the process name: a name-based
+slay scans `/proc`, and `ham` can start a fresh buttons into that scan before the new process
+has registered its CONDDEATH. the kill then leaves nothing to restart and the panel goes deaf
+in the hmi - no source, no power, no volume knob - until a reboot, while `iccbuttons` and the
+rest of homebrew still see the panel off the ipc monitor. the resume also checks that buttons
+actually came back and starts one itself when `ham` did not, so the panel cannot stay deaf.
+the launcher, the menu, `iccbuttons` and `rawplay.sh` all do this through `common/hmictl.c`
 (`hmi_events_pause`/`hmi_events_resume`). a short hmi window inside a session is the exception:
-`rawplay --hmi` restarts buttons for the window the way the session resume does (SIGKILL, so
-the frames queued during the video die with the old frozen connection and ham starts a clean
-one; no SIGCONT, which would replay the backlog as one burst), then SIGSTOPs the fresh process
-when the window closes, buttons first, still under the session's pause marker
+`rawplay --hmi` restarts buttons for the window the way the session resume does (SIGKILL by
+pid, so the frames queued during the video die with the old frozen connection and ham starts a
+clean one; no SIGCONT, which would replay the backlog as one burst), then SIGSTOPs the fresh
+process when the window closes, buttons first, still under the session's pause marker
 (`hmi_events_window_open`/`hmi_events_window_close`). the menu does
 the same stop (and the matching resume on "back"), which covers being run by hand after boot as
 well as from the launcher, and it restores the hmi's last screen before resuming so the frozen

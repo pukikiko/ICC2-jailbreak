@@ -36,8 +36,12 @@ int run_command(const char *cmd);
  * generated; at resume the frozen process is SIGKILLed and its guard (buttons registers a
  * CONDDEATH restart with ham, like the hmi does) starts a clean one. the kill is what drops
  * the frames queued in the ipc driver for the old connection, so the hmi only ever sees the
- * newest state. pause() returns 1 when it did the pause, so nested callers (the menu inside
- * the launcher) do not resume what the outer session still holds.
+ * newest state. every stop and kill is by the pid slay -p listed, never by name: a
+ * name-based slay scanning /proc can catch ham's fresh respawn before it registers its
+ * CONDDEATH, and then nothing ever restarts it and the panel is deaf in the hmi. when ham
+ * does not bring one back anyway, resume starts one itself. pause() returns 1 when it did
+ * the pause, so nested callers (the menu inside the launcher) do not resume what the outer
+ * session still holds.
  */
 int hmi_events_pause(void);
 void hmi_events_resume(void);
@@ -46,12 +50,12 @@ void hmi_events_resume(void);
  * a short hmi window inside a session (rawplay's --hmi climate bar) resumes the hmi for a
  * couple of seconds while buttons is still SIGSTOPped, so the panel goes dead exactly when
  * the hmi is watchable. window_open() brings buttons back for the window the way the session
- * resume does: kill the frozen process and let ham start a clean one, because a SIGCONT
- * would also replay every panel event queued during the video as one burst. window_close()
- * SIGSTOPs the fresh process again before the hmi stops, so nothing it generates queues.
- * they only act on a live session pause marker; the marker is left alone, so the owning
- * session still kills the frozen process at its own resume. window_close() is the matching
- * call and only valid after window_open() said 1.
+ * resume does: kill the frozen process (by pid, see above) and let ham start a clean one,
+ * because a SIGCONT would also replay every panel event queued during the video as one
+ * burst. window_close() SIGSTOPs the fresh process again before the hmi stops, so nothing it
+ * generates queues. they only act on a live session pause marker; the marker is left alone,
+ * so the owning session still kills the frozen process at its own resume. window_close() is
+ * the matching call and only valid after window_open() said 1.
  */
 int hmi_events_window_open(void);
 void hmi_events_window_close(void);

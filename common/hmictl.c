@@ -5,6 +5,8 @@
 #define OVERLAY_MARK     "/tmp/hmi-overlay.loaded"
 #define HMI_STOPPED_MARK "/tmp/hmi-stopped"
 #define BUTTONS_PAUSED   "/tmp/buttons-paused"
+#define BUTTONS_PIDS     "/tmp/buttons.pids"
+#define BUTTONS_MAX      8
 #define CMD_MAX          2048
 #define ARG_MAX          64
 
@@ -340,11 +342,107 @@ static int buttons_pause_live(void)
     return have && owner > 0 && kill(owner, 0) == 0;
 }
 
+/* the buttons pids slay -p wrote out, one a line. every stop and kill names exact pids:
+ * a name-based slay scans /proc, and ham can start a fresh buttons into that scan before
+ * the new process has registered its CONDDEATH with ham. the kill then leaves nothing to
+ * restart and the panel is deaf in the hmi until the next homebrew session or a reboot -
+ * found in the emulator (hammering the session stop/kill leaves buttons gone for good),
+ * and the real car hits the same window. see docs/homebrew.md "the car takes the panel
+ * back". */
+static int buttons_pids(pid_t *pids, int max)
+{
+    char line[32];
+    FILE *f = fopen(BUTTONS_PIDS, "r");
+    int n = 0;
+
+    if (!f) {
+        return 0;
+    }
+    while (n < max && fgets(line, sizeof line, f)) {
+        int pid = (int)strtol(line, 0, 10);
+
+        if (pid > 0) {
+            pids[n++] = pid;
+        }
+    }
+    fclose(f);
+    return n;
+}
+
+/* one listing, left in the file for the next reader. the slay goes through the shell for
+ * the redirection (run_command does that when the command has shell syntax). */
+static int buttons_find(pid_t *pids, int max)
+{
+    unlink(BUTTONS_PIDS);
+    run_command("/proc/boot/slay -p buttons > " BUTTONS_PIDS " 2>/dev/null");
+    return buttons_pids(pids, max);
+}
+
+static int pid_in(const pid_t *pids, int n, pid_t pid)
+{
+    for (int i = 0; i < n; i++) {
+        if (pids[i] == pid) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* SIGKILL every buttons process around right now: the pids the session pause recorded plus
+ * anything ham respawned while the hmi was stopped (its frames queued for the stopped hmi
+ * and would replay at the resume). the listing happens before any kill, so it can never
+ * land on the fresh respawn ham starts in answer to the kill. */
+static void buttons_drop(void)
+{
+    pid_t frozen[BUTTONS_MAX], live[BUTTONS_MAX];
+    int nf = buttons_pids(frozen, BUTTONS_MAX);
+    int nl = buttons_find(live, BUTTONS_MAX);
+
+    jlog("hmi: dropping the frozen buttons service (%d recorded, %d live)", nf, nl);
+    for (int i = 0; i < nl; i++) {
+        if (!pid_in(frozen, nf, live[i])) {
+            jlog("hmi: closing a buttons respawn left with the panel (pid %d)", live[i]);
+            kill(live[i], SIGKILL);
+        }
+    }
+    for (int i = 0; i < nf; i++) {
+        if (kill(frozen[i], SIGKILL) < 0) {
+            jlog("hmi: could not kill buttons pid %d (errno %d)", frozen[i], errno);
+        }
+    }
+}
+
+/* ham answers a kill with a fresh buttons; if it does not (the process was killed before
+ * it registered, or its ham entity was lost), start one, so the panel is never left deaf.
+ * the wait is long enough that a live respawn is not doubled into two translators. the
+ * start is `on -d`, detached: an instance left in this session's process group would go
+ * down with the next guard killpg. */
+static void buttons_make_live(void)
+{
+    pid_t pids[BUTTONS_MAX];
+
+    for (int tries = 0; tries < 15; tries++) {
+        if (buttons_find(pids, BUTTONS_MAX) > 0) {
+            jlog("hmi: buttons is live (pid %d)", pids[0]);
+            return;
+        }
+        usleep(200000);
+    }
+    jlog("hmi: buttons did not come back, starting one");
+    run_command("on -d /bin/buttons -G -+events >/dev/null 2>&1 &");
+    usleep(200000);
+    if (buttons_find(pids, BUTTONS_MAX) == 0) {
+        jlog("hmi: buttons is still missing after the start attempt, the panel is deaf");
+    }
+}
+
 int hmi_events_pause(void)
 {
     FILE *f;
     int have;
     int owner = buttons_pause_owner(&have);
+    pid_t pids[BUTTONS_MAX];
+    int n;
 
     if (have) {
         if (owner > 0 && kill(owner, 0) == 0) {
@@ -359,8 +457,17 @@ int hmi_events_pause(void)
     /* SIGSTOP, not a kill: buttons is guarded by ham (CONDDEATH + restart), so a death is
      * answered with an immediate respawn that would just start queuing again. the frozen
      * process cannot be signalled away, so the ipc frames for it pile up in the driver
-     * until the resume kills it and lets ham start clean. */
-    run_command("/proc/boot/slay -s SIGSTOP buttons");
+     * until the resume kills it and lets ham start clean. the stop names the pids from the
+     * listing: never the name, so a respawn mid-respawn cannot be caught (see buttons_pids). */
+    n = buttons_find(pids, BUTTONS_MAX);
+    for (int i = 0; i < n; i++) {
+        if (kill(pids[i], SIGSTOP) < 0) {
+            jlog("hmi: could not stop buttons pid %d (errno %d)", pids[i], errno);
+        }
+    }
+    if (n == 0) {
+        jlog("hmi: no buttons to stop, the resume starts one if it is gone");
+    }
     f = fopen(BUTTONS_PAUSED, "w");
     if (f) {
         fprintf(f, "%d\n", getpid());
@@ -375,12 +482,12 @@ void hmi_events_resume(void)
         return;         /* nothing paused, or something already put it back */
     }
     unlink(BUTTONS_PAUSED);
-    jlog("hmi: dropping the frozen buttons service, ham restarts a clean one");
     /* SIGKILL: a SIGTERM would let buttons detach itself from ham (it imports
      * ham_detach_self) and leave nothing to restart. the death raises its CONDDEATH and
      * ham spawns a fresh instance; that start is also what drops every panel frame queued
      * for the old, frozen connection, so the resumed hmi sees the current state only. */
-    run_command("/proc/boot/slay -f -s9 buttons");
+    buttons_drop();
+    buttons_make_live();
 }
 
 int hmi_events_window_open(void)
@@ -392,15 +499,23 @@ int hmi_events_window_open(void)
     /* the same kill the session resume does, in place of a SIGCONT: the frozen process's
      * pending frames (every panel event of the video session) die with its connection and
      * ham starts a clean one, so the resumed hmi gets live events, not the backlog replayed
-     * as one burst. */
-    run_command("/proc/boot/slay -f -s9 buttons");
+     * as one burst. make_live leaves the fresh pid in the file, which window_close stops. */
+    buttons_drop();
+    buttons_make_live();
     return 1;
 }
 
 void hmi_events_window_close(void)
 {
+    pid_t pids[BUTTONS_MAX];
+    int n = buttons_pids(pids, BUTTONS_MAX);
+
     jlog("hmi: hmi window over, buttons stopped again");
-    run_command("/proc/boot/slay -s SIGSTOP buttons");
+    for (int i = 0; i < n; i++) {
+        if (kill(pids[i], SIGSTOP) < 0) {
+            jlog("hmi: could not stop buttons pid %d (errno %d)", pids[i], errno);
+        }
+    }
 }
 
 /* split the command line and spawn it; returns the pid, or -1 when it could not start */
