@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: LIVI appliance
+Date: Thu, 15 Oct 2026 22:00:00 +1030
+Subject: [PATCH] usb: musb: deliver a pending Rx packet instead of flushing it
+
+musb_ep_restart() flushes the Rx FIFO whenever a request is queued to a
+non-busy OUT endpoint (commit 3fc137386, "usb: musb: Fix hardware lockup
+on first Rx endpoint request").  The flush was chosen over calling
+rxstate() there because rxstate() invokes the request's completion
+callback from inside usb_ep_queue(), and a callback that re-enables
+interrupts mid-giveback (u_ether's rx_complete() calling netif_rx()) can
+then re-enter the driver and leave RXPKTRDY set with no request queued.
+
+That trade-off silently drops a packet the host has already had ACKed.
+USB bulk-only mass storage is exactly such a protocol: the next CBW is
+pipelined onto the wire ~30us after the CSW, so it can be ACKed into the
+Rx FIFO before f_mass_storage's thread wakes up and re-queues its CBW
+request.  The restart then flushes that CBW; fsg waits forever for a
+command that will never be resent (BOT has no retransmission), the host
+waits forever for the data phase, and the whole LUN is dead until a USB
+reset - a 30 second DID_TIME_OUT and a frozen file read on the unit.
+
+Deliver a packet that is already in the FIFO to the request being queued
+instead.  The cleanup the flush provided is not lost where it matters:
+f_mass_storage flushes its endpooints on every exception, and endpoint
+disable/enable resets the FIFO, so genuinely stale packets are still
+dropped by those paths; the one case this changes is the packet the host
+will not send again.
+
+The completion callback runs from usb_ep_queue() again, as it did before
+3fc137386.  That is the layering violation the udc API warns about, and
+it is why the flush was introduced; the lockup it can cause needs a
+completion callback that enables interrupts mid-giveback, which none of
+the functions this board runs (f_mass_storage, FunctionFS) has.  Without
+the flush the alternative for those functions is losing their transfer.
+
+Signed-off-by: LIVI appliance
+---
+ drivers/usb/musb/musb_gadget.c | 19 ++++++++++++++-----
+ 1 file changed, 16 insertions(+), 3 deletions(-)
+
+--- a/drivers/usb/musb/musb_gadget.c
++++ b/drivers/usb/musb/musb_gadget.c
+@@ -1170,9 +1170,22 @@
+ 		txstate(musb, req);
+ 	} else {
+ 		csr = musb_readw(epio, MUSB_RXCSR);
+-		csr |= MUSB_RXCSR_FLUSHFIFO | MUSB_RXCSR_P_WZC_BITS;
+-		musb_writew(epio, MUSB_RXCSR, csr);
+-		musb_writew(epio, MUSB_RXCSR, csr);
++		if (csr & MUSB_RXCSR_RXPKTRDY) {
++			/*
++			 * The host's packet is already in the Rx FIFO:
++			 * it arrived before this request was queued
++			 * (mass storage pipelines its next CBW onto
++			 * the wire ~30us after the CSW).  It has been
++			 * ACKed and the host will not resend it, so
++			 * hand it to the request the way the Rx
++			 * interrupt would instead of flushing it away.
++			 */
++			rxstate(musb, req);
++		} else {
++			csr |= MUSB_RXCSR_FLUSHFIFO | MUSB_RXCSR_P_WZC_BITS;
++			musb_writew(epio, MUSB_RXCSR, csr);
++			musb_writew(epio, MUSB_RXCSR, csr);
++		}
+ 	}
+ }
+ 
+-- 
+2.51.0
+
