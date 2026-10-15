@@ -38,10 +38,18 @@ fi
 "${HOST}/bin/mkimage" -A arm64 -O linux -T script -C none -n "livi boot" \
     -d "${BOOTCMD}" "${BIN}/boot.scr"
 
-# the boot FAT. FAT32 needs >= 33M; 128M also absorbs a big uncompressed
-# kernel Image.
+# the boot FAT. FAT32 needs >= 33M; 128M also absorbs the kernel image.
+# The defconfigs build the uncompressed Image by measurement (U-Boot's zstd
+# decode costs more than the extra SD read; see the defconfig); a compressed
+# Image.zst is still accepted, and boot.cmd tries Image first.
 mkdir -p "${BIN}/boot-root"
-cp "${BIN}/Image" "${BIN}/boot-root/Image"
+rm -f "${BIN}/boot-root/Image.zst"
+if [ -f "${BIN}/Image" ]; then
+    KERNEL_IMAGE=Image
+else
+    KERNEL_IMAGE=Image.zst
+fi
+cp "${BIN}/${KERNEL_IMAGE}" "${BIN}/boot-root/${KERNEL_IMAGE}"
 cp "${BIN}"/sun50i-h618-orangepi-zero2w.dtb "${BIN}/boot-root/"
 cp "${BIN}/boot.scr" "${BIN}/boot-root/boot.scr"
 truncate -s "${BOOT_SIZE}" "${BIN}/boot.vfat"

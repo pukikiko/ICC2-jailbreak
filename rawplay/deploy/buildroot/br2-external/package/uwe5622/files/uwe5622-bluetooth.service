@@ -32,11 +32,13 @@
 #
 # Ordering: livi-persist first, so /data (where the stable address lives)
 # is mounted before livi-bt-addr reads/writes it. livi-persist.service
-# carries the matching Before=.
+# carries the matching Before=. The modules come from livi-wifi-modules
+# (not systemd-modules-load): the marlin firmware load is its own unit so
+# it does not hold sysinit/D-Bus/livi behind it (see that unit).
 [Unit]
 Description=Attach UWE5622 Bluetooth TTY to BlueZ
-After=systemd-modules-load.service bluetooth.service livi-persist.service
-Wants=bluetooth.service livi-persist.service
+After=livi-wifi-modules.service bluetooth.service livi-persist.service
+Wants=livi-wifi-modules.service bluetooth.service livi-persist.service
 
 [Service]
 Type=simple

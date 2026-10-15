@@ -22,8 +22,12 @@
 [Unit]
 Description=Weston headless kiosk session 800x480 (LIVI stack)
 DefaultDependencies=no
-After=local-fs.target livi-persist.service systemd-journald.socket
-Wants=livi-persist.service
+# weston needs neither /data nor the /home/user binds that livi-persist
+# sets up (HOME is /root and its runtime dir is its own /run/livi), so it
+# does NOT wait on livi-persist: at boot that unit's ext4 recovery and
+# seeding cost ~0.7 s, and weston's socket is the gate the whole stack waits
+# on. local-fs stays for /tmp and /var.
+After=local-fs.target systemd-journald.socket
 Conflicts=shutdown.target
 Before=shutdown.target
 StartLimitIntervalSec=0

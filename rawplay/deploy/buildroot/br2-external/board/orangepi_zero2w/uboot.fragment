@@ -1,9 +1,53 @@
-# U-Boot config fragment for the release image. The board defconfig is
-# already minimal (no network, no fastboot, no USB host commands); the only
-# change that matters for the boot time is skipping the distro-boot scan and
-# loading our boot script directly. SPL falcon mode is not used: on sunxi the
-# SPL loads U-Boot proper (and the H616 needs TF-A BL31 between them), so
-# there is no falcon path to trim.
+# U-Boot config fragment for the release image. The board defconfig is NOT
+# minimal: its CONFIG_DISTRO_DEFAULTS pulls in USB host, the MUSB/RNDIS
+# gadget, FASTBOOT and networking, and the serial log shows exactly what they
+# cost before the kernel is even loaded (measured on hardware):
+#
+#   scanning bus usb@5200000 for devices...   1.15 s
+#   scanning bus usb@5200400 for devices...   1.14 s
+#   RNDIS/USB gadget bring-up                  0.4 s
+#   Loading Environment from FAT               0.2 s
+#
+# The appliance boots only from the boot FAT's boot.scr (CONFIG_BOOTCOMMAND
+# below), so every one of those can go. ENV_IS_NOWHERE keeps the environment
+# in RAM: there is no saved environment on the FAT to load. ZSTD is for the
+# compressed kernel (Image.zst, see the defconfig and boot.cmd): the 38 MB
+# uncompressed Image takes 1.65 s to read from the SD card at 23 MB/s, zstd
+# brings it to ~11 MB and the decompressor handles the rest in well under a
+# second.
+#
+# SPL falcon mode is not used: on sunxi the SPL loads U-Boot proper (and the
+# H616 needs TF-A BL31 between them), so there is no falcon path to trim.
 CONFIG_BOOTDELAY=0
 CONFIG_USE_BOOTCOMMAND=y
 CONFIG_BOOTCOMMAND="load mmc 0:1 0x4a000000 boot.scr; source 0x4a000000"
+CONFIG_ZSTD=y
+# ZSTD_LIB_MINIFY's decoder is ~8x slower in C (measured on this board:
+# 3.07 s to decompress the 38 MB kernel, against 0.5 s of SD read). The
+# bootloader has a 64 MB malloc area, so nothing needs the minified build.
+# CONFIG_ZSTD_LIB_MINIFY is not set
+# the board defconfig's preboot hook is "usb start"; USB is gone and the
+# command just prints "Unknown command 'usb'" before autoboot
+# CONFIG_USE_PREBOOT is not set
+# The controller symbols have to go first: the board defconfig sets the
+# EHCI/OHCI host controllers and the MUSB gadget directly, and those select
+# CONFIG_USB (and with it the bus scans) back on no matter what.
+# CONFIG_USB_EHCI_HCD is not set
+# CONFIG_USB_OHCI_HCD is not set
+# CONFIG_USB_MUSB_GADGET is not set
+# CONFIG_USB_MUSB_SUNXI is not set
+# CONFIG_USB is not set
+# CONFIG_CMD_USB is not set
+# CONFIG_USB_STORAGE is not set
+# CONFIG_USB_HOST is not set
+# CONFIG_USB_KEYBOARD is not set
+# CONFIG_USB_GADGET is not set
+# CONFIG_USB_ETHER is not set
+# CONFIG_USB_ETH_RNDIS is not set
+# CONFIG_FASTBOOT is not set
+# CONFIG_USB_FUNCTION_FASTBOOT is not set
+# CONFIG_CMD_NET is not set
+# CONFIG_NET is not set
+# CONFIG_ENV_IS_IN_FAT is not set
+# CONFIG_ENV_IS_IN_SPI_FLASH is not set
+CONFIG_ENV_IS_NOWHERE=y

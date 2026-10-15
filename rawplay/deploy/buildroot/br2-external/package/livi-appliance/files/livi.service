@@ -15,6 +15,12 @@
 # the system bus must be up before livi-core runs. Board images add the
 # same ordering after hciattach_opi/hci0 with a drop-in (see the uwe5622
 # package), which qemu has no driver for.
+#
+# The ExecStartPre wait: livi-core's nested compositor exits when weston's
+# socket is not up yet, taking livi-core with it, so on a cold boot livi
+# used to die once and be restarted a couple of seconds later. Waiting for
+# the socket costs nothing when weston is already up (rawlink does the same
+# for the capture side).
 [Unit]
 Description=LIVI-Lite head unit UI on the Weston kiosk display
 DefaultDependencies=no
@@ -44,6 +50,7 @@ Environment=PULSE_SERVER=unix:/run/pulse/native
 Environment=GST_REGISTRY=/data/livi-config/gst-registry.aarch64.bin
 Environment=GST_REGISTRY_UPDATE=no
 EnvironmentFile=-/etc/default/livi
+ExecStartPre=/usr/lib/livi/livi-wait-weston
 ExecStart=/opt/livi/livi-core
 Restart=always
 RestartSec=1

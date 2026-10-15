@@ -21,6 +21,12 @@ define LIVI_APPLIANCE_INSTALL_TARGET_CMDS
         $(TARGET_DIR)/opt/livi/rawlink-wait
     $(INSTALL) -D -m 0755 $(LIVI_APPLIANCE_PKGDIR)/files/livi-persist \
         $(TARGET_DIR)/usr/lib/livi/livi-persist
+    $(INSTALL) -D -m 0755 $(LIVI_APPLIANCE_PKGDIR)/files/livi-wait-weston \
+        $(TARGET_DIR)/usr/lib/livi/livi-wait-weston
+    $(INSTALL) -D -m 0755 $(LIVI_APPLIANCE_PKGDIR)/files/livi-warmup \
+        $(TARGET_DIR)/usr/lib/livi/livi-warmup
+    $(INSTALL) -D -m 0644 $(LIVI_APPLIANCE_PKGDIR)/files/livi-warmup.service \
+        $(TARGET_DIR)/usr/lib/systemd/system/livi-warmup.service
     $(INSTALL) -D -m 0755 $(LIVI_APPLIANCE_PKGDIR)/files/livi-markers \
         $(TARGET_DIR)/usr/lib/livi/livi-markers
     $(INSTALL) -D -m 0755 $(LIVI_APPLIANCE_PKGDIR)/files/livi-pulse \
@@ -63,6 +69,8 @@ define LIVI_APPLIANCE_INSTALL_TARGET_CMDS
         $(TARGET_DIR)/etc/systemd/system/multi-user.target.wants/livi-pulse.service
     ln -sf ../../../../usr/lib/systemd/system/livi-markers.service \
         $(TARGET_DIR)/etc/systemd/system/multi-user.target.wants/livi-markers.service
+    ln -sf ../../../../usr/lib/systemd/system/livi-warmup.service \
+        $(TARGET_DIR)/etc/systemd/system/multi-user.target.wants/livi-warmup.service
     $(LIVI_APPLIANCE_PKGDIR)/mkstick.sh \
         $(LIVI_APPLIANCE_REPO) $(TARGET_DIR)/opt/livi/usb.img \
         $(HOST_DIR) || true

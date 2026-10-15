@@ -1,0 +1,32 @@
+#!/bin/sh
+# Best-effort page-cache warm-up for the display stack.
+#
+# weston and the nested livi-compositor fault in the same big libraries from
+# the read-only squashfs on the SD card as they start - libgallium is 20 MB
+# and livi-ui is 23 MB on this image - and the card reads at ~23 MB/s. On
+# hardware weston's start measured 1.6 s cold against 0.3 s warm for exactly
+# this reason. This service runs in the first systemd transaction (it is
+# wanted by multi-user, DefaultDependencies=no, and only ordered after
+# journald) and reads the hot set in the order the boot consumes it, so the
+# units that follow start from the page cache.
+#
+# There is deliberately no ordering on weston/livi: if this loses the race
+# they pay what they always paid, if it wins they do not. The reads run
+# sequentially to saturate the one SD interface rather than seek around it.
+for f in \
+    /usr/bin/weston \
+    /usr/lib/libweston-15/libweston-15.so.0 \
+    /usr/lib/libEGL.so.1.0.0 \
+    /usr/lib/libGLESv2.so.2.0.0 \
+    /usr/lib/libgallium-26.1.8.so \
+    /usr/lib/gbm/dri_gbm.so \
+    /opt/livi/livi-core \
+    /opt/livi/livi-ui \
+    /opt/livi/resources/compositor/livi-compositor \
+    /opt/livi/resources/gst-host/livi-gst-host \
+    /opt/livi/resources/driver/livi-helperd; do
+    if [ -f "$f" ]; then
+        cat "$f" >/dev/null 2>&1 || true
+    fi
+done
+exit 0

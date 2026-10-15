@@ -1,0 +1,25 @@
+#!/bin/sh
+# Wait for weston's socket before livi-core starts.
+#
+# livi-core starts its nested compositor as soon as it runs, and the
+# compositor connects to weston's wayland socket immediately; if the socket
+# is not there yet the compositor exits, livi-core follows it down, and
+# systemd restarts livi after RestartSec. Measured on hardware: a wasted
+# start at 5.3 s and the real one at 8.1 s, every boot. weston's unit is
+# ordered first but its socket only appears after the GL renderer is
+# initialised (cold SD reads), so After=livi-weston.service is not enough.
+# rawlink retries the same socket on its own (it must bind the UDC first);
+# this is the synchronous, bounded version for livi.
+#
+# 400 x 50 ms = 20 s, then fail: a weston that never comes up then hits
+# systemd's restart path instead of hanging livi forever.
+i=0
+while [ ! -S /run/livi/wayland-livi ]; do
+    sleep 0.05
+    i=$((i + 1))
+    if [ "$i" -ge 400 ]; then
+        echo "livi-wait-weston: /run/livi/wayland-livi did not appear in 20 s" >&2
+        exit 1
+    fi
+done
+exit 0

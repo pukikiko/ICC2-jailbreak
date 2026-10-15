@@ -1,0 +1,18 @@
+# Warm the display stack's libraries into the page cache before weston and
+# livi fault them in from the SD card; see the script's comments. Shotgun,
+# not a dependency: nothing is ordered after it, so it can only help.
+[Unit]
+Description=Warm the display stack's libraries into the page cache
+DefaultDependencies=no
+After=systemd-journald.socket
+Conflicts=shutdown.target
+Before=shutdown.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/livi/livi-warmup
+
+[Install]
+WantedBy=multi-user.target

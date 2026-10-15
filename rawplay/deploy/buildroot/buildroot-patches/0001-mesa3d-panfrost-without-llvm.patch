@@ -1,0 +1,79 @@
+Local patch against Buildroot 2026.08 for the LIVI appliance build.
+
+mesa3d: build panfrost through the precomp compiler, without target LLVM
+------------------------------------------------------------------------
+
+Mesa 26's panfrost compiles its shaders through the CLC framework
+(with_driver_using_cl), so Buildroot's panfrost symbol depends on
+BR2_PACKAGE_MESA3D_LLVM and selects BR2_PACKAGE_MESA3D_NEEDS_PRECOMP_COMPILER.
+That symbol selects OpenCL, whose CLANG/libclc selects pull target LLVM, so
+every panfrost image ships libLLVM.so.
+
+Buildroot already has the mode this appliance wants: NEEDS_PRECOMP_COMPILER
+passes -Dmesa-clc=system -Dprecomp-compiler=system, and host-mesa3d's
+precompiler (host-llvm + host-libclc) generates the shader blobs at build
+time. In that mode Mesa sets with_clc = with_gallium_rusticl, so a target
+build with llvm disabled and rusticl disabled is legal: only the host tools
+need LLVM. The target driver and the shared libgallium then do not link
+libLLVM at all.
+
+On the Orange Pi appliance this is the single largest userspace boot cost:
+with target LLVM, weston and livi-compositor between them fault in ~65 MB of
+libLLVM.so from the read-only squashfs on the SD card; weston's start
+measured 3.2 s cold against 0.34 s warm for work panfrost never performs
+(the board always has the GPU; llvmpipe is not built).
+
+So: panfrost uses the precomp path without the LLVM dependency and without
+the OpenCL/rusticl stack that NEEDS_PRECOMP_COMPILER otherwise selects. The
+qemu image keeps llvmpipe/LLVM and is unaffected (LLVMPIPE's own LLVM
+dependency stays).
+
+--- a/package/mesa3d/Config.in
++++ b/package/mesa3d/Config.in
+@@ -207,16 +207,10 @@
+ config BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_PANFROST
+ 	bool "Gallium panfrost driver"
+ 	depends on BR2_TOOLCHAIN_HAS_SYNC_4 || !BR2_PACKAGE_XORG7 # libxshmfence
+-	depends on BR2_PACKAGE_MESA3D_LLVM
+ 	select BR2_PACKAGE_MESA3D_GALLIUM_DRIVER
+-	select BR2_PACKAGE_MESA3D_NEEDS_PRECOMP_COMPILER
+-	select BR2_PACKAGE_MESA3D_RUSTICL_SUPPORTED_DRIVER
+ 	help
+ 	  Mesa driver for ARM Mali Midgard and Bifrost GPUs.
+ 
+-comment "panfrost driver needs llvm"
+-	depends on !BR2_PACKAGE_MESA3D_LLVM
+-
+ config BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_R300
+ 	bool "Gallium Radeon R300 driver"
+ 	depends on BR2_i386 || BR2_x86_64
+--- a/package/mesa3d/mesa3d.mk
++++ b/package/mesa3d/mesa3d.mk
+@@ -182,6 +182,15 @@
+ 	MESA3D_DEPENDENCIES += host-mesa3d spirv-llvm-translator spirv-tools
+ endif
+ 
++# panfrost needs the same precomp-compiler mode as the drivers above, but
++# not the OpenCL/rusticl stack that NEEDS_PRECOMP_COMPILER selects with it.
++# host-mesa3d's precompiler generates panfrost's shader blobs at build time,
++# so the target driver never links LLVM (see the Config.in hunk).
++ifeq ($(BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_PANFROST),y)
++MESA3D_CONF_OPTS += -Dmesa-clc=system -Dprecomp-compiler=system
++MESA3D_DEPENDENCIES += host-mesa3d
++endif
++
+ ifeq ($(BR2_PACKAGE_MESA3D_VULKAN_DRIVER),)
+ MESA3D_CONF_OPTS += \
+ 	-Ddisplay-info=disabled \
+--- a/package/mesa3d/mesa3d.mk
++++ b/package/mesa3d/mesa3d.mk
+@@ -349,8 +349,9 @@
+ HOST_MESA3D_CONF_OPTS = \
+ 	-Dglvnd=disabled \
+ 	-Dgallium-drivers=$(subst $(space),$(comma),$(HOST_MESA3D_GALLIUM_DRIVERS-y)) \
+ 	-Dtools=$(subst $(space),$(comma),$(HOST_MESA3D_TOOLS)) \
+ 	-Dinstall-mesa-clc=true \
++	-Dcpp_rtti=false \
+ 	-Dllvm=enabled \
+ 	-Dmesa-clc=enabled \
+ 	-Dplatforms= \

@@ -60,6 +60,23 @@ if [ ! -d "$SRC" ]; then
     tar -xzf "$DL/buildroot-$BR_VERSION.tar.gz" -C "$BUILD"
 fi
 
+# Local patches against the pinned Buildroot tree. They live here and not in
+# the br2-external tree because they change Buildroot's own Kconfig (see
+# buildroot-patches/). Idempotent: a patch that is already applied is skipped
+# via its reverse dry-run, so an existing build tree is brought up to date as
+# well.
+for p in "$ROOT"/buildroot-patches/*.patch; do
+    [ -e "$p" ] || continue
+    if patch -d "$SRC" -p1 -N -r - --dry-run -R <"$p" >/dev/null 2>&1; then
+        echo "build: patch already applied: $(basename "$p")"
+    elif patch -d "$SRC" -p1 -N -r - <"$p"; then
+        echo "build: applied $(basename "$p")"
+    else
+        echo "build: failed to apply $(basename "$p")" >&2
+        exit 1
+    fi
+done
+
 echo "build: $BOARD ($VARIANT) -> $OUT"
 make -C "$SRC" O="$OUT" BR2_EXTERNAL="$EXTERNAL" "$DEFCONFIG"
 make -C "$SRC" O="$OUT" BR2_EXTERNAL="$EXTERNAL" -j"$(nproc)"

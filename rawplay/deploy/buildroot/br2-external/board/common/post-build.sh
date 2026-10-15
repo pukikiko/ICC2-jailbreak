@@ -55,13 +55,18 @@ fi
 mkdir -p "$TARGET_DIR/root/.config"
 ln -sfn /data/livi-config/LIVI "$TARGET_DIR/root/.config/LIVI"
 
-# Debug images ship dropbear so the appliance can be poked from its own AP
+# Images with dropbear ship ssh so the appliance can be poked from its own AP
 # (10.10.0.1) without a serial console. The root account intentionally has no
 # password, and dropbear refuses blank-password logins unless -B is given;
-# the stock unit reads DROPBEAR_ARGS from /etc/default/dropbear.
+# the stock unit reads DROPBEAR_ARGS from /etc/default/dropbear. The unit is
+# enabled explicitly (the package only installs the file): the debug image
+# did not get the symlink from any preset either.
 if [ -x "$TARGET_DIR/usr/sbin/dropbear" ]; then
-    mkdir -p "$TARGET_DIR/etc/default"
+    mkdir -p "$TARGET_DIR/etc/default" \
+        "$TARGET_DIR/etc/systemd/system/multi-user.target.wants"
     printf 'DROPBEAR_ARGS="-B"\n' > "$TARGET_DIR/etc/default/dropbear"
+    ln -sf ../../../../usr/lib/systemd/system/dropbear.service \
+        "$TARGET_DIR/etc/systemd/system/multi-user.target.wants/dropbear.service"
 fi
 
 # livi-helperd publishes and browses CarPlay's mDNS records with avahi's

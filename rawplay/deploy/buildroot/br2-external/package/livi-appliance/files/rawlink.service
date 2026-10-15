@@ -14,8 +14,12 @@
 [Unit]
 Description=rawlink: functionfs gadget + raw display link to the head unit
 DefaultDependencies=no
-After=local-fs.target sys-kernel-config.mount livi-persist.service systemd-journald.socket
-Wants=sys-kernel-config.mount livi-persist.service
+# no livi-persist here either: rawlink touches /opt (squashfs), /tmp and
+# /sys/kernel/config only, and the unit's gadget binding is the first
+# milestone the car waits on. local-fs keeps /tmp mounted before the socket
+# path is created.
+After=local-fs.target sys-kernel-config.mount systemd-journald.socket
+Wants=sys-kernel-config.mount
 Conflicts=shutdown.target
 Before=shutdown.target
 StartLimitIntervalSec=0

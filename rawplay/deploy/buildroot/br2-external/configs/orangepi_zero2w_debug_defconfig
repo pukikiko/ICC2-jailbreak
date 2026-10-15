@@ -29,6 +29,8 @@ BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_LIVI_APPLIANCE_PATH)/board/orangepi_zero2w/linux.fragment"
 BR2_LINUX_KERNEL_DTS_SUPPORT=y
 BR2_LINUX_KERNEL_INTREE_DTS_NAME="allwinner/sun50i-h618-orangepi-zero2w"
+# uncompressed Image like the release image (see that defconfig: U-Boot's
+# zstd is slower than the extra SD read)
 BR2_LINUX_KERNEL_IMAGE=y
 BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
 # the UWE5622 SDIO bus (mmc1 + wifi regulators/pwrseq): a DTS-only patch,
@@ -107,16 +109,11 @@ BR2_PACKAGE_BLUEZ5_UTILS_TOOLS=y
 # path); the Electron image had it in via GTK, the native image needs it explicit
 BR2_PACKAGE_PANGO=y
 BR2_PACKAGE_MESA3D=y
+# Same as the release image: panfrost + softpipe, no LLVM/llvmpipe (the
+# boot-time measurement must be the release shape, and libLLVM is 65 MB of
+# squashfs reads for a driver the board never selects; see the release
+# defconfig).
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_SOFTPIPE=y
-# the nested compositor renders through EGL; with no GPU that is llvmpipe
-# (softpipe is kept as the fallback). Same configuration the phone runs.
-BR2_PACKAGE_MESA3D_LLVM=y
-BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_LLVMPIPE=y
-# panfrost (the Mali-G31 through the board kernel-patches nodes) is the
-# zero-copy video path: weston runs GL, livi-compositor's EGL binds the GPU
-# and waylandsink hands the v4l2 decoder's dmabufs straight to it. Mesa's
-# panfrost pulls in the OpenCL/CLC precompiler (host clang/libclc, LLVM with
-# RTTI); llvmpipe stays as the fallback.
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_PANFROST=y
 BR2_PACKAGE_MESA3D_OPENGL_EGL=y
 BR2_PACKAGE_MESA3D_OPENGL_ES=y

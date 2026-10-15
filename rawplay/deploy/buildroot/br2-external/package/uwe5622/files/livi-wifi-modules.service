@@ -1,0 +1,33 @@
+# The UWE5622's modules are their own unit, not part of
+# systemd-modules-load.service.
+#
+# The marlin firmware download takes ~2 s on this board (wcnmodem.bin over
+# SDIO), and while the modules sat in modules-load.d every unit ordered after
+# sysinit waited for it: D-Bus, then bluetooth, then livi - measured as livi
+# not starting until 5.3 s with weston's socket ready a full second earlier.
+# The modules only have to be in before the Bluetooth attach and the AP, so
+# they load in parallel with the display path instead. The GPU modules
+# (sunxi-cedrus, panfrost; /dev/media0 and /dev/dri/renderD128) stay in
+# modules-load.d: weston's renderer choice reads /dev/dri at start.
+#
+# uwe5622-bluetooth.service, wpa_supplicant.service and livi-wifi-ap.service
+# are ordered after this one with drop-ins; the Wi-Fi interface appearing a
+# couple of seconds into the boot is fine, nothing before livi's helper asks
+# for wlan0.
+[Unit]
+Description=Load the UWE5622 Wi-Fi/BT modules
+DefaultDependencies=no
+After=systemd-journald.socket
+Conflicts=shutdown.target
+Before=shutdown.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/modprobe uwe5622_bsp_sdio
+ExecStart=/sbin/modprobe sprdwl_ng
+ExecStart=/sbin/modprobe sprdbt_tty
+
+[Install]
+WantedBy=multi-user.target

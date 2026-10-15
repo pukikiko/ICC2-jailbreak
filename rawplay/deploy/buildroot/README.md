@@ -501,11 +501,14 @@ are the check on real hardware.
   holds only `$HOME/.config` (bind) and `/var/lib/bluetooth` (bind) plus a
   persistent machine-id. Power can be cut at any time: the rootfs can not
   be corrupted and the persistent partition is journaled with a 1 s commit.
-* **Kernel compression**: uncompressed `Image`. The boot media is an SD
-  card whose read speed is the same order as the kernel size, and arm64
-  boot decompression is serial work; the brief says choose by measurement,
-  and on the bench that is a one-line defconfig change
-  (`BR2_LINUX_KERNEL_IMAGEGZ`) — noted as a follow-up rather than guessed.
+* **Kernel compression: uncompressed `Image`, by measurement on the
+  board.** The 38.9 MB Image reads from the boot FAT in 1.65 s at 23 MB/s.
+  `Image.zst` is 11.8 MB (0.50 s read) but U-Boot's zstd decoder needs
+  2.6-3.1 s for it on this SoC even with `CONFIG_ZSTD_LIB_MINIFY` off, so
+  the compressed kernel is ~1.2 s *slower* end to end. LZ4 cannot be used:
+  U-Boot's magic check (`04 22`) does not match the kernel's legacy lz4
+  frames (`02 21 4c 18`). The lever that remains is trimming the kernel
+  itself, which the defconfig does not do yet.
 * **Kernel config**: the upstream arm64 defconfig plus a small fragment:
   gadget stack built in (`USB_CONFIGFS`, `F_FS`, mass storage,
   `USB_MUSB_GADGET`), squashfs/zstd, `NULL_TTY`, Bluetooth/802.11 core for
@@ -613,6 +616,79 @@ unit is scheduled after `multi-user.target`): unmodified
 `multi-user.target reached after 11.31-11.97 s in userspace`, modified
 11.04-11.18 s; kernel 3.25-3.49 s vs 3.34-3.40 s. The difference is
 entirely inside `livi.service`.
+
+### Hardware boot measurements (Orange Pi Zero 2W, real board)
+
+Measured with a timestamped UART capture (U-Boot output; the release image
+has no serial shell) plus the board's own `/run/livi-boot.log` markers and
+`journalctl -b -o short-monotonic` over the AP, on a cold power-on. Run-to-
+run variance is ~±0.4 s.
+
+| milestone | before | after |
+|---|---|---|
+| SPL banner -> BL31 | 0.47 s | 0.47 s |
+| BL31 -> U-Boot banner | 0.30 s | 0.30 s |
+| U-Boot banner -> kernel (kernel load included) | 4.59 s | 2.18 s |
+| kernel -> systemd (period to PID 1) | 0.86 s | 0.94 s |
+| systemd -> multi-user.target | 9.43 s | 4.90 s |
+| T3 (gadget bound) | 4.82 s | 4.05 s |
+| T4 (weston wayland-livi socket) | 7.25 s | 5.36 s |
+| LIVI `[core] UI started` | 9.21 s | 6.25 s |
+| **power-on -> LIVI UI started (stopwatch)** | **~15.5 s** | **~9.5 s** |
+
+(The "before" column is the same card before these changes, with the old
+U-Boot and the LLVM-linked Mesa: U-Boot scanned two USB buses at 1.15 s
+each, started the MUSB/RNDIS gadget, tried to load its environment from the
+boot FAT, and read the kernel; userspace then paid 3.2 s of cold weston
+start against 65 MB of libLLVM, waited 2.3 s for the UWE5622 firmware to
+finish blocking sysinit/D-Bus/LIVI, started livi before weston's socket
+existed and lost the start, and restarted it 1.5 s later.)
+
+What produced the after numbers, in order of size:
+
+* **U-Boot trims** (`board/orangepi_zero2w/uboot.fragment`): the board
+  defconfig's `CONFIG_DISTRO_DEFAULTS` pulls in USB host (EHCI+OHCI), the
+  MUSB/RNDIS gadget, FASTBOOT, networking and an environment load from the
+  FAT, none of which the appliance uses. Disabling them (including the
+  controller symbols, which `select` `CONFIG_USB` back on) removes ~2.7 s
+  from the bootloader. `CONFIG_USE_PREBOOT` still runs the defconfig's
+  `usb start` hook, which now just prints "Unknown command 'usb'".
+* **Mesa without target LLVM** (`buildroot-patches/0001-mesa3d-panfrost-
+  without-llvm.patch` + `scripts/build.sh` applying it): Buildroot's
+  panfrost symbol depends on `BR2_PACKAGE_MESA3D_LLVM` and selects the
+  OpenCL/rusticl precompiler stack, so the shared libgallium linked
+  libLLVM.so (65 MB). Mesa's precomp-compiler mode (`-Dmesa-clc=system
+  -Dprecomp-compiler=system`) satisfies panfrost without target LLVM: the
+  host-mesa3d precompiler generates the shader blobs at build time, the
+  target libgallium no longer links LLVM (verified with `readelf -d`), the
+  rootfs drops ~75 MB, and weston/livi-compositor stop faulting it in.
+  The qemu image keeps llvmpipe/LLVM and is unaffected.
+* **Page-cache warm-up** (`livi-warmup.service` + script): reads the hot
+  set (weston, libgallium 20 MB, livi-core/livi-ui 36 MB) in the order the
+  boot consumes it, starting in the first systemd transaction (~2.6 s).
+  It finishes at ~5.5 s, before livi starts; livi-core-to-UI dropped from
+  ~1.45 s to ~0.6-0.75 s.
+* **UWE5622 modules in their own unit** (`livi-wifi-modules.service`): the
+  ~2.3 s marlin firmware download used to sit in `modules-load.d` and hold
+  everything ordered after sysinit (D-Bus, bluetooth, livi) behind it. The
+  GPU modules stay in `modules-load.d` (weston reads `/dev/dri` at start);
+  wpa_supplicant and the AP unit are ordered after the new unit.
+* **`livi-wait-weston` ExecStartPre**: livi-core's nested compositor exits
+  when weston's socket is not there yet, so every boot lost a livi start
+  (5.3 s) and its restart (8.1 s). The wait script removes both.
+* **weston/rawlink no longer order on `livi-persist`**: neither reads
+  `/data` (weston: `HOME=/root`, runtime dir `/run/livi`; rawlink: `/opt`,
+  `/tmp`, `/sys/kernel/config`), so the ~0.7 s ext4 recovery + config
+  seeding no longer delays the display path or the gadget.
+* **Uncompressed kernel** (see "Kernel compression" above): zstd in U-Boot
+  was slower than the extra SD read on this board; the defconfig is back to
+  `BR2_LINUX_KERNEL_IMAGE`, and `boot.cmd` still boots an Image.zst if one
+  is present.
+* **`livi.service` Unblocked from the 1 s D-Bus start / hci0**: unchanged
+  in this round on purpose. The helper makes its one BlueZ connection at
+  livi-core start and never retries, so livi waits for `hci0` (5.5 s this
+  boot) and for `dbus.service`; those are the remaining gates after
+  weston's socket (5.36 s).
 
 ### Boot-time work, and why each piece exists
 

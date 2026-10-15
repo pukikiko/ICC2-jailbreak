@@ -66,8 +66,22 @@ define UWE5622_INSTALL_TARGET_CMDS
 	ln -sf uwe5622/wcnmodem.bin $(TARGET_DIR)/lib/firmware/wcnmodem.bin
 	ln -sf uwe5622/wifi_2355b001_1ant.ini \
 		$(TARGET_DIR)/lib/firmware/wifi_2355b001_1ant.ini
-	printf 'uwe5622_bsp_sdio\nsprdwl_ng\nsprdbt_tty\n' > \
-		$(TARGET_DIR)/etc/modules-load.d/uwe5622.conf
+	# The modules are loaded by livi-wifi-modules.service, not by
+	# modules-load.d: the firmware download takes ~2 s and used to hold
+	# sysinit (and with it D-Bus, bluetooth and livi) behind it. See the
+	# unit's comments.
+	$(INSTALL) -D -m 0644 $(UWE5622_PKGDIR)/files/livi-wifi-modules.service \
+		$(TARGET_DIR)/usr/lib/systemd/system/livi-wifi-modules.service
+	mkdir -p $(TARGET_DIR)/etc/systemd/system/multi-user.target.wants
+	ln -sf ../../../../usr/lib/systemd/system/livi-wifi-modules.service \
+		$(TARGET_DIR)/etc/systemd/system/multi-user.target.wants/livi-wifi-modules.service
+	# wpa_supplicant and the helper's AP unit must not race the module
+	# load: wpa_supplicant picks its interface at start and hostapd needs
+	# wlan0, both of which only exist once the modules are in.
+	$(INSTALL) -D -m 0644 $(UWE5622_PKGDIR)/files/wpa_supplicant.service.d-order.conf \
+		$(TARGET_DIR)/etc/systemd/system/wpa_supplicant.service.d/uwe5622-order.conf
+	$(INSTALL) -D -m 0644 $(UWE5622_PKGDIR)/files/livi-wifi-ap.service.d-order.conf \
+		$(TARGET_DIR)/etc/systemd/system/livi-wifi-ap.service.d/uwe5622-order.conf
 	$(INSTALL) -D -m 0644 $(UWE5622_PKGDIR)/files/uwe5622-bluetooth.service \
 		$(TARGET_DIR)/usr/lib/systemd/system/uwe5622-bluetooth.service
 	# hciattach_opi: the Spreadtrum-patched BlueZ hciattach with the "sprd"
