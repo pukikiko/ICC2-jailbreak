@@ -138,7 +138,11 @@ with `force_fs`, which drops `/fs/usb0` and leaves the footer buttons dead even 
 keeps painting the overlaid plates. `usb/homebrew/stickwatch.sh`, started from ram by
 `boot.sh`, probes a file on the stick every few seconds and rebuilds the mount the way the
 hook does (no `force_fs`, so the port stays at high speed), restarts the launcher if it died,
-and flushes `/tmp/jailbreak.log` into the stick's log once the mount is back.
+and flushes `/tmp/jailbreak.log` into the stick's log once the mount is back. it also watches
+the stock `buttons` service: with no homebrew session owning the panel and the hmi up, a
+`buttons` that has been missing for three probes gets a fresh one started, and a pause marker
+whose owner died is resumed the same way the session resume would - see "the car takes the
+panel back" below.
 
 ### the car takes the panel back
 
@@ -165,6 +169,18 @@ group from outside while its leader waits on the app can stall that leader on qn
 launcher's guard waits 750 ms for the menu to do that before closing the whole command group
 itself, which covers commands that do not guard themselves (the carplay player). the kill
 lands on the command's process group, so a script and the player it started go down together.
+
+buttons is paused for the session and killed at the resume, so its ham guard spawns a clean
+one and the panel frames queued for the stopped hmi die with the old connection. that restart
+is not unconditional: a buttons killed in the window before it has registered its CONDDEATH
+with ham - or a respawn that dies in its own startup - raises no condition, and then no
+restart ever follows; the pid just disappears. hammering the kill in the emulator left the
+panel with no buttons and ham having printed its one "Restarted" line for good. the resume
+therefore does not trust a single pid sighting: it confirms the process survives a short
+settle and starts one itself when nothing does. `stickwatch.sh` covers the same failure from
+outside a session (no live pause marker, hmi up, buttons missing for three probes), and
+resumes a pause marker whose owner died, so a crashed session cannot leave buttons frozen or
+dead with nobody left to bring it back.
 
 the shim's `/tmp/hmi-overlay.loaded` marker names the hmi for the launcher's stop/resume. any
 preloaded process that opened a `/usr/hmi/...` path used to claim it, and on a real car that is

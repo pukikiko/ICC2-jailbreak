@@ -78,6 +78,7 @@ populated yet the build fetches and builds it (network needed); to do that step 
     terminal/     the framebuffer terminal + on-screen keyboard (a shell on pipes)
     rawplay/      the raw rgb565 video/touch player: unit side, host side, tests, deploy
     syncsploit/   the navi-update installer (python tools, the ui, a ready-made stick tree)
+    tests/        emulator end-to-end checks (the buttons watchdog regression)
     stick/        the tracked stick base: boot.sh, stickwatch.sh, apps.txt, buttons.txt,
                   apps/*.sh (make stick copies this into usb/)
     out/          the built unit programs (git-ignored)

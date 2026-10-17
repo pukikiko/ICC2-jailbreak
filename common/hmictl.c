@@ -412,28 +412,66 @@ static void buttons_drop(void)
     }
 }
 
-/* ham answers a kill with a fresh buttons; if it does not (the process was killed before
- * it registered, or its ham entity was lost), start one, so the panel is never left deaf.
- * the wait is long enough that a live respawn is not doubled into two translators. the
- * start is `on -d`, detached: an instance left in this session's process group would go
- * down with the next guard killpg. */
-static void buttons_make_live(void)
+/* wait up to wait_ms for a buttons process and confirm it after a settle. a pid from
+ * slay -p only says the process exists: ham's respawn can die in the window before it has
+ * registered its CONDDEATH, and then its death raises nothing, no restart comes and the pid
+ * just disappears. the settle catches exactly that (found in the emulator by hammering the
+ * kill: the respawn was gone within a second and ham never fired again). 0 when none
+ * appeared in time, the pid when one survived the settle. */
+static int buttons_wait_live(unsigned wait_ms)
 {
     pid_t pids[BUTTONS_MAX];
+    unsigned waited = 0;
 
-    for (int tries = 0; tries < 15; tries++) {
+    for (;;) {
         if (buttons_find(pids, BUTTONS_MAX) > 0) {
-            jlog("hmi: buttons is live (pid %d)", pids[0]);
-            return;
+            pid_t seen = pids[0];
+
+            usleep(300000);
+            if (buttons_find(pids, BUTTONS_MAX) == 0) {
+                jlog("hmi: buttons pid %d died right after it appeared, no ham restart will come",
+                     (int)seen);
+                return 0;       /* stillborn: waiting longer cannot help */
+            }
+            return (int)pids[0];
+        }
+        if (waited >= wait_ms) {
+            return 0;
         }
         usleep(200000);
+        waited += 200;
     }
-    jlog("hmi: buttons did not come back, starting one");
-    run_command("on -d /bin/buttons -G -+events >/dev/null 2>&1 &");
-    usleep(200000);
-    if (buttons_find(pids, BUTTONS_MAX) == 0) {
-        jlog("hmi: buttons is still missing after the start attempt, the panel is deaf");
+}
+
+/* ham answers a kill with a fresh buttons; if it does not (the process was killed before
+ * it registered, or its respawn died in that window too), start one, so the panel is never
+ * left deaf. the wait is long enough that a live respawn is not doubled into two
+ * translators, and each sighting is confirmed after a settle. the start is `on -d`,
+ * detached: an instance left in this session's process group would go down with the next
+ * guard killpg. */
+static void buttons_make_live(void)
+{
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        int pid = buttons_wait_live(3000);
+
+        if (pid > 0) {
+            jlog("hmi: buttons is live (pid %d)", pid);
+            return;
+        }
+        jlog("hmi: buttons did not come back, starting one (attempt %d)", attempt);
+        run_command("on -d /bin/buttons -G -+events >/dev/null 2>&1 &");
     }
+    /* the third start deserves the same settle the wait gives ham's respawns: call the
+     * panel deaf only after it too failed to stay alive */
+    {
+        int pid = buttons_wait_live(2000);
+
+        if (pid > 0) {
+            jlog("hmi: buttons is live after the last start (pid %d)", pid);
+            return;
+        }
+    }
+    jlog("hmi: buttons is still missing after 3 starts, the panel is deaf");
 }
 
 int hmi_events_pause(void)

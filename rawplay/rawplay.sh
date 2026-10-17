@@ -66,6 +66,17 @@ stop_hmi() {
     STOPPED=yes
 }
 
+# a pid from slay -p only says a process exists: ham's respawn can die in the window before
+# it registers its CONDDEATH and then no restart ever comes (found in the emulator, see
+# common/hmictl.c). look, then look again after a settle. 1: buttons is there and stayed.
+buttons_live() {
+    /proc/boot/slay -p buttons > /tmp/buttons.pids 2>/dev/null
+    [ -s /tmp/buttons.pids ] || return 1
+    sleep 1
+    /proc/boot/slay -p buttons > /tmp/buttons.pids 2>/dev/null
+    [ -s /tmp/buttons.pids ]
+}
+
 resume_hmi() {
     if [ "$BUTTONS_PAUSED" = yes ] && [ -e /tmp/buttons-paused ]; then
         rm -f /tmp/buttons-paused
@@ -78,24 +89,34 @@ resume_hmi() {
             [ -n "$p" ] && kill -9 "$p" 2>/dev/null
         done < /tmp/buttons.pids
         rm -f /tmp/buttons.pids
-        # ham starts a clean one; if it did not (the killed process never registered),
-        # start one here so the panel is not left deaf
-        i=0
+        # ham starts a clean one; if it did not (the killed process never registered, or its
+        # respawn was stillborn the same way), start one here so the panel is not left deaf.
+        # three rounds at most, each followed by buttons_live's settle: a pid is only proof
+        # that a process exists, not that it registered with ham (see common/hmictl.c).
+        attempt=0
         alive=no
-        while [ $i -lt 6 ]; do
-            /proc/boot/slay -p buttons > /tmp/buttons.pids 2>/dev/null
-            if [ -s /tmp/buttons.pids ]; then
-                alive=yes
-                break
+        while [ "$alive" = no ] && [ $attempt -lt 3 ]; do
+            attempt=$((attempt + 1))
+            i=0
+            while [ $i -lt 4 ] && [ "$alive" = no ]; do
+                if buttons_live; then
+                    alive=yes
+                else
+                    sleep 1
+                    i=$((i + 1))
+                fi
+            done
+            if [ "$alive" = no ]; then
+                echo "rawplay.sh: buttons did not come back, starting one (attempt $attempt)"
+                on -d /bin/buttons -G -+events >/dev/null 2>&1 &
+                sleep 1
             fi
-            sleep 1
-            i=$((i + 1))
         done
-        rm -f /tmp/buttons.pids
-        if [ "$alive" = no ]; then
-            echo "rawplay.sh: buttons did not come back, starting one"
-            on -d /bin/buttons -G -+events >/dev/null 2>&1 &
+        if [ "$alive" = no ] && buttons_live; then
+            alive=yes      # the last start's confirmation
         fi
+        rm -f /tmp/buttons.pids
+        [ "$alive" = yes ] || echo "rawplay.sh: buttons is still missing, the panel is deaf"
     fi
     if [ -n "$HMI_PID" ]; then
         kill -CONT "$HMI_PID" 2>/dev/null

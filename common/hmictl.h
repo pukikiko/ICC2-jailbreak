@@ -38,10 +38,11 @@ int run_command(const char *cmd);
  * the frames queued in the ipc driver for the old connection, so the hmi only ever sees the
  * newest state. every stop and kill is by the pid slay -p listed, never by name: a
  * name-based slay scanning /proc can catch ham's fresh respawn before it registers its
- * CONDDEATH, and then nothing ever restarts it and the panel is deaf in the hmi. when ham
- * does not bring one back anyway, resume starts one itself. pause() returns 1 when it did
- * the pause, so nested callers (the menu inside the launcher) do not resume what the outer
- * session still holds.
+ * CONDDEATH, and then nothing ever restarts it and the panel is deaf in the hmi. for the
+ * same reason resume treats a single pid sighting as unproven: it confirms the respawn
+ * survives a settle and starts one itself when ham does not bring one back. pause() returns
+ * 1 when it did the pause, so nested callers (the menu inside the launcher) do not resume
+ * what the outer session still holds.
  */
 int hmi_events_pause(void);
 void hmi_events_resume(void);

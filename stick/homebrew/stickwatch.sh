@@ -73,6 +73,67 @@ launcher_alive() {
     [ -n "$lpid" ] && kill -0 "$lpid" 2>/dev/null
 }
 
+# ---------------------------------------------------------------- buttons watchdog ---
+# ham guards the stock buttons service (CONDDEATH + restart) and normally has a clean one
+# running within milliseconds of a kill. a respawn that dies in the window before it
+# registers its CONDDEATH raises nothing, no restart ever follows, and the panel is left
+# with no buttons for good (found in the emulator by hammering the session kill: ham
+# printed "Restarted", the new pid was gone a second later and never came back; see
+# common/hmictl.c). start one when that has happened - but only when nobody else can be
+# handling it: a homebrew session with the hmi stopped owns buttons through the pause
+# marker, and ham's respawn must have had time ($BSTALE checks) before it counts missing.
+PAUSEMARK=/tmp/buttons-paused
+BPIDS=/tmp/buttons.pids
+HMIMARK=/tmp/hmi-overlay.loaded
+HMISTOP=/tmp/hmi-stopped
+BSTALE=3
+
+hmi_is_up() {
+    # only the overlay marker names the hmi for sure; without it nothing here can tell
+    # whether the pid is a hmi, so leave buttons alone (boot.sh's hmiShow path covers the
+    # no-shim case)
+    [ -e "$HMISTOP" ] && return 1
+    hp=$(cat "$HMIMARK" 2>/dev/null)
+    [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null
+}
+
+resume_stale_pause() {
+    # a session that died before its resume leaves the pause marker with its owner gone and
+    # the buttons it stopped still frozen: the panel would stay deaf until the next session.
+    # homebrew is not running (its owner is dead) and hmi_is_up() already held. no rm on the
+    # unit, so the marker is truncated: empty means stale to the c code as well.
+    po=$(cat "$PAUSEMARK" 2>/dev/null)
+    [ -n "$po" ] || return 0
+    kill -0 "$po" 2>/dev/null && return 0
+    log "stale buttons pause (owner $po gone), resuming buttons"
+    : > "$PAUSEMARK"
+    # kill only recorded pids that are still buttons: one whose pid was reused after the
+    # death of the frozen process must not be taken down with it
+    if [ -s "$BPIDS" ]; then
+        cur=" $(echo $(slay -p buttons 2>/dev/null)) "
+        for p in $(cat "$BPIDS" 2>/dev/null); do
+            case "$cur" in
+            *" $p "*) kill -9 "$p" 2>/dev/null ;;
+            esac
+        done
+    fi
+}
+
+buttons_watch() {
+    # caller checked hmi_is_up
+    resume_stale_pause
+    if [ -n "$(slay -p buttons 2>/dev/null)" ]; then
+        bmisses=0
+    else
+        bmisses=$((bmisses + 1))
+        if [ $bmisses -ge $BSTALE ]; then
+            log "buttons missing for $bmisses checks, starting one"
+            on -d /bin/buttons -G -+events >/dev/null 2>&1 &
+            bmisses=0
+        fi
+    fi
+}
+
 restart_launcher() {
     log "launcher is not running, restarting it"
     slay -f launcher 2>/dev/null
@@ -87,6 +148,7 @@ restart_launcher() {
 
 log "start, probing $PROBE every ${INTERVAL}s"
 misses=0
+bmisses=0
 while :; do
     if probe; then
         misses=0
@@ -104,6 +166,11 @@ while :; do
     fi
     if ! launcher_alive; then
         restart_launcher
+    fi
+    if hmi_is_up; then
+        buttons_watch
+    else
+        bmisses=0
     fi
     sleep $INTERVAL
 done

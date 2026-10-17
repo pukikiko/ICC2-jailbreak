@@ -257,12 +257,15 @@ sample (displayed frames only). At 30 fps it costs 240 B/s.
   kill names the pids a `slay -p buttons` listed, never the process name: a name-based slay
   scans `/proc` and can catch the fresh `ham` respawn before it has registered, after which
   nothing restarts it and the panel stays deaf in the HMI (no source, no power, no volume
-  knob) even though homebrew still sees it. After the kill, the resume checks that a
-  `buttons` is running and starts one itself when `ham` did not. The resumed HMI only ever
-  sees the current panel state. The one exception is a climate window: `buttons` is
-  restarted for it (SIGKILL by pid and a fresh `ham` process, so the queued backlog dies
-  with the old connection, not a SIGCONT that would replay it) and SIGSTOPped again when it
-  closes, still under the session's pause marker, so the session resume kills it as usual.
+  knob) even though homebrew still sees it. A pid alone is not proof of life even when it is
+  killed by pid - a respawn can die in that registration window too - so after the kill the
+  resume confirms the process survives a settle and starts one itself when nothing does, the
+  same three-round way `common/hmictl.c` does (and `stickwatch.sh` from outside a session).
+  The resumed HMI only ever sees the current panel state. The one exception is a climate
+  window: `buttons` is restarted for it (SIGKILL by pid and a fresh `ham` process, so the
+  queued backlog dies with the old connection, not a SIGCONT that would replay it) and
+  SIGSTOPped again when it closes, still under the session's pause marker, so the session
+  resume kills it as usual.
 
 ### 2.4 Host: `rawplay/rawlink`
 

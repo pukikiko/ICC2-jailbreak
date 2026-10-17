@@ -69,8 +69,10 @@ the stick scripts live here too:
 - `stick/homebrew/boot.sh` - the stick side of the hook: starts the hmi with the overlay,
   stops the stock touch connector, starts the launcher and `stickwatch.sh`.
 - `stick/homebrew/stickwatch.sh` - keeps the stick mounted across a car sleep/wake (the
-  stock media restart unmounts it), restarts the launcher if a wake killed it, and flushes
-  `/tmp/jailbreak.log` back to the stick.
+  stock media restart unmounts it), restarts the launcher if a wake killed it, flushes
+  `/tmp/jailbreak.log` back to the stick, and watches the stock `buttons` service: it starts
+  one when it has gone missing while the hmi is up and no homebrew session owns the panel,
+  and resumes a pause marker whose owner died.
 - `stick/homebrew/apps.txt` - one `label|command` per menu row.
 - `stick/homebrew/buttons.txt` - `name|command` for the CarPlay/Apps plates.
 
