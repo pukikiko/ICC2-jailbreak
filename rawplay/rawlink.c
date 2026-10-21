@@ -2198,6 +2198,12 @@ static int gadget_setup(struct gadget *g, int dry)
         tlogf("usbgadget: mkdir %s: %s", g->ffs, strerror(errno));
         return -1;
     }
+    /* a hard kill can leave functionfs mounted with the old gadget torn down. rawlink-wait
+     * usually clears it, but a restart path that does not (systemd's kill timeout, a test
+     * run) then loops forever on EBUSY and the unit never sees the vendor interface. detach
+     * a stale mount here as well; a live instance's endpoints are already gone because its
+     * configfs function was removed above. */
+    umount2(g->ffs, MNT_DETACH);
     if (mount(g->name, g->ffs, "functionfs", 0, NULL) < 0) {
         tlogf("usbgadget: mount functionfs on %s: %s", g->ffs, strerror(errno));
         return -1;
@@ -2238,6 +2244,13 @@ static int gadget_bind(struct gadget *g)
 static void log_li_chunk(const unsigned char *data, size_t len)
 {
     static const int n_of[8] = { 0, 8, 4, 5, 7, 3, 3, 4 };
+    /* a finger reports a sample every millisecond while it is down. the journal is the
+     * appliance's only log and systemd keeps 16 MiB of it, so logging every sample turns a
+     * touch into tens of thousands of journal writes and can keep journald busy for the
+     * whole drive: edge log one line, and at most one move line a second. livi-link-monitor
+     * only needs a line to know the link is connected, and the 5 s stats line covers idle. */
+    static unsigned last_touch_log;
+    static int last_touch_down = -1;
     size_t off = 0;
 
     while (off + 3 <= len && data[off] == 'L' && data[off + 1] == 'I') {
@@ -2250,8 +2263,14 @@ static void log_li_chunk(const unsigned char *data, size_t len)
         if (t == LI_TOUCH) {
             unsigned x = (unsigned)data[off + 3] | (unsigned)data[off + 4] << 8;
             unsigned y = (unsigned)data[off + 5] | (unsigned)data[off + 6] << 8;
+            int down = data[off + 7] != 0;
+            unsigned now = now_ms();
 
-            tlogf("usbgadget: unit touch %u,%u %s", x, y, data[off + 7] ? "down" : "up");
+            if (down != last_touch_down || now - last_touch_log >= 1000) {
+                tlogf("usbgadget: unit touch %u,%u %s", x, y, down ? "down" : "up");
+                last_touch_down = down;
+                last_touch_log = now;
+            }
         } else if (t == LI_KNOB) {
             tlogf("usbgadget: unit knob %d",
                   data[off + 3] > 127 ? (int)data[off + 3] - 256 : (int)data[off + 3]);
