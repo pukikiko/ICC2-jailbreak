@@ -170,7 +170,9 @@ def main():
         results.append(('the ram copies are complete', copies == 'checked'))
         down = collect(g, 'test -e /tmp/stick-down && echo set || echo clear')
         results.append(('stickwatch says the stick is up', down == 'clear'))
-        cached = collect(g, 'find /tmp -name "hmiovl-*.ok"')
+        # /tmp is a symlink to /dev/shmem and qnx's find does not follow it; the shell
+        # glob below resolves the path directly
+        cached = collect(g, 'ls /tmp/hmiovl-*.ok 2>/dev/null')
         results.append(('the overlay cached an opened frame in ram', 'hmiovl-' in (cached or '')))
         run(g, 'rm -f /tmp/hmi-stopped /tmp/buttons-paused')
 
