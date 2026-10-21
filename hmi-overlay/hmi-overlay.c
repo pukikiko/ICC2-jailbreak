@@ -128,13 +128,13 @@ static int is_hmi(const char *path)
     return path && strncmp(path, HMI_PREFIX, PREFIX_LEN) == 0;
 }
 
-/* qnx's /tmp is /dev/shmem and has no subdirectories, so the cache is a flat file per
- * asset: a hash of the path plus the original suffix, under /tmp. copy one overlay file
- * that was just found on the stick there, so a mount drop after it was loaded cannot take
- * it away again. the cache is written under a per-process temp name and renamed into
- * place, so a reader never sees a half file; the lock serialises copies inside one process
- * (the hmi opens assets from several threads). failure is not fatal: the caller keeps the
- * stick path. */
+/* qnx's /tmp is /dev/shmem and has no subdirectories, hard links or rename (all return
+ * EXDEV), so the cache is a flat file per asset: a hash of the path plus the original
+ * suffix, under /tmp, published by an empty .ok sidecar once the copy is complete. copy one
+ * overlay file that was just found on the stick there, so a mount drop after it was loaded
+ * cannot take it away again. a .lock elects one writer across processes; inside one process
+ * the lock serialises the copies (the hmi opens assets from several threads). failure is
+ * not fatal: the caller keeps the stick path. */
 #define CACHE_PREFIX "/tmp/hmiovl"
 static volatile int cache_lock;
 
@@ -215,8 +215,8 @@ static int cache_file(const char *src, const char *rel, char *dst, size_t n)
     }
     /* an exclusive lock file elects one writer. shmem has no directories, hard links or
      * rename (all return EXDEV), so the .ok sidecar is the publish step: a reader only
-     * trusts the cached file after it exists complete. a stale lock from a crashed process
-     * is left alone; that asset simply keeps coming from the stick. */
+     * trusts the cached file after it exists complete. a lock whose pid is gone is taken
+     * over; a live owner means another process is copying this asset right now. */
     lock = real_open(lockpath, O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (lock < 0 && stale_lock(lockpath)) {
         lock = real_open(lockpath, O_WRONLY | O_CREAT | O_EXCL, 0644);
