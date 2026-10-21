@@ -170,6 +170,8 @@ def main():
         results.append(('the ram copies are complete', copies == 'checked'))
         down = collect(g, 'test -e /tmp/stick-down && echo set || echo clear')
         results.append(('stickwatch says the stick is up', down == 'clear'))
+        cached = collect(g, 'find /tmp -name "hmiovl-*.ok"')
+        results.append(('the overlay cached an opened frame in ram', 'hmiovl-' in (cached or '')))
         run(g, 'rm -f /tmp/hmi-stopped /tmp/buttons-paused')
 
         print('\n=== B: stillborn respawn, stickwatch restarts it')
