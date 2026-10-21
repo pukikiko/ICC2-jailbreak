@@ -19,14 +19,37 @@
 
 STICK=/fs/usb0
 PROBE="$STICK/homebrew/buttons.txt"
+# read by hmi-overlay: while this exists, do not touch the stick root for theme assets.
+# a dead devb-umass read can sit in a 30 s timeout; skipping it keeps the hmi responsive
+# while stickwatch rebuilds the mount. missing means "try the stick" (old sticks/startup).
+DOWNMARK=/tmp/stick-down
 RAMLOG=/tmp/jailbreak.log
 SELFLOG=/tmp/stickwatch.log
 PIDFILE=/tmp/stickwatch.pid
-INTERVAL=5
-STALE=3
+INTERVAL=2
+STALE=2
+# the unit's /tmp is a ram disk. a car can run for days with the stick read-only, and
+# hmi-overlay logs every theme asset while the hmi starts and redraws; keep the three
+# files that can grow without a writer-side cap bounded here, so a runaway log can never
+# take the ram disk (and with it the hmi) down. jlog caps itself too; this covers the
+# hmi's own stdout/stderr redirected to the same file by boot.sh.
+CAP_KB=1024
 
 log() {
     echo "$(date +%H:%M:%S) stickwatch[$$]: $*" >> "$SELFLOG" 2>/dev/null
+}
+
+cap_log() {
+    [ -f "$1" ] || return 0
+    size=
+    for w in $(du -k "$1" 2>/dev/null); do
+        size=$w
+        break
+    done
+    if [ -n "$size" ] && [ "$size" -gt "$CAP_KB" ]; then
+        : > "$1" 2>/dev/null
+        log "truncated $1 at ${size}k"
+    fi
 }
 
 if [ -r "$PIDFILE" ]; then
@@ -46,6 +69,9 @@ probe() {
 remount() {
     log "stick not readable, remounting"
     slay -Q -f -s9 devb-umass 2>/dev/null
+    # the old driver has to be gone before the new one opens the partition; a SIGKILL
+    # returns from slay at once but the process can still be unwinding its device
+    sleep 1
     if [ ! -e /dev/io-usb/io-usb ]; then
         log "io-usb is gone, restarting it (high speed)"
         slay -Q -f -s9 io-usb_swsa 2>/dev/null
@@ -100,13 +126,12 @@ hmi_is_up() {
 resume_stale_pause() {
     # a session that died before its resume leaves the pause marker with its owner gone and
     # the buttons it stopped still frozen: the panel would stay deaf until the next session.
-    # homebrew is not running (its owner is dead) and hmi_is_up() already held. no rm on the
-    # unit, so the marker is truncated: empty means stale to the c code as well.
+    # homebrew is not running (its owner is dead) and hmi_is_up() already held.
     po=$(cat "$PAUSEMARK" 2>/dev/null)
     [ -n "$po" ] || return 0
     kill -0 "$po" 2>/dev/null && return 0
     log "stale buttons pause (owner $po gone), resuming buttons"
-    : > "$PAUSEMARK"
+    /bin/rm -f "$PAUSEMARK" 2>/dev/null
     # kill only recorded pids that are still buttons: one whose pid was reused after the
     # death of the frozen process must not be taken down with it
     if [ -s "$BPIDS" ]; then
@@ -117,6 +142,26 @@ resume_stale_pause() {
             esac
         done
     fi
+}
+
+resume_stale_hmi() {
+    # a homebrew session that is killed (a crash, `slay`, the guard's SIGKILL) never runs its
+    # resume, so the hmi stays SIGSTOPped behind /tmp/hmi-stopped and every later session
+    # sees the marker and believes the panel is already stopped: the screen is frozen until
+    # a reboot. only act when no live session owns the buttons pause; a live launcher/menu
+    # command is deliberately holding the hmi and must not be resumed underneath it.
+    [ -e "$HMISTOP" ] || return 0
+    po=$(cat "$PAUSEMARK" 2>/dev/null)
+    if [ -n "$po" ] && kill -0 "$po" 2>/dev/null; then
+        return 0
+    fi
+    log "stale hmi stop (owner ${po:-none} gone), resuming the hmi"
+    resume_stale_pause
+    hp=$(cat "$HMIMARK" 2>/dev/null)
+    if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null; then
+        kill -CONT "$hp" 2>/dev/null
+    fi
+    /bin/rm -f "$HMISTOP" 2>/dev/null
 }
 
 buttons_watch() {
@@ -149,14 +194,20 @@ restart_launcher() {
 log "start, probing $PROBE every ${INTERVAL}s"
 misses=0
 bmisses=0
+caploop=0
 while :; do
     if probe; then
         misses=0
+        /bin/rm -f "$DOWNMARK" 2>/dev/null
     else
+        # the first miss is enough to tell the shim not to walk into the dead mount; a
+        # single transient failure only costs a frame's worth of stock art, not a 30 s stall
+        : > "$DOWNMARK" 2>/dev/null
         misses=$((misses + 1))
         if [ $misses -ge $STALE ]; then
             if remount; then
                 misses=0
+                /bin/rm -f "$DOWNMARK" 2>/dev/null
             else
                 log "remount failed, will keep trying"
                 sleep 20
@@ -164,6 +215,7 @@ while :; do
             fi
         fi
     fi
+    resume_stale_hmi
     if ! launcher_alive; then
         restart_launcher
     fi
@@ -171,6 +223,16 @@ while :; do
         buttons_watch
     else
         bmisses=0
+    fi
+    # the log caps do not need a du process every probe; ten loops is 20 s, still far less
+    # than an unbounded writer needs to hurt the ram disk
+    caploop=$((caploop + 1))
+    if [ $caploop -ge 10 ]; then
+        caploop=0
+        cap_log "$RAMLOG"
+        cap_log /tmp/hmi_startup.log
+        [ -w "$STICK/homebrew" ] && cap_log "$STICK/homebrew/jailbreak.log"
+        cap_log "$SELFLOG"
     fi
     sleep $INTERVAL
 done

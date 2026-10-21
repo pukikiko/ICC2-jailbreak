@@ -50,6 +50,11 @@ FILE *fopen64(const char *path, const char *mode);
 #define OVERLAY_STICK   "/fs/usb0/hmi-overlay"
 #define OVERLAY_RAM     "/tmp/hmi-overlay"
 #define MARKER          "/tmp/hmi-overlay.loaded"
+/* stickwatch creates this the moment a probe fails and removes it once the mount is back.
+ * looking in a dead devb-umass mount can block for its 30 s timeout, which is what made the
+ * hmi feel sluggish after the car woke without the stick; while the marker is there, skip
+ * the stick root and serve the unit copy (or /tmp) immediately. */
+#define STICK_DOWN      "/tmp/stick-down"
 /* the buttons beep player carries the preload and opens this on every touch; it must not
  * be allowed to claim the marker (see marker()) */
 #define AUDIO_PREFIX    "/usr/hmi/Audio/"
@@ -59,6 +64,7 @@ static open_fn real_open;
 static fopen_fn real_fopen;
 static access_fn real_access;
 static int resolved;
+static volatile int resolving;
 
 static void resolve(void)
 {
@@ -67,30 +73,39 @@ static void resolve(void)
     if (resolved) {
         return;
     }
-    resolved = 1;
-    real_open = (open_fn)dlsym(RTLD_NEXT, "open64");
-    if (real_open == (open_fn)open64) {
-        real_open = 0;
+    /* the hmi loads several assets from more than one thread. the old code set resolved
+     * before filling the pointers, so a second thread could call a null real_open while the
+     * first was still in dlsym and the overlay looked broken for that asset. serialise the
+     * one-time lookup; every later call takes the fast path. */
+    while (__sync_lock_test_and_set(&resolving, 1)) {
     }
-    real_fopen = (fopen_fn)dlsym(RTLD_NEXT, "fopen");
-    if (real_fopen == (fopen_fn)fopen) {
-        real_fopen = 0;
-    }
-    real_access = (access_fn)dlsym(RTLD_NEXT, "access");
-    if (real_access == (access_fn)access) {
-        real_access = 0;
-    }
-    if (!real_open || !real_fopen || !real_access) {
-        h = dlopen("libc.so.3", 0);
-        if (h) {
-            if (!real_open) real_open = (open_fn)dlsym(h, "open64");
-            if (!real_fopen) real_fopen = (fopen_fn)dlsym(h, "fopen");
-            if (!real_access) real_access = (access_fn)dlsym(h, "access");
+    if (!resolved) {
+        real_open = (open_fn)dlsym(RTLD_NEXT, "open64");
+        if (real_open == (open_fn)open64) {
+            real_open = 0;
         }
-        if (!real_open) {
-            printf("hmi-overlay: no real open64, overlay disabled\n");
+        real_fopen = (fopen_fn)dlsym(RTLD_NEXT, "fopen");
+        if (real_fopen == (fopen_fn)fopen) {
+            real_fopen = 0;
         }
+        real_access = (access_fn)dlsym(RTLD_NEXT, "access");
+        if (real_access == (access_fn)access) {
+            real_access = 0;
+        }
+        if (!real_open || !real_fopen || !real_access) {
+            h = dlopen("libc.so.3", 0);
+            if (h) {
+                if (!real_open) real_open = (open_fn)dlsym(h, "open64");
+                if (!real_fopen) real_fopen = (fopen_fn)dlsym(h, "fopen");
+                if (!real_access) real_access = (access_fn)dlsym(h, "access");
+            }
+            if (!real_open) {
+                printf("hmi-overlay: no real open64, overlay disabled\n");
+            }
+        }
+        resolved = 1;
     }
+    __sync_lock_release(&resolving);
 }
 
 static const char *roots[3];
@@ -114,11 +129,12 @@ static int is_hmi(const char *path)
 }
 
 /* the first overlay root that has the file wins: $HMI_OVERLAY, the stick, then a ram one
- * (ram is where the test bench drops files; the stick is what a real unit would use) */
-static const char *overlay_path(const char *path)
+ * (ram is where the test bench drops files; the stick is what a real unit would use).
+ * the candidate is built in the caller's stack buffer, not a static one: the hmi opens
+ * assets from several threads, and a shared buffer let one thread's path be overwritten
+ * between the access() and the open() and read the wrong asset (or the unit copy). */
+static const char *overlay_path(const char *path, char *buf, size_t n)
 {
-    static char buf[512];
-
     if (!is_hmi(path)) {
         return path;
     }
@@ -127,7 +143,10 @@ static const char *overlay_path(const char *path)
         if (!roots[i]) {
             continue;
         }
-        snprintf(buf, sizeof buf, "%s/%s", roots[i], path + PREFIX_LEN);
+        if (i == 1 && real_access && real_access(STICK_DOWN, 0) == 0) {
+            continue;
+        }
+        snprintf(buf, n, "%s/%s", roots[i], path + PREFIX_LEN);
         if (real_access && real_access(buf, 0) == 0) {
             return buf;
         }
@@ -199,6 +218,7 @@ static void marker(const char *path)
 
 static int do_open(const char *path, int flags, int mode)
 {
+    char alt[512];
     const char *p;
     int fd;
 
@@ -207,7 +227,7 @@ static int do_open(const char *path, int flags, int mode)
     if (!real_open) {
         return -1;
     }
-    p = overlay_path(path);
+    p = overlay_path(path, alt, sizeof alt);
     if (is_hmi(path)) {
         marker(path);
     }
@@ -248,6 +268,7 @@ int open64(const char *path, int flags, ...)
 
 static FILE *do_fopen(const char *path, const char *mode)
 {
+    char alt[512];
     const char *p;
 
     resolve();
@@ -255,7 +276,7 @@ static FILE *do_fopen(const char *path, const char *mode)
     if (!real_fopen) {
         return 0;
     }
-    p = overlay_path(path);
+    p = overlay_path(path, alt, sizeof alt);
     if (is_hmi(path)) {
         marker(path);
     }
@@ -285,6 +306,7 @@ FILE *fopen64(const char *path, const char *mode)
 
 int access(const char *path, int mode)
 {
+    char alt[512];
     const char *p;
     int hit;
 
@@ -293,7 +315,7 @@ int access(const char *path, int mode)
     if (!real_access) {
         return -1;
     }
-    p = overlay_path(path);
+    p = overlay_path(path, alt, sizeof alt);
     hit = p != path && real_access(p, mode) == 0;
     if (is_hmi(path)) {
         marker(path);

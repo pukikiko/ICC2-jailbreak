@@ -5,7 +5,9 @@ split out. every app in this repo links the pieces it uses; the ICC2 SDK still p
 process/framebuffer/console/input code (`crt0.S`, `fb.c`, `console.c`, `font.c`, `input.c`)
 and the stub libraries.
 
-- `jlog.c/.h` - the stick debug log with the `/tmp` fallback
+- `jlog.c/.h` - the stick debug log with the `/tmp` fallback; both files are size-capped
+  (512 KiB in ram, 2 MiB on the stick) because the appliance serves the stick read-only
+  and hmi-overlay logs every asset open
 - `hmictl.c/.h` - hmi pause/resume, the buttons service, the car guard
 - `raw-usb.c/.h` - the libusbdi bulk transport rawplay uses
 - `livi-usb.c/.h` - the alternate transport with the same shape (not linked by a client yet)

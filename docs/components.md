@@ -25,7 +25,7 @@ small and `gc-sections` drops the rest.
 
 | file | what |
 |---|---|
-| `jlog.c` | one append-only debug log for the whole chain. writes `/fs/usb0/homebrew/jailbreak.log`; when the stick is gone under the fd (a car wake), it falls back to `/tmp/jailbreak.log` and retries the stick every few lines, so `stickwatch.sh` can flush it back. C lines use uptime `[seconds.ms]`. |
+| `jlog.c` | one append-only debug log for the whole chain. writes `/fs/usb0/homebrew/jailbreak.log`; when the stick is gone under the fd (a car wake) or read-only (the appliance), it falls back to `/tmp/jailbreak.log` and retries the stick every few lines, so `stickwatch.sh` can flush it back. both files are capped (512 KiB in ram, 2 MiB on the stick) and truncate in place with a marker when full. C lines use uptime `[seconds.ms]`. |
 | `hmictl.c` | hmi session control: `hmi_signal`/pause/resume (SIGSTOP the hmi + kill/restart `buttons` so no queued events replay), the touch-connector handoff, the `/tmp/hmi-stopped` and `/tmp/buttons-paused` markers, and `run_command_guarded()` - the car guard that watches ipc for audio-off-with-ignition-off or the panel power button and closes a command's process group so the unit can sleep. |
 | `raw-usb.c` | the usb bulk transport rawplay uses: attaches the composite gadget's vendor interface through `libusbdi`, keeps an urb ring, handles the max-packet alignment and the direct-dma/staging paths. |
 | `livi-usb.c` | the alternate transport with the same read/write shape (the one that includes real libc headers and builds against the ffmpeg shim). not linked by a client yet; `make` compiles it as a check. |
@@ -37,7 +37,7 @@ small and `gc-sections` drops the rest.
 
 | file | what |
 |---|---|
-| `hmi_startup.sh` | **the only file that goes on the unit.** pkgstart sources it in place of the hmi's startup. it restarts `io-usb_swsa` without `force_fs` (high speed), mounts the stick at `/fs/usb0`, runs `homebrew/boot.sh` when present, and reports "Jailbreak successful!" / "Jailbreak failed. \<reason\>" on the hmi's progress lines. it never needs a rewrite. |
+| `hmi_startup.sh` | **the only file that goes on the unit.** pkgstart sources it in place of the hmi's startup. it keeps a healthy `io-usb_swsa` instead of killing it (a restart wakes `aviage_monitor`, which then tears the mount down under the hmi), restarts it without `force_fs` (high speed) only when needed, waits for the mount to survive three probes, copies `homebrew/boot.sh` to ram before sourcing it (a mount drop mid-script used to hand qnx's shell a truncated file and a syntax error), and reports "Jailbreak successful!" / "Jailbreak failed. \<reason\>" on the hmi's progress lines. |
 | `mkhookblob.py` | bakes the hook into `out/hookblob.h` at build time, byte for byte, so the syncsploit ui can compare and install it with no stick file involved. |
 
 ## launcher/
@@ -54,7 +54,10 @@ the screen; `hmi-overlay.loaded` names the hmi process to stop/resume.
 `/usr/hmi/<asset>` opens to `$HMI_OVERLAY`, then `/fs/usb0/hmi-overlay`, then
 `/tmp/hmi-overlay`, falling back to the unit's own file; it never claims the
 `/tmp/hmi-overlay.loaded` marker from a live unrelated process, and ignores
-`/usr/hmi/Audio/`. `mkhmiassets.py` bakes the two button plates into copies of the hmi's
+`/usr/hmi/Audio/`. while `/tmp/stick-down` exists (stickwatch set it on the first failed
+probe) the shim skips the stick root entirely, so a dead devb-umass mount cannot stall an
+asset open for its 30 s timeout. the path buffer is per call and the dlsym lookup is
+serialised, because the hmi opens assets from several threads. `mkhmiassets.py` bakes the two button plates into copies of the hmi's
 theme frames (all three themes, day/night, every frame the hmi draws) into `usb/hmi-overlay/`;
 `mkusb.py` runs it.
 
@@ -66,13 +69,17 @@ page with scrollbar, and a "back" tab that restores and resumes the hmi. it stop
 itself when launched by hand, saves/restores the frozen frame, and guards each app it runs.
 the stick scripts live here too:
 
-- `stick/homebrew/boot.sh` - the stick side of the hook: starts the hmi with the overlay,
-  stops the stock touch connector, starts the launcher and `stickwatch.sh`.
+- `stick/homebrew/boot.sh` - the stick side of the hook: copies the shim, launcher,
+  `buttons.txt` and `stickwatch.sh` to ram, starts the watchdog and waits for a stable
+  mount before starting the hmi with the overlay; then stops the stock touch connector and
+  starts the launcher. the early copies and stable wait are what keep a media-stack restart
+  from taking the overlay and launcher with it.
 - `stick/homebrew/stickwatch.sh` - keeps the stick mounted across a car sleep/wake (the
   stock media restart unmounts it), restarts the launcher if a wake killed it, flushes
-  `/tmp/jailbreak.log` back to the stick, and watches the stock `buttons` service: it starts
-  one when it has gone missing while the hmi is up and no homebrew session owns the panel,
-  and resumes a pause marker whose owner died.
+  `/tmp/jailbreak.log` back to the stick, caps the ram logs, and watches the stock `buttons`
+  service: it starts one when it has gone missing while the hmi is up and no homebrew session
+  owns the panel, resumes a pause marker whose owner died, and resumes the hmi when a session
+  died leaving `/tmp/hmi-stopped` behind with no live pause owner.
 - `stick/homebrew/apps.txt` - one `label|command` per menu row.
 - `stick/homebrew/buttons.txt` - `name|command` for the CarPlay/Apps plates.
 

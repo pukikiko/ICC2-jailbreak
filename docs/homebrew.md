@@ -59,6 +59,14 @@ output: the tracked base in `stick/` plus the built programs, copied and baked b
     usb/homebrew/apps/       the built apps: doom, fbdemo, rawplay, buswatch, iccbuttons, mediaplayer, terminal
                              and the scripts rawplay.sh, mediaplayer.sh, usbhs.sh
 
+the appliance serves this tree read-only, and the stock media stack can restart
+`io-usb_swsa`/`devb-umass` on its own schedule. `boot.sh` therefore copies the small pieces
+the hmi start needs into `/tmp` *before* starting it (the shim, launcher, `buttons.txt` and
+`stickwatch.sh`), starts `stickwatch.sh` before the hmi, and waits for three good stick
+probes before handing over. that stops a restart during startup from leaving a zero-byte
+launcher, no watchdog, and an overlay that missed every theme frame; all of those were seen
+on the real appliance in the emulator.
+
 `apps.txt` is plain text, add a line to add an app. the menu runs the command with the shell
 and comes back when it ends. the launcher stops the hmi before the command runs and resumes it
 when it returns (the menu does the same stop itself when run by hand), so the app owns the
@@ -107,18 +115,20 @@ the unit is already jailbroken and either writes `jailbreak/hmi_startup.sh` (emb
 the ui byte for byte) to the override slot and reboots, or gives the screen back to the hmi;
 see `syncsploit/README.md`. the factory `recore` can tool does the same write.
 
-the file itself, `jailbreak/hmi_startup.sh`, never needs a rewrite; it remounts the stick
-the way `startsys.sh` does, hands over to `boot.sh` when it is there, and reports either
-outcome on the hmi's progress lines:
+the file itself, `jailbreak/hmi_startup.sh`, is stable but has been revised: it keeps a
+healthy `io-usb_swsa` instead of killing it (a kill wakes `aviage_monitor`, which then
+restarts the stack and drops the mount under the hmi), waits for the mount to survive three
+probes before handing over, and reports the outcome on the hmi's progress lines:
 
-    slay -Q -f -s9 devb-umass io-usb_swsa 2>/dev/null
-    io-usb_swsa ... &
+    slay -Q -f -s9 devb-umass 2>/dev/null     # only if the mount is gone
+    [ io-usb already running? keep it : restart it without force_fs ]
     waitfor /dev/io-usb/io-usb 10
     devb-umass cam pnp ... automount=hd0@dos:/fs/usb0,rw dos exe=all
-    waitfor /fs/usb0 8            # retried while the media restarts race this
+    waitfor /fs/usb0 8            # + three readable probes before boot.sh
 
     if [ -x /fs/usb0/homebrew/boot.sh ]; then
-        . /fs/usb0/homebrew/boot.sh
+        cat /fs/usb0/homebrew/boot.sh > /tmp/homebrew-boot.sh   # run from ram
+        . /tmp/homebrew-boot.sh
         hmiShow "Jailbreak successful!"
     else
         . /scripts/hmi/startup.sh "$1"
@@ -136,13 +146,16 @@ that wakes from standby does not boot: the stock media stack (`aviage_monitor` -
 `/scripts/media_player/startup.sh usb_restart`) slays `devb-umass` and restarts `io-usb_swsa`
 with `force_fs`, which drops `/fs/usb0` and leaves the footer buttons dead even though the hmi
 keeps painting the overlaid plates. `usb/homebrew/stickwatch.sh`, started from ram by
-`boot.sh`, probes a file on the stick every few seconds and rebuilds the mount the way the
-hook does (no `force_fs`, so the port stays at high speed), restarts the launcher if it died,
-and flushes `/tmp/jailbreak.log` into the stick's log once the mount is back. it also watches
-the stock `buttons` service: with no homebrew session owning the panel and the hmi up, a
-`buttons` that has been missing for three probes gets a fresh one started, and a pause marker
-whose owner died is resumed the same way the session resume would - see "the car takes the
-panel back" below.
+`boot.sh` before the hmi, probes a file on the stick every two seconds and rebuilds the
+mount the way the hook does (no `force_fs`, so the port stays at high speed), restarts the
+launcher if it died, and flushes `/tmp/jailbreak.log` into the stick's log once the mount is
+back. it also watches the stock `buttons` service: with no homebrew session owning the panel
+and the hmi up, a `buttons` that has been missing for two probes gets a fresh one started,
+and a pause marker whose owner died is resumed the same way the session resume would. a
+session that was killed before it could resume leaves `/tmp/hmi-stopped` behind (a crashed
+menu, a `slay`, the car guard's SIGKILL); when the buttons pause owner is gone too,
+stickwatch clears the marker and SIGCONTs the hmi, so the panel does not stay frozen until
+the next reboot - see "the car takes the panel back" below.
 
 ### the car takes the panel back
 
@@ -212,6 +225,19 @@ who writes what:
 `jlog` (the C side) keeps its log on the stick while it can. when the stick goes away under
 the open fd it falls back to `/tmp/jailbreak.log` and retries the stick every few lines, so a
 wake's `launcher`/`hmi` lines survive until `stickwatch.sh` flushes them into the stick log.
+
+the `/tmp` side is a ram disk, so every writer is bounded: `jlog` truncates its file at
+512 KiB (2 MiB on a writable stick) and leaves a `[jlog: log capped...]` line, and
+`stickwatch.sh` caps `/tmp/jailbreak.log`, `/tmp/hmi_startup.log` and its own log at 1 MiB.
+without that, a stick that is read-only (the appliance always serves it that way) sends every
+hmi-overlay asset line to ram, and a car left running for a day fills `/tmp` and takes the hmi
+down with it.
+
+`stickwatch.sh` also drops `/tmp/stick-down` on the first failed probe and removes it when
+the mount is back. both `hmi-overlay` and `jlog` check it, so while the stick is away they
+serve the unit copy / log from ram instead of walking into a devb-umass read that can sit in
+its 30 s timeout - that timeout was the difference between a missing theme frame and an hmi
+that felt frozen until the mount came back.
 
 the shim's per-asset lines are the point of it: if the plates never appear on a unit, the log
 says whether the shim loaded, which asset paths the hmi actually opened (a different theme or

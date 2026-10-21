@@ -5,20 +5,22 @@
 # whether that worked. everything else (the launcher, its buttons, the apps) lives on the
 # stick under /fs/usb0/homebrew/. see docs/homebrew.md.
 BOOT=/fs/usb0/homebrew/boot.sh
+BOOT_RAM=/tmp/homebrew-boot.sh
 LOG=/fs/usb0/homebrew/jailbreak.log
 TMPLOG=/tmp/hmi_startup.log
 STICK_LOG=
 
 # every step of the jailbreak goes to the stick's log so a unit with no console can be
 # debugged by pulling the stick and reading it on a pc. until the stick is mounted lines go
-# to /tmp; the first line that reaches the stick flushes what went to /tmp first, so the log
-# still reads in order.
+# to /tmp; the first line that reaches a *writable* stick flushes what went to /tmp first, so
+# the log still reads in order. the appliance serves the stick read-only, so testing for a
+# directory and appending anyway only produced an iosetup error per line on the console and
+# left /tmp carrying the whole log; -w is the mount-aware test qnx needs here.
 log() {
     line="$(date +%H:%M:%S) hmi_startup[$$]: $*"
-    if [ -d /fs/usb0/homebrew ]; then
+    if [ ! -e /tmp/stick-down ] && [ -w /fs/usb0/homebrew ]; then
         if [ -z "$STICK_LOG" ] && [ -s "$TMPLOG" ]; then
-            # only clear /tmp once the lines are really on the stick: with a read-only stick
-            # (the emulator) the cat fails and the lines have to stay where they are
+            # only clear /tmp once the lines are really on the stick
             cat "$TMPLOG" >> "$LOG" 2>/dev/null && : > "$TMPLOG"
         fi
         STICK_LOG=1
@@ -40,18 +42,35 @@ i=0
 while [ $i -lt 3 ]
 do
     log "mount attempt $((i + 1)): restarting devb-umass and io-usb_swsa"
+    # first try with the io-usb that is already running. killing a healthy one wakes
+    # aviage_monitor, which restarts the whole usb stack right as the hmi starts and drops
+    # the mount we just made (the hmi then paints stock art and boot.sh's /tmp copies fail).
+    # a later attempt still forces a restart if keeping it did not give a stable mount.
     slay -Q -f -s9 devb-umass 2>/dev/null
-    slay -Q -f -s9 io-usb_swsa 2>/dev/null
-    sleep 1
-    # no force_fs: that is what lets the usb83340 phy negotiate high speed (480 mbit), which
-    # the raw uncompressed video needs. the stock startsys.sh line (and the media player's
-    # restart.sh/usb_restart.sh) pass force_fs, so they pin the port at full speed. see
-    # rawplay/README.md and usb/homebrew/apps/usbhs.sh
-    io-usb_swsa -i20 -r3 -c -d ehci-mx31_swsa ioport=0x43f88100,irq=37,num_itd=300 &
-    if waitfor /dev/io-usb/io-usb 10; then
-        log "io-usb up"
+    if [ $i -gt 0 ] || [ -z "$(slay -p io-usb_swsa 2>/dev/null)" ]; then
+        slay -Q -f -s9 io-usb_swsa 2>/dev/null
+        sleep 1
+        # no force_fs: that is what lets the usb83340 phy negotiate high speed (480 mbit),
+        # which the raw uncompressed video needs. the stock startsys.sh line (and the media
+        # player's restart.sh/usb_restart.sh) pass force_fs, so they pin the port at full
+        # speed. see rawplay/README.md and usb/homebrew/apps/usbhs.sh
+        io-usb_swsa -i20 -r3 -c -d ehci-mx31_swsa ioport=0x43f88100,irq=37,num_itd=300 &
+        if waitfor /dev/io-usb/io-usb 10; then
+            log "io-usb up"
+        else
+            log "io-usb did not come up in 10s"
+        fi
+        # the monitor can have decided to restart io-usb before it saw this one; mounting
+        # on an instance that is about to be killed only throws the mount away. let that
+        # restart land, then mount on whatever is still standing.
+        sleep 2
+        if [ -z "$(slay -p io-usb_swsa 2>/dev/null)" ]; then
+            log "io-usb was restarted again under us, retrying"
+            i=$((i + 1))
+            continue
+        fi
     else
-        log "io-usb did not come up in 10s"
+        log "io-usb already running, keeping it"
     fi
     devb-umass cam pnp blk cache=2m,auto=partition,automount=hd0@dos:/fs/usb0,rw dos exe=all
     if waitfor /fs/usb0 8; then
@@ -59,8 +78,21 @@ do
     else
         log "/fs/usb0 did not mount in 8s"
     fi
-    [ -x "$BOOT" ] && break
-    log "no executable $BOOT yet (attempt $((i + 1)) of 3)"
+    # the mount can be torn down after waitfor returns (the same media restart). only hand
+    # over when boot.sh has been readable for three probes a second apart, so the hmi start
+    # is not racing the next teardown.
+    stable=0
+    while [ $stable -lt 3 ]; do
+        if read line < "$BOOT" 2>/dev/null; then
+            stable=$((stable + 1))
+        else
+            stable=0
+            break
+        fi
+        sleep 1
+    done
+    [ $stable -ge 3 ] && [ -x "$BOOT" ] && break
+    log "no stable executable $BOOT yet (attempt $((i + 1)) of 3)"
     i=$((i + 1))
 done
 
@@ -91,6 +123,17 @@ notify() {
 }
 
 if [ -x "$BOOT" ]; then
+    # run boot.sh from ram, not from the stick. qnx's shell reads a script as it executes it,
+    # and a mass-storage drop in the middle of that read hands it a truncated file (seen in
+    # the emulator as "syntax error: if unmatched" at boot.sh[107]) even though the mount
+    # probe passed a moment earlier. the copy is one small read while the mount is stable;
+    # after that the script, and everything it starts, no longer depends on the stick.
+    if cat "$BOOT" > "$BOOT_RAM" 2>/dev/null && chmod 755 "$BOOT_RAM" 2>/dev/null; then
+        BOOT=$BOOT_RAM
+        log "boot.sh copied to $BOOT_RAM"
+    else
+        log "could not copy boot.sh to ram, running it from the stick"
+    fi
     echo "homebrew: jailbreak: running $BOOT"
     log "running $BOOT"
     . "$BOOT"
