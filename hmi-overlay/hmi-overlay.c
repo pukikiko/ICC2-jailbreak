@@ -128,6 +128,159 @@ static int is_hmi(const char *path)
     return path && strncmp(path, HMI_PREFIX, PREFIX_LEN) == 0;
 }
 
+/* qnx's /tmp is /dev/shmem and has no subdirectories, so the cache is a flat file per
+ * asset: a hash of the path plus the original suffix, under /tmp. copy one overlay file
+ * that was just found on the stick there, so a mount drop after it was loaded cannot take
+ * it away again. the cache is written under a per-process temp name and renamed into
+ * place, so a reader never sees a half file; the lock serialises copies inside one process
+ * (the hmi opens assets from several threads). failure is not fatal: the caller keeps the
+ * stick path. */
+#define CACHE_PREFIX "/tmp/hmiovl"
+static volatile int cache_lock;
+
+static unsigned path_hash(const char *s)
+{
+    unsigned h = 2166136261u;
+
+    while (*s) {
+        h ^= (unsigned char)*s++;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static int cache_name(const char *rel, char *dst, size_t n)
+{
+    const char *dot = 0, *p;
+    char ext[8] = "";
+    int len;
+
+    for (p = rel; *p; p++) {
+        if (*p == '.') {
+            dot = p;
+        }
+    }
+    if (dot && strlen(dot) < sizeof ext) {
+        snprintf(ext, sizeof ext, "%s", dot);
+    }
+    len = snprintf(dst, n, "%s-%08x%s", CACHE_PREFIX, path_hash(rel), ext);
+    return (len < 0 || (size_t)len >= n) ? -1 : 0;
+}
+
+/* a crashed writer leaves the .lock behind; it carries its pid, so a later process can
+ * tell a dead owner from a live one and take the lock over. */
+static int stale_lock(const char *path)
+{
+    char line[24];
+    int fd, n, pid = 0;
+
+    fd = real_open(path, O_RDONLY);
+    if (fd < 0) {
+        return 0;
+    }
+    n = (int)read(fd, line, sizeof line - 1);
+    close(fd);
+    if (n <= 0) {
+        return 0;
+    }
+    line[n] = 0;
+    pid = (int)strtol(line, 0, 10);
+    if (pid > 0 && kill(pid, 0) < 0) {
+        unlink(path);
+        return 1;
+    }
+    return 0;
+}
+
+static int cache_file(const char *src, const char *rel, char *dst, size_t n)
+{
+    char okpath[80], lockpath[80], pidbuf[16];
+    unsigned char copybuf[4096];
+    int in = -1, out = -1, lock = -1, ok = -1, plen;
+    ssize_t got;
+
+    if (!real_open || !real_access || cache_name(rel, dst, n) < 0) {
+        return -1;
+    }
+    snprintf(okpath, sizeof okpath, "%s.ok", dst);
+    snprintf(lockpath, sizeof lockpath, "%s.lock", dst);
+    if (real_access(okpath, 0) == 0 && real_access(dst, 0) == 0) {
+        return 0;
+    }
+    while (__sync_lock_test_and_set(&cache_lock, 1)) {
+    }
+    if (real_access(okpath, 0) == 0 && real_access(dst, 0) == 0) {
+        __sync_lock_release(&cache_lock);
+        return 0;
+    }
+    /* an exclusive lock file elects one writer. shmem has no directories, hard links or
+     * rename (all return EXDEV), so the .ok sidecar is the publish step: a reader only
+     * trusts the cached file after it exists complete. a stale lock from a crashed process
+     * is left alone; that asset simply keeps coming from the stick. */
+    lock = real_open(lockpath, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (lock < 0 && stale_lock(lockpath)) {
+        lock = real_open(lockpath, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    }
+    if (lock < 0) {
+        __sync_lock_release(&cache_lock);
+        return -1;
+    }
+    plen = snprintf(pidbuf, sizeof pidbuf, "%d\n", (int)getpid());
+    if (plen > 0) {
+        (void)!write(lock, pidbuf, (size_t)plen);
+    }
+    in = real_open(src, O_RDONLY);
+    if (in >= 0) {
+        out = real_open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    }
+    if (out >= 0) {
+        ok = 0;
+        while ((got = read(in, copybuf, sizeof copybuf)) > 0) {
+            ssize_t off = 0;
+
+            while (off < got) {
+                ssize_t w = write(out, copybuf + off, (size_t)(got - off));
+
+                if (w <= 0) {
+                    ok = -1;
+                    break;
+                }
+                off += w;
+            }
+            if (ok < 0) {
+                break;
+            }
+        }
+        if (got < 0) {
+            ok = -1;
+        }
+        close(out);
+        out = -1;
+        if (ok == 0) {
+            out = real_open(okpath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (out >= 0) {
+                close(out);
+                out = -1;
+            } else {
+                ok = -1;
+            }
+        }
+        if (ok < 0) {
+            unlink(dst);
+        }
+    }
+    if (out >= 0) {
+        close(out);
+    }
+    if (in >= 0) {
+        close(in);
+    }
+    close(lock);
+    unlink(lockpath);
+    __sync_lock_release(&cache_lock);
+    return ok;
+}
+
 /* the first overlay root that has the file wins: $HMI_OVERLAY, the stick, then a ram one
  * (ram is where the test bench drops files; the stick is what a real unit would use).
  * the candidate is built in the caller's stack buffer, not a static one: the hmi opens
@@ -148,6 +301,14 @@ static const char *overlay_path(const char *path, char *buf, size_t n)
         }
         snprintf(buf, n, "%s/%s", roots[i], path + PREFIX_LEN);
         if (real_access && real_access(buf, 0) == 0) {
+            if (i == 1) {
+                char cached[512];
+
+                if (cache_file(buf, path + PREFIX_LEN, cached, sizeof cached) == 0) {
+                    snprintf(buf, n, "%s", cached);
+                    return buf;
+                }
+            }
             return buf;
         }
     }

@@ -56,7 +56,10 @@ the screen; `hmi-overlay.loaded` names the hmi process to stop/resume.
 `/tmp/hmi-overlay.loaded` marker from a live unrelated process, and ignores
 `/usr/hmi/Audio/`. while `/tmp/stick-down` exists (stickwatch set it on the first failed
 probe) the shim skips the stick root entirely, so a dead devb-umass mount cannot stall an
-asset open for its 30 s timeout. the path buffer is per call and the dlsym lookup is
+asset open for its 30 s timeout. every overlay file the hmi actually opens from the stick is
+copied once to a flat `/tmp/hmiovl-<hash>.<ext>` cache (qnx's shmem has no directories,
+links or rename, so a `.ok` sidecar publishes a completed copy); a mount drop after that
+keeps serving the modified frame. the path buffer is per call and the dlsym lookup is
 serialised, because the hmi opens assets from several threads. `mkhmiassets.py` bakes the two button plates into copies of the hmi's
 theme frames (all three themes, day/night, every frame the hmi draws) into `usb/hmi-overlay/`;
 `mkusb.py` runs it.

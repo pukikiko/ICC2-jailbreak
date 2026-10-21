@@ -240,6 +240,11 @@ serve the unit copy / log from ram instead of walking into a devb-umass read tha
 its 30 s timeout - that timeout was the difference between a missing theme frame and an hmi
 that felt frozen until the mount came back.
 
+the shim also keeps a flat `/tmp/hmiovl-<hash>.<ext>` copy of every overlay frame the hmi
+actually opened from the stick. qnx's shmem has no directories, hard links or rename, so the
+finished copy is published with a `.ok` sidecar. a theme frame loaded before a mount drop
+therefore keeps coming from ram after it, instead of reverting to the unit's stock art.
+
 the shim's per-asset lines are the point of it: if the plates never appear on a unit, the log
 says whether the shim loaded, which asset paths the hmi actually opened (a different theme or
 variant than expected shows up as a list of misses), and whether the overlay file was found
