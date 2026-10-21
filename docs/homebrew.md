@@ -149,7 +149,9 @@ keeps painting the overlaid plates. `usb/homebrew/stickwatch.sh`, started from r
 `boot.sh` before the hmi, probes a file on the stick every two seconds and rebuilds the
 mount the way the hook does (no `force_fs`, so the port stays at high speed), restarts the
 launcher if it died, and flushes `/tmp/jailbreak.log` into the stick's log once the mount is
-back. it also watches the stock `buttons` service: with no homebrew session owning the panel
+back. if the first remount fails it restarts `io-usb_swsa` as well, because a mass-storage
+LUN that went through a USB reset can stay wedged even though the controller node still
+exists; a full re-enumeration is what brings it back. it also watches the stock `buttons` service: with no homebrew session owning the panel
 and the hmi up, a `buttons` that has been missing for two probes gets a fresh one started,
 and a pause marker whose owner died is resumed the same way the session resume would. a
 session that was killed before it could resume leaves `/tmp/hmi-stopped` behind (a crashed

@@ -72,12 +72,17 @@ remount() {
     # the old driver has to be gone before the new one opens the partition; a SIGKILL
     # returns from slay at once but the process can still be unwinding its device
     sleep 1
-    if [ ! -e /dev/io-usb/io-usb ]; then
-        log "io-usb is gone, restarting it (high speed)"
+    # a mass-storage LUN that went through a usb reset can stay wedged even though
+    # /dev/io-usb/io-usb still exists; restarting only devb-umass then loops forever on a
+    # dead LUN. after one failed remount, restart the controller too, which re-enumerates
+    # the gadget and gives the guest mass-storage function a fresh start.
+    if [ "$force_usb" = yes ] || [ ! -e /dev/io-usb/io-usb ]; then
+        log "restarting io-usb (high speed) to reset the mass-storage link"
         slay -Q -f -s9 io-usb_swsa 2>/dev/null
         sleep 1
         io-usb_swsa -i20 -r3 -c -d ehci-mx31_swsa ioport=0x43f88100,irq=37,num_itd=300 &
         waitfor /dev/io-usb/io-usb 10
+        force_usb=no
     fi
     devb-umass cam pnp blk cache=2m,auto=partition,automount=hd0@dos:/fs/usb0,rw dos exe=all
     waitfor "$STICK" 8
@@ -88,6 +93,7 @@ remount() {
         fi
         return 0
     fi
+    force_usb=yes
     return 1
 }
 
@@ -195,6 +201,7 @@ log "start, probing $PROBE every ${INTERVAL}s"
 misses=0
 bmisses=0
 caploop=0
+force_usb=no
 while :; do
     if probe; then
         misses=0
