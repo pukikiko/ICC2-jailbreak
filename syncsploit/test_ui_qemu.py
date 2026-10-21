@@ -26,7 +26,21 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
-ICC2 = os.environ.get('ICC2_DIR') or os.path.normpath(os.path.join(REPO, '..', '..', '..', 'ICC2'))
+
+
+def find_icc2():
+    """the ICC2 checkout with the emulator, next to the repo or in ~/ICC2."""
+    for c in (os.environ.get('ICC2_DIR'),
+              os.path.join(REPO, '..', 'ICC2'),
+              os.path.join(REPO, '..', '..', 'ICC2'),
+              os.path.join(REPO, '..', '..', '..', 'ICC2'),
+              os.path.expanduser('~/ICC2')):
+        if c and os.path.isdir(os.path.join(c, 'qemu')):
+            return os.path.normpath(c)
+    return os.path.normpath(os.path.join(REPO, '..', 'ICC2'))
+
+
+ICC2 = find_icc2()
 QEMU = os.path.join(ICC2, 'qemu')
 HOOK = os.path.join(REPO, 'jailbreak', 'hmi_startup.sh')
 UI = os.path.join(REPO, 'out', 'syncsploit')

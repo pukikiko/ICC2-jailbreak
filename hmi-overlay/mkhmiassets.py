@@ -11,8 +11,22 @@ from PIL import Image, ImageDraw, ImageFont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-ICC2 = os.environ.get('ICC2_DIR') or os.path.normpath(os.path.join(ROOT, '..', '..', '..', 'ICC2'))
-DUMP = os.path.join(ICC2, 'dump')
+
+
+def find_icc2():
+    """the sibling ICC2 checkout with dump/, or None; mirrors config.mk's candidates."""
+    for c in (os.environ.get('ICC2_DIR'),
+              os.path.join(ROOT, '..', 'ICC2'),
+              os.path.join(ROOT, '..', '..', 'ICC2'),
+              os.path.join(ROOT, '..', '..', '..', 'ICC2'),
+              os.path.expanduser('~/ICC2')):
+        if c and os.path.isdir(os.path.join(c, 'dump')):
+            return os.path.normpath(c)
+    return None
+
+
+ICC2 = find_icc2()
+DUMP = os.path.join(ICC2, 'dump') if ICC2 else ''
 HMI = os.path.join(DUMP, 'packages/factory/hmi/root_dir/usr/hmi')
 OUT = os.path.join(ROOT, 'usb', 'hmi-overlay')
 FONT = os.path.join(HMI, 'Fonts/ari_____.ttf')

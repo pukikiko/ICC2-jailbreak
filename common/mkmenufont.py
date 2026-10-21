@@ -16,8 +16,23 @@ from PIL import Image, ImageDraw, ImageFont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-ICC2 = os.environ.get('ICC2_DIR') or os.path.normpath(os.path.join(ROOT, '..', '..', '..', 'ICC2'))
-DUMP_FONT = os.path.join(ICC2, 'dump', 'packages/factory/hmi/root_dir/usr/hmi/Fonts/ari_____.ttf')
+
+
+def find_icc2():
+    """the ICC2 checkout with dump/, next to the repo or in ~/ICC2."""
+    for c in (os.environ.get('ICC2_DIR'),
+              os.path.join(ROOT, '..', 'ICC2'),
+              os.path.join(ROOT, '..', '..', 'ICC2'),
+              os.path.join(ROOT, '..', '..', '..', 'ICC2'),
+              os.path.expanduser('~/ICC2')):
+        if c and os.path.isdir(os.path.join(c, 'dump')):
+            return os.path.normpath(c)
+    return None
+
+
+ICC2 = find_icc2()
+DUMP_FONT = (os.path.join(ICC2, 'dump', 'packages/factory/hmi/root_dir/usr/hmi/Fonts/ari_____.ttf')
+             if ICC2 else '')
 # Arial-metric and redistributable first, then any common free sans
 FALLBACKS = (
     '/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf',

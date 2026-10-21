@@ -48,11 +48,27 @@ def build_mtools(out):
     os.unlink(part)
 
 
+def find_icc2():
+    """the ICC2 checkout that carries dump/ and sdk/, the same candidates config.mk uses.
+
+    this used to assume the jailbreak tree sat three levels below the checkout
+    (<parent>/ICC2-jailbreak), which is not the layout next to a normal ICC2 clone; make
+    stick then silently kept no overlay and no menu art after it had already removed usb/.
+    """
+    env = os.environ.get('ICC2_DIR')
+    for c in (env, os.path.join(HERE, '..', 'ICC2'), os.path.join(HERE, '..', '..', 'ICC2'),
+              os.path.join(HERE, '..', '..', '..', 'ICC2'), os.path.expanduser('~/ICC2')):
+        if c and os.path.isdir(os.path.join(c, 'dump')):
+            return os.path.normpath(c)
+    return None
+
+
 def main():
     # the theme frames are baked from the unit's own art in the ICC2 dump; without the
     # dump, keep whatever is already in usb/ (menu.raw is optional, the menu falls back)
-    if os.path.isdir(os.path.join(os.environ.get('ICC2_DIR') or
-                                  os.path.normpath(os.path.join(HERE, '..', '..', '..', 'ICC2')), 'dump')):
+    icc2 = find_icc2()
+    if icc2:
+        os.environ['ICC2_DIR'] = icc2
         mkhmiassets.build()
         mkmenuassets.build()
     else:
