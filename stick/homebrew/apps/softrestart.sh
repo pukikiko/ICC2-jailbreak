@@ -35,7 +35,7 @@ LOGTMP=/tmp/jailbreak.log
 
 log() {
     line="$(date +%H:%M:%S) softrestart[$$]: $*"
-    if [ -d /fs/usb0/homebrew ]; then
+    if [ ! -e /tmp/stick-down ] && [ -w /fs/usb0/homebrew ]; then
         echo "$line" >> "$LOGSTICK" 2>/dev/null && return
     fi
     echo "$line" >> "$LOGTMP" 2>/dev/null
@@ -131,7 +131,7 @@ start_package media_player
 # devb-umass is a read-only one). the hmi needs the stick for its overlay, so this has to
 # happen before it starts.
 waitfor /fs/usb0 8
-if [ ! -w /fs/usb0 ]; then
+if [ -e /tmp/stick-down ] || [ ! -w /fs/usb0 ]; then
     log "the stick is not mounted read-write, remounting it the hook's way"
     slay -Q -f -s9 devb-umass 2>/dev/null
     if [ ! -e /dev/io-usb/io-usb ]; then
@@ -153,10 +153,16 @@ fi
 # not restart the package. the shim has to be readable: LD_PRELOAD with a path that is
 # not there is a loader error for the hmi (boot.sh makes the same check).
 log "starting hmi (stock startup)"
-if [ -d /fs/usb0/hmi-overlay ] && [ -r /fs/usb0/homebrew/hmi-overlay.so ]; then
+# boot.sh leaves the shim in ram; prefer it so a mount that goes away during the package
+# restart does not turn into a loader error. the stick is the fallback for a unit whose
+# boot.sh predates the ram copy.
+if [ -r /tmp/hmi-overlay.so ]; then
+    export LD_PRELOAD=/tmp/hmi-overlay.so
+elif [ ! -e /tmp/stick-down ] && [ -d /fs/usb0/hmi-overlay ] \
+     && [ -r /fs/usb0/homebrew/hmi-overlay.so ]; then
     export LD_PRELOAD=/fs/usb0/homebrew/hmi-overlay.so
-    log "hmi with LD_PRELOAD=$LD_PRELOAD"
 fi
+[ -n "$LD_PRELOAD" ] && log "hmi with LD_PRELOAD=$LD_PRELOAD"
 [ -e /scripts/hmi/startup.sh ] && . /scripts/hmi/startup.sh
 unset LD_PRELOAD
 

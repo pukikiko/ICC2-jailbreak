@@ -19,7 +19,7 @@
 
 log() {
     line="$(date +%H:%M:%S) restart[$$]: $*"
-    if [ -d /fs/usb0/homebrew ]; then
+    if [ ! -e /tmp/stick-down ] && [ -w /fs/usb0/homebrew ]; then
         echo "$line" >> /fs/usb0/homebrew/jailbreak.log 2>/dev/null && return
     fi
     echo "$line" >> /tmp/jailbreak.log 2>/dev/null
