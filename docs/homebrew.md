@@ -191,9 +191,10 @@ restart ever follows; the pid just disappears. hammering the kill in the emulato
 panel with no buttons and ham having printed its one "Restarted" line for good. the resume
 therefore does not trust a single pid sighting: it confirms the process survives a short
 settle and starts one itself when nothing does. `stickwatch.sh` covers the same failure from
-outside a session (no live pause marker, hmi up, buttons missing for three probes), and
-resumes a pause marker whose owner died, so a crashed session cannot leave buttons frozen or
-dead with nobody left to bring it back.
+outside a session (no live pause marker, hmi up, buttons missing for two probes), resumes a
+pause marker whose owner died, and resumes the hmi itself when a dead session left
+`/tmp/hmi-stopped` behind with no live owner, so a crashed session cannot leave the panel
+frozen or deaf with nobody left to bring it back.
 
 the shim's `/tmp/hmi-overlay.loaded` marker names the hmi for the launcher's stop/resume. any
 preloaded process that opened a `/usr/hmi/...` path used to claim it, and on a real car that is
