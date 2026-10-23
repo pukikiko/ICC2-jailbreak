@@ -42,35 +42,30 @@ i=0
 while [ $i -lt 3 ]
 do
     log "mount attempt $((i + 1)): restarting devb-umass and io-usb_swsa"
-    # first try with the io-usb that is already running. killing a healthy one wakes
-    # aviage_monitor, which restarts the whole usb stack right as the hmi starts and drops
-    # the mount we just made (the hmi then paints stock art and boot.sh's /tmp copies fail).
-    # a later attempt still forces a restart if keeping it did not give a stable mount.
+    # always restart io-usb, even if it is running. the stock startsys.sh starts it with
+    # force_fs, which pins the port at full speed (12 mbit, about 1 MB/s): keeping a
+    # healthy-looking stock instance after the first boot made rawplay fall back to a
+    # single-digit frame rate on the real car. no force_fs is what lets the usb83340 phy
+    # negotiate high speed (480 mbit), which the raw uncompressed video needs. see
+    # rawplay/README.md and usb/homebrew/apps/usbhs.sh.
     slay -Q -f -s9 devb-umass 2>/dev/null
-    if [ $i -gt 0 ] || [ -z "$(slay -p io-usb_swsa 2>/dev/null)" ]; then
-        slay -Q -f -s9 io-usb_swsa 2>/dev/null
-        sleep 1
-        # no force_fs: that is what lets the usb83340 phy negotiate high speed (480 mbit),
-        # which the raw uncompressed video needs. the stock startsys.sh line (and the media
-        # player's restart.sh/usb_restart.sh) pass force_fs, so they pin the port at full
-        # speed. see rawplay/README.md and usb/homebrew/apps/usbhs.sh
-        io-usb_swsa -i20 -r3 -c -d ehci-mx31_swsa ioport=0x43f88100,irq=37,num_itd=300 &
-        if waitfor /dev/io-usb/io-usb 10; then
-            log "io-usb up"
-        else
-            log "io-usb did not come up in 10s"
-        fi
-        # the monitor can have decided to restart io-usb before it saw this one; mounting
-        # on an instance that is about to be killed only throws the mount away. let that
-        # restart land, then mount on whatever is still standing.
-        sleep 2
-        if [ -z "$(slay -p io-usb_swsa 2>/dev/null)" ]; then
-            log "io-usb was restarted again under us, retrying"
-            i=$((i + 1))
-            continue
-        fi
+    slay -Q -f -s9 io-usb_swsa 2>/dev/null
+    sleep 1
+    io-usb_swsa -i20 -r3 -c -d ehci-mx31_swsa ioport=0x43f88100,irq=37,num_itd=300 &
+    if waitfor /dev/io-usb/io-usb 10; then
+        log "io-usb up (high speed)"
     else
-        log "io-usb already running, keeping it"
+        log "io-usb did not come up in 10s"
+    fi
+    # the monitor can have decided to restart io-usb before it saw this one; mounting
+    # on an instance that is about to be killed only throws the mount away. let that
+    # restart land, then mount on whatever is still standing. if it did restart, the
+    # retry starts it without force_fs again.
+    sleep 2
+    if [ -z "$(slay -p io-usb_swsa 2>/dev/null)" ]; then
+        log "io-usb was restarted again under us, retrying"
+        i=$((i + 1))
+        continue
     fi
     devb-umass cam pnp blk cache=2m,auto=partition,automount=hd0@dos:/fs/usb0,rw dos exe=all
     if waitfor /fs/usb0 8; then
