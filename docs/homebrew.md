@@ -115,16 +115,20 @@ the unit is already jailbroken and either writes `jailbreak/hmi_startup.sh` (emb
 the ui byte for byte) to the override slot and reboots, or gives the screen back to the hmi;
 see `syncsploit/README.md`. the factory `recore` can tool does the same write.
 
-the file itself, `jailbreak/hmi_startup.sh`, is stable but has been revised: it keeps a
-healthy `io-usb_swsa` instead of killing it (a kill wakes `aviage_monitor`, which then
-restarts the stack and drops the mount under the hmi), waits for the mount to survive three
-probes before handing over, and reports the outcome on the hmi's progress lines:
+the file itself, `jailbreak/hmi_startup.sh`, is stable but has been revised: it always
+restarts `io-usb_swsa` without `force_fs` (the stock `startsys.sh` starts the port at full
+speed), waits for the mount to survive three probes before handing over, records the
+high-speed controller pid for `stickwatch.sh`, and reports the outcome on the hmi's progress
+lines. `stickwatch` compares that pid on every probe: if `aviage_monitor` replaces the
+controller with its own `force_fs` instance, the port goes back to high speed and the mount
+is rebuilt, even when the media stack remounted it before the next probe:
 
-    slay -Q -f -s9 devb-umass 2>/dev/null     # only if the mount is gone
-    [ io-usb already running? keep it : restart it without force_fs ]
+    slay -Q -f -s9 devb-umass io-usb_swsa 2>/dev/null
+    io-usb_swsa ... &             # no force_fs: high speed (480 mbit)
     waitfor /dev/io-usb/io-usb 10
     devb-umass cam pnp ... automount=hd0@dos:/fs/usb0,rw dos exe=all
     waitfor /fs/usb0 8            # + three readable probes before boot.sh
+    echo "$(slay -p io-usb_swsa)" > /tmp/io-usb.hs
 
     if [ -x /fs/usb0/homebrew/boot.sh ]; then
         cat /fs/usb0/homebrew/boot.sh > /tmp/homebrew-boot.sh   # run from ram

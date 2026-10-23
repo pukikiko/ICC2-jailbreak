@@ -90,7 +90,11 @@ Raw RGB565, the native scanout format, is 768 000 bytes/frame:
 | 60 | 46.08 MB/s | 368.6 Mbit/s |
 
 * Full speed USB (stock `force_fs`): ~1 MB/s bulk → **~1.4 fps of raw 16 bpp. Raw video
-  cannot work on a stock unit over the full-speed port.**
+  cannot work on a stock unit over the full-speed port.** The player therefore checks the
+  negotiated bulk-in max packet before streaming: if it is 64 rather than 512, it returns
+  exit code 75 and `rawplay.sh` runs `apps/usbhs.sh` (restart `io-usb` without `force_fs`)
+  and starts the player once more. That covers `startsys.sh` and a stock media restart
+  putting `force_fs` back after boot.
 * High speed USB: ~35–45 MB/s of bulk in practice → 30 fps comfortable, 60 fps near the
   wire limit. The jailbroken boot path already brings the port up without `force_fs`
   (`docs/homebrew.md`, `usb/homebrew/apps/usbhs.sh`), and the emulator is high speed

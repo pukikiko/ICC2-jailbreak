@@ -37,7 +37,7 @@ small and `gc-sections` drops the rest.
 
 | file | what |
 |---|---|
-| `hmi_startup.sh` | **the only file that goes on the unit.** pkgstart sources it in place of the hmi's startup. it keeps a healthy `io-usb_swsa` instead of killing it (a restart wakes `aviage_monitor`, which then tears the mount down under the hmi), restarts it without `force_fs` (high speed) only when needed, waits for the mount to survive three probes, copies `homebrew/boot.sh` to ram before sourcing it (a mount drop mid-script used to hand qnx's shell a truncated file and a syntax error), and reports "Jailbreak successful!" / "Jailbreak failed. \<reason\>" on the hmi's progress lines. |
+| `hmi_startup.sh` | **the only file that goes on the unit.** pkgstart sources it in place of the hmi's startup. it always restarts `io-usb_swsa` without `force_fs` (the stock `startsys.sh` starts it at full speed), waits for the mount to survive three probes, copies `homebrew/boot.sh` to ram before sourcing it (a mount drop mid-script used to hand qnx's shell a truncated file and a syntax error), records the high-speed controller pid for stickwatch, and reports "Jailbreak successful!" / "Jailbreak failed. \<reason\>" on the hmi's progress lines. |
 | `mkhookblob.py` | bakes the hook into `out/hookblob.h` at build time, byte for byte, so the syncsploit ui can compare and install it with no stick file involved. |
 
 ## launcher/
