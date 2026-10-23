@@ -34,6 +34,8 @@ io-usb_swsa -i20 -r3 -c -d ehci-mx31_swsa ioport=0x43f88100,irq=37,num_itd=300 &
 waitfor /dev/io-usb/io-usb 10
 devb-umass cam pnp blk cache=2m,auto=partition,automount=hd0@dos:/fs/usb0,rw dos exe=all
 waitfor /fs/usb0 8
+# tell stickwatch this is the high-speed controller, so it does not restart it again
+echo "$(echo $(slay -p io-usb_swsa 2>/dev/null))" > /tmp/io-usb.hs
 echo "usbhs: io-usb_swsa up without force_fs"
 if [ -x /proc/boot/usb ]; then
     /proc/boot/usb 2>/dev/null | grep -i "speed" | head -4

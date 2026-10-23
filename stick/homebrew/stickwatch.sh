@@ -23,6 +23,10 @@ PROBE="$STICK/homebrew/buttons.txt"
 # a dead devb-umass read can sit in a 30 s timeout; skipping it keeps the hmi responsive
 # while stickwatch rebuilds the mount. missing means "try the stick" (old sticks/startup).
 DOWNMARK=/tmp/stick-down
+# the pid of the io-usb instance the hook/usbhs started without force_fs. if the stock
+# aviage monitor replaces it (its own restart line has force_fs), the pid changes even when
+# the mount comes back before the next probe; compare and put high speed back.
+HSPIDFILE=/tmp/io-usb.hs
 RAMLOG=/tmp/jailbreak.log
 SELFLOG=/tmp/stickwatch.log
 PIDFILE=/tmp/stickwatch.pid
@@ -88,6 +92,8 @@ remount() {
     waitfor "$STICK" 8
     if probe; then
         log "stick is back"
+        hs_pid=$(echo $(slay -p io-usb_swsa 2>/dev/null))
+        echo "$hs_pid" > "$HSPIDFILE" 2>/dev/null
         if [ -s "$RAMLOG" ]; then
             cat "$RAMLOG" >> "$STICK/homebrew/jailbreak.log" 2>/dev/null && : > "$RAMLOG"
         fi
@@ -202,7 +208,19 @@ misses=0
 bmisses=0
 caploop=0
 force_usb=no
+hs_pid=$(cat "$HSPIDFILE" 2>/dev/null)
 while :; do
+    cur_usb=$(echo $(slay -p io-usb_swsa 2>/dev/null))
+    if [ -n "$hs_pid" ] && [ "$cur_usb" != "$hs_pid" ]; then
+        log "io-usb was replaced ($hs_pid -> ${cur_usb:-none}), forcing high speed"
+        force_usb=yes
+        if remount; then
+            /bin/rm -f "$DOWNMARK" 2>/dev/null
+        fi
+        hs_pid=$(echo $(slay -p io-usb_swsa 2>/dev/null))
+        echo "$hs_pid" > "$HSPIDFILE" 2>/dev/null
+        continue
+    fi
     if probe; then
         misses=0
         /bin/rm -f "$DOWNMARK" 2>/dev/null

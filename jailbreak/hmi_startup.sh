@@ -67,6 +67,10 @@ do
         i=$((i + 1))
         continue
     fi
+    # remember which controller is the high-speed one. stickwatch compares this pid and
+    # restarts io-usb if aviage_monitor replaces it with its own force_fs instance, even
+    # when the media stack manages to remount the stick before the next probe.
+    echo "$(echo $(slay -p io-usb_swsa 2>/dev/null))" > /tmp/io-usb.hs
     devb-umass cam pnp blk cache=2m,auto=partition,automount=hd0@dos:/fs/usb0,rw dos exe=all
     if waitfor /fs/usb0 8; then
         log "/fs/usb0 mounted"
