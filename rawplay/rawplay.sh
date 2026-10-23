@@ -135,7 +135,21 @@ if [ ! -e /tmp/hmi-stopped ]; then
 fi
 
 $DIR/rawplay --usb --hmi "$@"
-echo "rawplay.sh: player exited $?"
+status=$?
+# 75: the player found 64-byte bulk endpoints, i.e. the unit's io-usb is at full speed.
+# restarting the stack without force_fs and trying once more is much better than playing
+# 768 KB frames through a 12 mbit port at a frame or two a second.
+if [ $status -eq 75 ]; then
+    USBHS=$DIR/usbhs.sh
+    [ -x "$USBHS" ] || USBHS=/fs/usb0/homebrew/apps/usbhs.sh
+    if [ -x "$USBHS" ]; then
+        echo "rawplay.sh: full-speed link, restarting the usb stack high speed"
+        sh "$USBHS"
+        $DIR/rawplay --usb --hmi "$@"
+        status=$?
+    fi
+fi
+echo "rawplay.sh: player exited $status"
 
 if [ "$STOPPED" = yes ]; then
     resume_hmi

@@ -914,6 +914,16 @@ int main(int argc, char **argv)
         jlog("rawplay: no livi usb gadget found");
         return 1;
     }
+    /* a 64-byte bulk endpoint means the unit's io-usb came up with force_fs. raw 768 KB
+     * frames cannot run at 12 mbit, so do not start the stream and paint a slideshow: hand
+     * a distinct exit code back to rawplay.sh, which restarts the usb stack high speed and
+     * starts the player once more. this also covers a stock/media restart that put force_fs
+     * back after the hook had already fixed the boot. */
+    if (raw_usb_mps() < 512) {
+        printf("rawplay: full-speed usb link, restarting it high speed\n");
+        jlog("rawplay: full-speed usb link, restarting it high speed");
+        return 75;
+    }
     discard_buf = raw_usb_scratch();
     send_ready();
     t_start = now_us();
