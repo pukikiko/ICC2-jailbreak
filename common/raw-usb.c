@@ -613,14 +613,20 @@ static int read_staged(void *dst, int n, int timeout_ms)
     return done;
 }
 
-int raw_usb_read(void *dst, int n, int timeout_ms)
+/* every read except the panel payload is staged. a direct urb into a stack or static
+ * buffer is not a dma-safe transfer: with audio interleaved the unit saw the following
+ * LR header at the wrong offset (a MODE parse made from the AUDIO_CFG payload values),
+ * while the same stream was clean in staged mode. keeping direct for the one mapping the
+ * controller is supposed to write (the panel/layer surface) keeps the zero-copy frame
+ * path and makes all protocol reads use the usbd_alloc ring. */
+static int raw_usb_read_mode(void *dst, int n, int timeout_ms, int allow_direct)
 {
     int got = 0;
 
     while (got < n && !dead) {
         int r;
 
-        if (direct_mode && !direct_broken) {
+        if (allow_direct && direct_mode && !direct_broken) {
             r = read_direct((char *)dst + got, n - got, timeout_ms);
             if (r == -2) {
                 direct_broken = 1;
@@ -639,6 +645,16 @@ int raw_usb_read(void *dst, int n, int timeout_ms)
         got += r;
     }
     return dead ? -1 : got;
+}
+
+int raw_usb_read(void *dst, int n, int timeout_ms)
+{
+    return raw_usb_read_mode(dst, n, timeout_ms, 0);
+}
+
+int raw_usb_read_direct(void *dst, int n, int timeout_ms)
+{
+    return raw_usb_read_mode(dst, n, timeout_ms, 1);
 }
 
 int raw_usb_quiet(void)

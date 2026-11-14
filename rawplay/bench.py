@@ -140,9 +140,10 @@ def main():
                          'window: the bar comes back for a moment, the video pauses and '
                          'resumes, and a non-climate key does neither (resume only)')
     ap.add_argument('--vehicle', action='store_true',
-                    help='drive day/night and gear on the v850 with the video running: a '
-                         'day/night switch opens the 1 s hmi window, reverse holds it open '
-                         'until the gear leaves reverse, and the video resumes after each')
+                    help='drive day/night and gear on the v850 with the video running: '
+                         'day/night must leave the video up (the hmi themes itself in the '
+                         'background), reverse holds the hmi window open until the gear '
+                         'leaves reverse, and the video resumes after it')
     ap.add_argument('--snapshots', metavar='QCOW2')
     ap.add_argument('--video', metavar='MP4',
                     help='capture the emulated panel during the run and write a real-time '
@@ -339,18 +340,18 @@ def main():
               f'touch after {touch_after}')
         return {'ok': ok, 'windows': windows, 'buttons': btn_windows, 'pause': pause}
 
+    # day/night must not open a window now that the hmi runs in the background; keep the
+    # old log strings so this test asserts their absence
     NIGHT_OPEN = 'rawplay: day/night switch, hmi back'
     NIGHT_CLOSE = 'rawplay: day/night window closed'
     REV_OPEN = 'rawplay: reverse gear, hmi back'
     REV_CLOSE = 'rawplay: reverse window closed'
 
     def vehicle_check(kind, events):
-        """drive the car while the video runs: a day/night switch opens the same 1 s window
-        a climate key opens and the video comes back on its own; reverse brings the hmi
-        back and the window stays past that deadline for as long as the gear is engaged,
-        closing (and resuming the video) when it leaves reverse. the second day/night
-        switch proves the reader recovers after the first window's hmi stop/resume, the
-        same regression the climate check covers."""
+        """drive the car while the video runs: day/night must not open a window now that
+        the hmi runs in the background and themes itself offscreen; reverse brings the hmi
+        back, stays past the deadline while the gear is engaged, and resumes the video
+        when it leaves reverse."""
         from PIL import Image, ImageChops
         if not micro:
             print('bench: --vehicle needs the v850 (use the resume path, not --boot)')
@@ -365,7 +366,7 @@ def main():
         time.sleep(1.6)
         q.shot(f'{OUT}/bench-{kind}-veh-after-night.ppm')
         v850.command(micro, 'night 0')
-        time.sleep(2.2)                     # the second window open and close
+        time.sleep(2.2)
         q.shot(f'{OUT}/bench-{kind}-veh-after-night2.ppm')
         v850.command(micro, 'gear reverse')
         time.sleep(0.8)
@@ -386,30 +387,22 @@ def main():
             ib = Image.open(b).convert('RGB')
             return ImageChops.difference(ia, ib).getbbox() is not None
 
-        bar_back = diff(f'{OUT}/bench-{kind}-veh-video.ppm', f'{OUT}/bench-{kind}-veh-night.ppm')
-        resumed = diff(f'{OUT}/bench-{kind}-veh-night.ppm',
-                       f'{OUT}/bench-{kind}-veh-after-night.ppm')
-        # the test pattern's red box does not move (the lavfi t is not per frame), so the
-        # second resume is checked against the first window's static hmi shot, and the blue
-        # box marker is the video's proof on the panel shots (the hmi does not have it)
-        resumed2 = diff(f'{OUT}/bench-{kind}-veh-night.ppm',
-                        f'{OUT}/bench-{kind}-veh-after-night2.ppm')
         rev_back = diff(f'{OUT}/bench-{kind}-veh-after-night2.ppm',
                         f'{OUT}/bench-{kind}-veh-reverse.ppm')
         rev_resumed = diff(f'{OUT}/bench-{kind}-veh-reverse.ppm',
                            f'{OUT}/bench-{kind}-veh-after-reverse.ppm')
-        ok = (windows == 2 and closed == 2 and rev_windows == 1 and rev_closed == 1 and
-              held == 0 and bar_back and resumed and resumed2 and rev_back and rev_resumed)
+        ok = (windows == 0 and closed == 0 and rev_windows == 1 and rev_closed == 1 and
+              held == 0 and rev_back and rev_resumed)
         if args.source == 'test':
-            ok = ok and blue_at(f'{OUT}/bench-{kind}-veh-night.ppm') == 0
-            ok = ok and blue_at(f'{OUT}/bench-{kind}-veh-reverse.ppm') == 0
+            ok = ok and blue_at(f'{OUT}/bench-{kind}-veh-video.ppm') >= 3
+            ok = ok and blue_at(f'{OUT}/bench-{kind}-veh-night.ppm') >= 3
             ok = ok and blue_at(f'{OUT}/bench-{kind}-veh-after-night.ppm') >= 3
             ok = ok and blue_at(f'{OUT}/bench-{kind}-veh-after-night2.ppm') >= 3
+            ok = ok and blue_at(f'{OUT}/bench-{kind}-veh-reverse.ppm') == 0
             ok = ok and blue_at(f'{OUT}/bench-{kind}-veh-after-reverse.ppm') >= 3
         print(f'bench: vehicle: {windows} day/night window(s), {closed} close(s), '
               f'{rev_windows} reverse window(s), {rev_closed} close(s), closes while held '
-              f'{held}, hmi back {bar_back}/{rev_back}, video resumed {resumed}/{resumed2}/'
-              f'{rev_resumed}')
+              f'{held}, hmi back {rev_back}, video resumed {rev_resumed}')
         return {'ok': ok, 'windows': windows, 'closed': closed, 'rev_windows': rev_windows}
 
     # the composite gadget delivers request-sized transfers (chunked) so the raw path can

@@ -89,7 +89,7 @@ populated yet the build fetches and builds it (network needed); to do that step 
 
 | target | what it is | installed to the stick as |
 |---|---|---|
-| `out/rawplay` | raw rgb565 video + touch player | `apps/rawplay` |
+| `out/rawplay` | raw rgb565 video + touch player, with PCM audio in both directions | `apps/rawplay` |
 | `out/mediaplayer` | ffmpeg file browser/player | `apps/mediaplayer` |
 | `out/terminal` | framebuffer terminal + on-screen keyboard | `apps/terminal` |
 | `out/homebrew` | the homebrew menu | `main` |

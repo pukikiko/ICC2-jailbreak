@@ -15,11 +15,15 @@
  * gadget for a few seconds. 0 on success, -1 if it never shows. */
 int raw_usb_start(void);
 
-/* read exactly n bytes into dst, return 0. uses direct urbs when raw_usb_set_direct(1)
- * was called and the stack accepted them; otherwise a usbd_alloc staging ring is copied
- * out of. timeout_ms is the longest a read may go without a byte before it gives up:
- * -1 is returned, raw_usb_quiet() says whether it was the quiet link or a dead device. */
+/* read exactly n bytes into dst, return 0. always uses the usbd_alloc staging ring.
+ * timeout_ms is the longest a read may go without a byte before it gives up: -1 is
+ * returned, raw_usb_quiet() says whether it was the quiet link or a dead device. */
 int raw_usb_read(void *dst, int n, int timeout_ms);
+
+/* the only read that may use direct urbs: dst must be the panel/layer mapping (a
+ * device mapping), never a stack or static buffer. protocol headers, padding, MODE and
+ * audio go through raw_usb_read's staging ring even while direct mode is selected. */
+int raw_usb_read_direct(void *dst, int n, int timeout_ms);
 
 /* 1 when the last read ended because nothing arrived inside its timeout, 0 for a dead
  * device. the caller tells "no video from the host" from "link read failed". */
@@ -41,9 +45,9 @@ int raw_usb_mps(void);
 void raw_usb_set_chunk(int bytes);
 int raw_usb_chunk(void);
 
-/* enable the zero-copy path: bulk-in urbs are set up with dst as the transfer buffer.
- * raw_usb_read falls back to the staging ring by itself if usbd_setup_bulk/usbd_io
- * rejects the buffer, and raw_usb_direct() then reports 0. */
+/* enable the zero-copy path for raw_usb_read_direct(): bulk-in urbs are set up with dst
+ * as the transfer buffer. raw_usb_read_direct falls back to the staging ring by itself
+ * if usbd_setup_bulk/usbd_io rejects the buffer, and raw_usb_direct() then reports 0. */
 void raw_usb_set_direct(int on);
 int raw_usb_direct(void);
 /* 1 once a completion came back short of its request and had to be compacted; the

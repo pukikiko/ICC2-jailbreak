@@ -49,6 +49,7 @@
 #include <wayland-client.h>
 
 #include "weston-output-capture-client-protocol.h"
+#include "lr-audio.h"
 
 /* ---- wire protocol, rawplay/README.md section 2.2 -------------------------------------- */
 
@@ -107,7 +108,8 @@
 #define VID_PIPE_BYTES (1024 * 1024)
 
 static const int li_needed[256] = { [LI_TOUCH] = 8, [LI_KNOB] = 4, [LI_BUTTON] = 5,
-                                    [LI_READY] = 3, [LI_RAW] = 8 };
+                                    [LI_READY] = 3, [LI_RAW] = 8,
+                                    [LI_AUDIO_CFG] = LI_AUDIO_CFG_LEN };
 
 static volatile sig_atomic_t g_stop;
 
@@ -293,6 +295,11 @@ static void put32(unsigned char *p, unsigned v)
     p[3] = (unsigned char)(v >> 24);
 }
 
+static unsigned get32(const unsigned char *p)
+{
+    return p[0] | (unsigned)p[1] << 8 | (unsigned)p[2] << 16 | (unsigned)p[3] << 24;
+}
+
 static void build_hdr(unsigned char *h, int type, unsigned len, unsigned seq, unsigned ts)
 {
     h[0] = 'L';
@@ -309,7 +316,9 @@ static void build_hdr(unsigned char *h, int type, unsigned len, unsigned seq, un
 struct cfg {
     const char *path;                /* stream: the unix socket (gadget or qemu chardev) */
     const char *file, *wayland, *events;
+    const char *audio_in, *audio_out, *audio_cmd;
     int usb, use_test, use_motion, no_chunked, no_inject, stats, flip;
+    int audio, audio_test;
     int width, height, fps, window;
     double seconds;
     char stick[PATH_MAX], sock[PATH_MAX], name[64], udc[64], ffs[PATH_MAX];
@@ -358,7 +367,8 @@ static const char *stream_usage(void)
 {
     return "usage: rawlink stream PATH [--usb] [--wayland W|--test|--motion|--file F]\n"
            "       [--width N] [--height N] [--fps N] [--window N] [--seconds S]\n"
-           "       [--events FILE] [--stats] [--no-inject] [--no-chunked] [--flip]\n";
+           "       [--events FILE] [--stats] [--no-inject] [--no-chunked] [--flip]\n"
+           "       [--audio] [--audio-test] [--audio-in FIFO|--audio-cmd CMD] [--audio-out FIFO]\n";
 }
 
 static const char *gadget_usage(void)
@@ -373,7 +383,8 @@ static const char *run_usage(void)
            "       [--stick IMG] [--sock PATH] [--udc NAME] [--name NAME] [--rw]\n"
            "       [--wayland W|--file F|--test|--motion] [--width N] [--height N]\n"
            "       [--fps N] [--window N] [--seconds S] [--events FILE] [--stats]\n"
-           "       [--no-inject] [--no-chunked] [--flip] [--dry-run] [--dump-descriptors]\n";
+           "       [--no-inject] [--no-chunked] [--flip] [--dry-run] [--dump-descriptors]\n"
+           "       [--audio] [--audio-test] [--audio-in FIFO|--audio-cmd CMD] [--audio-out FIFO]\n";
 }
 
 /* ---- input injection: the weston-touch module's socket (wayland, no x11) ----------------- */
@@ -624,6 +635,25 @@ struct stream {
     int ff_fd;
     double ff_retry_at;
     struct wlcap cap;
+
+    /* audio: downstream PCM is a separate queue that flush_tx services before video at
+     * every message boundary; upstream mic chunks are written to the PulseAudio pipe. */
+    unsigned char audio_cfg_msg[MSG_HDR];
+    struct txmsg audio_cfg_tx;
+    int audio_ready, audio_cfg_pending;
+    struct txmsg *aq_head, *aq_tail;
+    int audio_fd, audio_is_file, mic_fd;
+    pid_t audio_pid;
+    unsigned char audio_pending[AUDIO_OUT_CHUNK_BYTES];
+    size_t audio_pending_len;
+    double audio_retry_at, audio_next_at, audio_phase;
+    double mic_retry_at;
+    unsigned audio_seq;
+    unsigned long audio_chunks, audio_bytes, audio_drops, mic_chunks, mic_bytes;
+    unsigned mic_last_seq;
+    int mic_have_seq;
+    int mic_drops_logged;
+    double mic_last_log;
 };
 
 static void tx_free(struct txmsg *m)
@@ -650,6 +680,19 @@ static void txq_clear(struct stream *s)
     s->txq_head = s->txq_tail = NULL;
 }
 
+static void aq_clear(struct stream *s)
+{
+    struct txmsg *m = s->aq_head;
+
+    while (m) {
+        struct txmsg *next = m->next;
+
+        tx_free(m);
+        m = next;
+    }
+    s->aq_head = s->aq_tail = NULL;
+}
+
 static void tx_clear(struct stream *s)
 {
     if (s->tx) {
@@ -657,6 +700,7 @@ static void tx_clear(struct stream *s)
         s->tx = NULL;
     }
     txq_clear(s);
+    aq_clear(s);
 }
 
 static void txq_push(struct stream *s, struct txmsg *m)
@@ -774,14 +818,18 @@ static void stats_line(struct stream *s, int final)
     }
     if (final) {
         printf("rawstream: %u frames, %u kb, %u dropped, in %.1f s, %.1f fps, "
-               "%.0f kbit/s, latency %.1f/%.1f ms avg/max\n",
+               "%.0f kbit/s, latency %.1f/%.1f ms avg/max, audio %lu chunks/%lu kb "
+               "(%lu dropped), mic %lu chunks/%lu kb\n",
                s->frames, s->total_bytes / 1024, s->stale_src, el, s->frames / el,
-               s->total_bytes * 8.0 / el / 1000.0, lat_avg(s), s->lat_max);
+               s->total_bytes * 8.0 / el / 1000.0, lat_avg(s), s->lat_max,
+               s->audio_chunks, s->audio_bytes / 1024, s->audio_drops,
+               s->mic_chunks, s->mic_bytes / 1024);
     } else {
         printf("rawstream: %u frames, %u kb, %u dropped, %u in flight, %.1f fps, "
-               "%.0f kbit/s, latency %.1f/%.1f ms avg/max\n",
+               "%.0f kbit/s, latency %.1f/%.1f ms avg/max, audio %lu/%lu, mic %lu\n",
                s->frames, s->total_bytes / 1024, s->stale_src, s->seq - s->acked,
-               s->frames / el, s->total_bytes * 8.0 / el / 1000.0, lat_avg(s), s->lat_max);
+               s->frames / el, s->total_bytes * 8.0 / el / 1000.0, lat_avg(s), s->lat_max,
+               s->audio_chunks, s->audio_drops, s->mic_chunks);
     }
     fflush(stdout);
 }
@@ -795,7 +843,12 @@ static void window_reset(struct stream *s, const char *why, unsigned seq)
     sent_clear(s);
     lat_reset(s);
     txq_clear(s);
+    aq_clear(s);
     s->mode_pending = 1;
+    if (s->audio_ready && s->cfg->audio) {
+        s->audio_cfg_pending = 1;
+        s->audio_next_at = now_sec();
+    }
     if (why) {
         slogf("rawstream: %s at seq %u", why, seq);
     }
@@ -822,6 +875,8 @@ static void touch_flush(struct stream *s)
     }
 }
 
+static void mic_write(struct stream *s, const unsigned char *pcm, size_t len);
+
 static void handle_li(struct stream *s, const unsigned char *m, size_t n)
 {
     unsigned t = m[2];
@@ -836,6 +891,50 @@ static void handle_li(struct stream *s, const unsigned char *m, size_t n)
         return;
     }
     touch_flush(s);             /* a touch never arrives out of order with the rest */
+    if (t == LI_AUDIO_CFG && n >= LI_AUDIO_CFG_LEN) {
+        unsigned ver = m[3], fmt = m[4], rate = m[5] | (unsigned)m[6] << 8;
+        unsigned channels = m[7], chunk_ms = m[8];
+        int was_ready = s->audio_ready;
+
+        if (!s->audio_ready) {
+            slogf("rawstream: unit audio %u Hz %u ch format %u, %u ms chunks, "
+                  "dev out %02x in %02x", rate, channels, fmt, chunk_ms, m[9], m[10]);
+            s->audio_pending_len = 0;
+        }
+        s->audio_ready = 1;
+        if (s->cfg->audio && fmt == AUDIO_IN_FORMAT && rate == AUDIO_IN_RATE &&
+            channels == AUDIO_IN_CHANNELS && chunk_ms == AUDIO_IN_CHUNK_MS) {
+            if (!was_ready) {
+                s->audio_cfg_pending = 1;
+                s->audio_next_at = now;
+            }
+        } else if (s->cfg->audio) {
+            slogf("rawstream: unit microphone format %u %u Hz %u ch %u ms is not supported",
+                  fmt, rate, channels, chunk_ms);
+        }
+        (void)ver;
+        return;
+    }
+    if (t == LI_AUDIO && n >= LI_AUDIO_HDR_LEN) {
+        unsigned alen = m[3] | (unsigned)m[4] << 8;
+        unsigned aseq = get32(m + 5);
+        unsigned ats = get32(m + 9);
+
+        if (n < LI_AUDIO_HDR_LEN + alen) {
+            return;
+        }
+        if (s->mic_have_seq && aseq != s->mic_last_seq + 1 && !s->mic_drops_logged) {
+            /* a gap means the bulk-out queue dropped a chunk under the writer's lock;
+             * report it once rather than on every later packet */
+            slogf("rawstream: microphone sequence %u after %u", aseq, s->mic_last_seq);
+            s->mic_drops_logged = 1;
+        }
+        s->mic_last_seq = aseq;
+        s->mic_have_seq = 1;
+        (void)ats;
+        mic_write(s, m + LI_AUDIO_HDR_LEN, alen);
+        return;
+    }
     /* LI_KNOB is consumed and dropped: livi has no default binding for the knob */
     if (t == LI_BUTTON && n >= 5) {
         /* the panel buttons: the mapped ones are tapped, the rest are logged and left
@@ -923,6 +1022,20 @@ static void li_feed(struct stream *s, const unsigned char *data, size_t n)
                 break;
             }
             need = (size_t)li_needed[s->li_buf[2]];
+            if (s->li_buf[2] == LI_AUDIO) {
+                unsigned alen;
+
+                if (s->li_len < LI_AUDIO_HDR_LEN) {
+                    break;
+                }
+                alen = s->li_buf[3] | (unsigned)s->li_buf[4] << 8;
+                if (alen > 1024) {
+                    memmove(s->li_buf, s->li_buf + 2, s->li_len - 2);
+                    s->li_len -= 2;
+                    continue;
+                }
+                need = LI_AUDIO_HDR_LEN + alen;
+            }
             if (need == 0) {
                 memmove(s->li_buf, s->li_buf + 2, s->li_len - 2);
                 s->li_len -= 2;
@@ -983,10 +1096,318 @@ static void queue_frame(struct stream *s, const unsigned char *payload)
     s->total_bytes += (unsigned)s->frame_len;
 }
 
+/* ---- audio -----------------------------------------------------------------------------
+ *
+ * downstream chunks are queued separately from video and flush_tx prefers them at every
+ * message boundary, so a 768 KB picture never holds a 20 ms voice chunk behind it for
+ * longer than one write. upstream microphone chunks are not queued at all here: the
+ * writer's LI_AUDIO message is written straight to the PulseAudio pipe source.
+ */
+
+static void aq_push(struct stream *s, struct txmsg *m)
+{
+    m->next = NULL;
+    if (s->aq_tail) {
+        s->aq_tail->next = m;
+    } else {
+        s->aq_head = m;
+    }
+    s->aq_tail = m;
+}
+
+static void queue_audio(struct stream *s, const unsigned char *pcm, size_t len)
+{
+    struct txmsg *m;
+    unsigned char *buf;
+    size_t pad, total;
+
+    if (!s->audio_ready || !s->cfg->audio || len == 0 || len > AUDIO_MAX_PAYLOAD) {
+        return;
+    }
+    pad = (MSG_HDR - (len % MSG_HDR)) % MSG_HDR;
+    total = MSG_HDR + len + pad;
+    m = malloc(sizeof *m);
+    buf = malloc(total);
+    if (!m || !buf) {
+        free(m);
+        free(buf);
+        s->audio_drops++;
+        return;
+    }
+    build_hdr(buf, LR_AUDIO, (unsigned)len, s->audio_seq++, now_ms());
+    memset(buf + LR_HDR, 0, MSG_HDR - LR_HDR);
+    memcpy(buf + MSG_HDR, pcm, len);
+    if (pad) {
+        memset(buf + MSG_HDR + len, 0, pad);
+    }
+    m->data = buf;
+    m->len = total;
+    m->off = 0;
+    m->seq = HDR_NO_SEQ;
+    m->owned = 1;
+    m->next = NULL;
+    aq_push(s, m);
+    s->audio_chunks++;
+    s->audio_bytes += (unsigned)len;
+
+    {
+        unsigned depth = 1;
+        struct txmsg *q = s->aq_head;
+
+        while (q && q->next) {
+            depth++;
+            q = q->next;
+        }
+        while (depth > 64) {
+            struct txmsg *old = s->aq_head;
+
+            s->aq_head = old->next;
+            if (!s->aq_head) {
+                s->aq_tail = NULL;
+            }
+            tx_free(old);
+            s->audio_drops++;
+            depth--;
+        }
+    }
+}
+
+static void mic_write(struct stream *s, const unsigned char *pcm, size_t len)
+{
+    if (!s->cfg->audio || !s->cfg->audio_out) {
+        return;
+    }
+    if (s->mic_fd < 0) {
+        double now = now_sec();
+
+        if (now < s->mic_retry_at) {
+            return;
+        }
+        s->mic_retry_at = now + 0.5;
+        s->mic_fd = open(s->cfg->audio_out, O_WRONLY | O_CREAT | O_NONBLOCK | O_CLOEXEC,
+                         0644);
+        if (s->mic_fd < 0) {
+            slogf("rawstream: microphone %s: %s", s->cfg->audio_out, strerror(errno));
+            return;
+        }
+        slogf("rawstream: microphone out %s", s->cfg->audio_out);
+    }
+    {
+        ssize_t n = write(s->mic_fd, pcm, len);
+
+        if (n < 0 && errno == EINTR) {
+            n = write(s->mic_fd, pcm, len);
+        }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            return;             /* the PulseAudio source is not draining; keep latency low */
+        }
+        if (n <= 0) {
+            close(s->mic_fd);
+            s->mic_fd = -1;
+            s->mic_retry_at = now_sec() + 0.5;
+            return;
+        }
+        s->mic_chunks++;
+        s->mic_bytes += (unsigned)n;
+    }
+}
+
+static void audio_reap(struct stream *s)
+{
+    int status;
+
+    if (s->audio_pid > 0) {
+        if (waitpid(s->audio_pid, &status, WNOHANG) == 0) {
+            kill(s->audio_pid, SIGTERM);
+            waitpid(s->audio_pid, &status, 0);
+        }
+        s->audio_pid = 0;
+    }
+    if (s->audio_fd >= 0) {
+        close(s->audio_fd);
+        s->audio_fd = -1;
+    }
+    s->audio_retry_at = now_sec() + 1.0;
+}
+
+static int audio_cmd_spawn(struct stream *s)
+{
+    int p[2];
+    pid_t pid;
+
+    if (pipe2(p, O_CLOEXEC) < 0) {
+        return -1;
+    }
+    pid = fork();
+    if (pid < 0) {
+        close(p[0]);
+        close(p[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        (void)dup2(p[1], STDOUT_FILENO);
+        close(p[0]);
+        close(p[1]);
+        execl("/bin/sh", "sh", "-c", s->cfg->audio_cmd, (char *)0);
+        _exit(127);
+    }
+    close(p[1]);
+    s->audio_fd = p[0];
+    set_nonblock(s->audio_fd);
+    s->audio_pid = pid;
+    s->audio_is_file = 0;
+    slogf("rawstream: audio command: %s", s->cfg->audio_cmd);
+    return 0;
+}
+
+static void audio_open_input(struct stream *s)
+{
+    struct cfg *c = s->cfg;
+    struct stat st;
+
+    if (!c->audio || c->audio_test || s->audio_fd >= 0) {
+        return;
+    }
+    if (now_sec() < s->audio_retry_at) {
+        return;
+    }
+    if (c->audio_cmd) {
+        (void)audio_cmd_spawn(s);
+        return;
+    }
+    if (!c->audio_in) {
+        return;
+    }
+    s->audio_fd = open(c->audio_in, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (s->audio_fd < 0) {
+        s->audio_retry_at = now_sec() + 1.0;
+        return;
+    }
+    s->audio_is_file = fstat(s->audio_fd, &st) == 0 && S_ISREG(st.st_mode);
+    slogf("rawstream: audio in %s", c->audio_in);
+}
+
+static void audio_gen_test(struct stream *s, double now)
+{
+    unsigned char pcm[AUDIO_OUT_CHUNK_BYTES];
+    int frames = AUDIO_OUT_RATE * AUDIO_OUT_CHUNK_MS / 1000;
+    int i;
+    const double pi = 3.14159265358979;
+    double step = 2.0 * pi * 1000.0 / AUDIO_OUT_RATE;
+
+    if (!s->audio_ready) {
+        s->audio_next_at = now;
+        return;
+    }
+    if (s->audio_next_at == 0.0) {
+        s->audio_next_at = now;
+    }
+    /* catch up at most 4 chunks after a scheduling hiccup; more than that is stale voice */
+    for (i = 0; i < 4 && s->audio_next_at <= now; i++) {
+        for (int f = 0; f < frames; f++) {
+            double t = s->audio_phase < pi ? s->audio_phase / pi
+                                           : 2.0 - s->audio_phase / pi;
+            short v = (short)((t * 2.0 - 1.0) * 6000.0);
+            short w = (short)(v / 2);
+
+            pcm[f * 4 + 0] = (unsigned char)v;
+            pcm[f * 4 + 1] = (unsigned char)(v >> 8);
+            pcm[f * 4 + 2] = (unsigned char)w;
+            pcm[f * 4 + 3] = (unsigned char)(w >> 8);
+            s->audio_phase += step;
+            if (s->audio_phase > 2.0 * pi) {
+                s->audio_phase -= 2.0 * pi;
+            }
+        }
+        queue_audio(s, pcm, sizeof pcm);
+        s->audio_next_at += AUDIO_OUT_CHUNK_MS / 1000.0;
+    }
+    if (s->audio_next_at < now - 0.2) {
+        s->audio_next_at = now;
+    }
+}
+
+static void audio_drain(struct stream *s, double now)
+{
+    if (!s->cfg->audio) {
+        return;
+    }
+    if (s->cfg->audio_test) {
+        audio_gen_test(s, now);
+        return;
+    }
+    audio_open_input(s);
+    if (s->audio_fd < 0) {
+        return;
+    }
+    if (!s->audio_ready) {
+        unsigned char tmp[4096];
+
+        while (read(s->audio_fd, tmp, sizeof tmp) > 0) {
+        }
+        s->audio_pending_len = 0;
+        s->audio_next_at = now;
+        return;
+    }
+    if (now < s->audio_next_at) {
+        return;
+    }
+    /* keep a delivered chunk even if it is a little late: the unit has a 160 ms
+     * prebuffer and a 256 KB ring, and dropping here was losing short tones entirely
+     * when a video frame occupied the link */
+    while (s->audio_pending_len < sizeof s->audio_pending) {
+        ssize_t n = read(s->audio_fd, s->audio_pending + s->audio_pending_len,
+                         sizeof s->audio_pending - s->audio_pending_len);
+
+        if (n > 0) {
+            s->audio_pending_len += (size_t)n;
+            continue;
+        }
+        if (n == 0) {
+            if (s->audio_is_file) {
+                (void)lseek(s->audio_fd, 0, SEEK_SET);
+                continue;
+            }
+            if (s->audio_pid > 0) {
+                audio_reap(s);
+                return;
+            }
+            break;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            break;
+        }
+        if (s->audio_pid > 0) {
+            audio_reap(s);
+        } else {
+            close(s->audio_fd);
+            s->audio_fd = -1;
+            s->audio_retry_at = now + 1.0;
+        }
+        s->audio_pending_len = 0;
+        return;
+    }
+    if (s->audio_pending_len == sizeof s->audio_pending) {
+        queue_audio(s, s->audio_pending, sizeof s->audio_pending);
+        s->audio_pending_len = 0;
+        s->audio_next_at += AUDIO_OUT_CHUNK_MS / 1000.0;
+        if (s->audio_next_at < now - 0.1) {
+            s->audio_next_at = now + AUDIO_OUT_CHUNK_MS / 1000.0;
+        }
+    } else {
+        s->audio_next_at = now + 0.002;     /* finish a short chunk next time */
+    }
+}
+
+
+
 /* returns 0 when the queue drained, -1 when the connection is gone */
 static int flush_tx(struct stream *s, struct outlink *o)
 {
-    while (s->tx || s->mode_pending || s->txq_head) {
+    while (s->tx || s->mode_pending || s->audio_cfg_pending || s->aq_head || s->txq_head) {
         ssize_t n;
 
         if (!s->tx) {
@@ -994,6 +1415,17 @@ static int flush_tx(struct stream *s, struct outlink *o)
                 s->mode_tx.off = 0;
                 s->tx = &s->mode_tx;
                 s->mode_pending = 0;
+            } else if (s->audio_cfg_pending) {
+                s->audio_cfg_tx.off = 0;
+                s->tx = &s->audio_cfg_tx;
+                s->audio_cfg_pending = 0;
+            } else if (s->aq_head) {
+                s->tx = s->aq_head;
+                s->aq_head = s->aq_head->next;
+                if (!s->aq_head) {
+                    s->aq_tail = NULL;
+                }
+                s->tx->next = NULL;
             } else {
                 s->tx = s->txq_head;
                 s->txq_head = s->tx->next;
@@ -1043,6 +1475,10 @@ static void link_lost(struct stream *s, struct outlink *o)
     lat_reset(s);
     s->touch_pending = 0;       /* a held touch from the old link is stale */
     s->mode_pending = 1;
+    s->audio_ready = 0;
+    s->audio_cfg_pending = 0;
+    aq_clear(s);
+    s->audio_pending_len = 0;
     slogf("rawstream: %s went away, reconnecting", s->cfg->path);
 }
 
@@ -1698,6 +2134,20 @@ static int stream_init(struct stream *s, struct cfg *c)
     s->mode_tx.off = 0;
     s->mode_tx.seq = HDR_NO_SEQ;
     s->mode_tx.owned = 0;
+    build_hdr(s->audio_cfg_msg, LR_AUDIO_CFG, LR_AUDIO_CFG_LEN, 0, now_ms());
+    put32(s->audio_cfg_msg + LR_HDR + 0, AUDIO_OUT_FORMAT);
+    put32(s->audio_cfg_msg + LR_HDR + 4, AUDIO_OUT_RATE);
+    put32(s->audio_cfg_msg + LR_HDR + 8, AUDIO_OUT_CHANNELS);
+    put32(s->audio_cfg_msg + LR_HDR + 12, AUDIO_OUT_CHUNK_MS);
+    memset(s->audio_cfg_msg + LR_HDR + LR_AUDIO_CFG_LEN, 0,
+           MSG_HDR - LR_HDR - LR_AUDIO_CFG_LEN);
+    s->audio_cfg_tx.data = s->audio_cfg_msg;
+    s->audio_cfg_tx.len = MSG_HDR;
+    s->audio_cfg_tx.off = 0;
+    s->audio_cfg_tx.seq = HDR_NO_SEQ;
+    s->audio_cfg_tx.owned = 0;
+    s->audio_fd = -1;
+    s->mic_fd = -1;
     sent_clear(s);
     s->started = now_sec();
     s->last_stats = s->started;
@@ -1734,6 +2184,16 @@ static void stream_cleanup(struct stream *s)
     }
     tx_clear(s);
     free(s->pending);
+    if (s->audio_pid > 0) {
+        audio_reap(s);
+    } else if (s->audio_fd >= 0) {
+        close(s->audio_fd);
+        s->audio_fd = -1;
+    }
+    if (s->mic_fd >= 0) {
+        close(s->mic_fd);
+        s->mic_fd = -1;
+    }
     if (s->inj.touch_fd >= 0) {
         close(s->inj.touch_fd);
     }
@@ -1809,7 +2269,7 @@ static void stream_loop(struct stream *s, struct outlink *o, int rx_fd)
     while (!g_stop) {
         double now = now_sec();
         int want_tx, rfd, i, nf = 0, ff_i = -1, rx_i = -1, tx_i = -1;
-        struct pollfd pf[4];
+        struct pollfd pf[5];
 
         if (s->stop_at && now >= s->stop_at) {
             break;
@@ -1848,12 +2308,19 @@ static void stream_loop(struct stream *s, struct outlink *o, int rx_fd)
             stats_line(s, 0);
         }
 
-        want_tx = s->tx || s->mode_pending || s->txq_head;
+        want_tx = s->tx || s->mode_pending || s->audio_cfg_pending || s->aq_head
+                  || s->txq_head;
         if (s->ff_fd >= 0) {
             pf[nf].fd = s->ff_fd;
             pf[nf].events = POLLIN;
             pf[nf].revents = 0;
             ff_i = nf++;
+        }
+        if (s->audio_fd >= 0) {
+            pf[nf].fd = s->audio_fd;
+            pf[nf].events = POLLIN;
+            pf[nf].revents = 0;
+            nf++;
         }
         rfd = rx_fd >= 0 ? rx_fd : o->fd;
         if (rfd >= 0) {
@@ -1873,7 +2340,7 @@ static void stream_loop(struct stream *s, struct outlink *o, int rx_fd)
                 tx_i = nf++;
             }
         }
-        i = poll(pf, (nfds_t)nf, 50);
+        i = poll(pf, (nfds_t)nf, s->cfg->audio ? 10 : 50);
         if (g_stop) {
             break;
         }
@@ -1882,6 +2349,10 @@ static void stream_loop(struct stream *s, struct outlink *o, int rx_fd)
             msleep(50);
             continue;
         }
+
+        /* fill the audio queue before a pending frame is written: flush_tx prefers the
+         * audio queue at the next message boundary */
+        audio_drain(s, now_sec());
 
         /* writes and reads first, then the capture pipe: with an ack per frame the socket
          * can stay readable and starve the pipe (which then throttles ffmpeg) */
@@ -3048,6 +3519,20 @@ static int parse_args(int argc, char **argv, struct cfg *c, int allow_gadget)
             c->no_chunked = 1;
         } else if (!strcmp(argv[i], "--flip")) {
             c->flip = 1;
+        } else if (!strcmp(argv[i], "--audio")) {
+            c->audio = 1;
+        } else if (!strcmp(argv[i], "--audio-test")) {
+            c->audio = 1;
+            c->audio_test = 1;
+        } else if ((v = opt_arg(argc, argv, &i, "--audio-in"))) {
+            c->audio = 1;
+            c->audio_in = v;
+        } else if ((v = opt_arg(argc, argv, &i, "--audio-cmd"))) {
+            c->audio = 1;
+            c->audio_cmd = v;
+        } else if ((v = opt_arg(argc, argv, &i, "--audio-out"))) {
+            c->audio = 1;
+            c->audio_out = v;
         } else if ((v = opt_arg(argc, argv, &i, "--file"))) {
             c->file = v;
         } else if ((v = opt_arg(argc, argv, &i, "--wayland"))) {

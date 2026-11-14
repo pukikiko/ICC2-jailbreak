@@ -291,8 +291,15 @@ stopped. the launcher also closes its `/hmi_/service` connection (opened by forw
 that was not on our plates) before it stops the hmi: the command's process inherits it, and
 detaching an inherited connection to a stopped server blocks, which would leave the command
 hung in exec and the hmi stopped. the zones are `55..196,425..478` and `603..748,425..478`.
-while the hmi is stopped `/tmp/hmi-stopped` is left for commands that stop it themselves
-(`rawplay.sh`).
+while the hmi is stopped `/tmp/hmi-stopped` is left for commands that stop it themselves.
+
+`rawplay.sh` is the exception: it keeps the hmi running. the player's `--hmi` mode resumes
+an hmi the launcher/menu stopped around it, and a small helper process owns overlay layer 1
+above the hmi's background. a climate/day-night/reverse window kills that helper (io-display
+then disables the layer) and starts a fresh one when the window closes; only if layer 1
+cannot be attached does the player fall back to SIGSTOP/SIGCONT. `rawplay.sh` still pauses
+and restarts `buttons`, so the hmi never sees the panel backlog that accumulated while the
+video covered it.
 
 whoever stops the hmi also SIGSTOPs the `buttons` service for the session: with the hmi frozen
 every panel event it sends blocks in the stopped queue and the whole backlog replays as one
@@ -305,13 +312,13 @@ has registered its CONDDEATH. the kill then leaves nothing to restart and the pa
 in the hmi - no source, no power, no volume knob - until a reboot, while `iccbuttons` and the
 rest of homebrew still see the panel off the ipc monitor. the resume also checks that buttons
 actually came back and starts one itself when `ham` did not, so the panel cannot stay deaf.
-the launcher, the menu, `iccbuttons` and `rawplay.sh` all do this through `common/hmictl.c`
-(`hmi_events_pause`/`hmi_events_resume`). a short hmi window inside a session is the exception:
-`rawplay --hmi` restarts buttons for the window the way the session resume does (SIGKILL by
-pid, so the frames queued during the video die with the old frozen connection and ham starts a
-clean one; no SIGCONT, which would replay the backlog as one burst), then SIGSTOPs the fresh
-process when the window closes, buttons first, still under the session's pause marker
-(`hmi_events_window_open`/`hmi_events_window_close`). the menu does
+the launcher, the menu and `iccbuttons` all do this through `common/hmictl.c`
+(`hmi_events_pause`/`hmi_events_resume`). `rawplay.sh` uses it only for `buttons`. a short
+hmi window inside a session restarts buttons for the window the way the session resume does
+(SIGKILL by pid, so the frames queued during the video die with the old frozen connection and
+ham starts a clean one; no SIGCONT, which would replay the backlog as one burst), then
+SIGSTOPs the fresh process when the window closes, buttons first, still under the session's
+pause marker (`hmi_events_window_open`/`hmi_events_window_close`). the menu does
 the same stop (and the matching resume on "back"), which covers being run by hand after boot as
 well as from the launcher, and it restores the hmi's last screen before resuming so the frozen
 frame does not stay covered in menu pixels. it decides the two modes by whether the hmi's

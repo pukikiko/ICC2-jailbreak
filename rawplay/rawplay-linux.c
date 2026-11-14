@@ -29,6 +29,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -42,6 +43,7 @@
 
 #include <libusb.h>
 #include <SDL.h>
+#include "lr-audio.h"
 
 /* ---- wire protocol, rawplay/README.md section 2.2 --------------------------------- */
 
@@ -105,25 +107,35 @@ struct cfg {
     int usb;
     int vid, pid;
     const char *sock;
+    const char *bridge;
     double seconds;
     int stats, headless, no_input, scale, list_usb;
-    const char *dump;
+    int audio, mic, mic_test;
+    const char *dump, *audio_dump, *mic_dump;
     int init_w, init_h;
 };
 
 static void usage(void)
 {
-    printf("usage: rawplay-linux (--usb [--vid VID --pid PID] | --sock PATH) [--seconds S]\n"
+    printf("usage: rawplay-linux (--usb [--vid VID --pid PID] | --sock PATH | --bridge PATH) [--seconds S]\n"
            "       [--stats] [--headless] [--dump DIR] [--no-input] [--scale N]\n"
+           "       [--audio] [--audio-dump FILE] [--mic] [--mic-test] [--mic-dump FILE]\n"
            "       [--list-usb]\n"
            "  --usb      open the gadget over libusb (default 1209:1cc2) as the car would\n"
            "  --sock     listen on PATH for `rawlink stream PATH` (no usb hardware needed)\n"
+           "  --bridge   claim the physical 1209:1cc2 gadget and relay its vendor bytes to\n"
+           "             a qemu usb-livi chardev socket at PATH (emulator-to-appliance)\n"
            "  --seconds  stop after S seconds\n"
            "  --stats    five second progress lines plus a totals line at exit\n"
            "  --headless no SDL window: parse, ack, stats (and --dump) only\n"
            "  --dump     save every displayed frame as DIR/frameNNNNNN.ppm\n"
            "  --no-input do not send mouse/keyboard upstream\n"
-           "  --scale    integer window scale before the first MODE (default 1)\n");
+           "  --scale    integer window scale before the first MODE (default 1)\n"
+           "  --audio    play the downstream PCM through SDL (s16le 44100 stereo)\n"
+           "  --audio-dump FILE  save the downstream PCM as raw s16le\n"
+           "  --mic      capture the PC microphone and send u8 8000 mono upstream\n"
+           "  --mic-test generate a u8 8000 mono tone upstream (no capture device)\n"
+           "  --mic-dump FILE   save the upstream microphone PCM as raw u8\n");
 }
 
 static int parse_args(int argc, char **argv, struct cfg *c)
@@ -141,6 +153,8 @@ static int parse_args(int argc, char **argv, struct cfg *c)
             c->usb = 1;
         } else if (!strcmp(argv[i], "--sock") && i + 1 < argc) {
             c->sock = argv[++i];
+        } else if (!strcmp(argv[i], "--bridge") && i + 1 < argc) {
+            c->bridge = argv[++i];
         } else if (!strcmp(argv[i], "--vid") && i + 1 < argc) {
             c->vid = (int)strtol(argv[++i], 0, 0);
         } else if (!strcmp(argv[i], "--pid") && i + 1 < argc) {
@@ -155,6 +169,18 @@ static int parse_args(int argc, char **argv, struct cfg *c)
             c->dump = argv[++i];
         } else if (!strcmp(argv[i], "--no-input")) {
             c->no_input = 1;
+        } else if (!strcmp(argv[i], "--audio")) {
+            c->audio = 1;
+        } else if (!strcmp(argv[i], "--audio-dump") && i + 1 < argc) {
+            c->audio = 1;
+            c->audio_dump = argv[++i];
+        } else if (!strcmp(argv[i], "--mic")) {
+            c->mic = 1;
+        } else if (!strcmp(argv[i], "--mic-test")) {
+            c->mic_test = 1;
+        } else if (!strcmp(argv[i], "--mic-dump") && i + 1 < argc) {
+            c->mic_dump = argv[++i];
+            c->mic = c->mic || 0;
         } else if (!strcmp(argv[i], "--scale") && i + 1 < argc) {
             c->scale = (int)strtol(argv[++i], 0, 0);
         } else if (!strcmp(argv[i], "--list-usb")) {
@@ -176,8 +202,9 @@ static int parse_args(int argc, char **argv, struct cfg *c)
     if (c->list_usb) {
         return 0;
     }
-    if (c->usb == !!c->sock) {
-        fprintf(stderr, "rawplay-linux: pick exactly one of --usb and --sock PATH\n");
+    if (c->usb + !!c->sock + !!c->bridge != 1) {
+        fprintf(stderr, "rawplay-linux: pick exactly one of --usb, --sock PATH and "
+                        "--bridge PATH\n");
         return -1;
     }
     return 0;
@@ -205,6 +232,8 @@ struct xport {
     size_t rxpos, rxlen;
     int conn_lost;          /* socket peer went away; the caller re-accepts */
     int dead;               /* usb device gone for good */
+    volatile int connected; /* a session is live (the mic thread only writes then) */
+    pthread_mutex_t tx_mu;  /* acks/ready and microphone share the bulk-out pipe */
 };
 
 /* returns 1 with a byte buffered, 0 on timeout, -1 when the link is gone.-tox-:-
@@ -336,19 +365,23 @@ static int xread_exact(struct xport *x, unsigned char *dst, size_t n, long long 
 static int xwrite_all(struct xport *x, const void *buf, size_t len)
 {
     const unsigned char *p = buf;
+    int rc = 0;
 
+    pthread_mutex_lock(&x->tx_mu);
     if (x->is_usb) {
         while (len) {
             int got = 0;
-            int rc = libusb_bulk_transfer(x->dev, x->ep_out, (unsigned char *)p,
-                                          (int)len, &got, 500);
-            if (rc != 0 || got <= 0) {
-                return -1;
+            int r = libusb_bulk_transfer(x->dev, x->ep_out, (unsigned char *)p,
+                                         (int)len, &got, 500);
+            if (r != 0 || got <= 0) {
+                rc = -1;
+                break;
             }
             p += got;
             len -= (size_t)got;
         }
-        return 0;
+        pthread_mutex_unlock(&x->tx_mu);
+        return rc;
     }
     while (len) {
         ssize_t n = send(x->sock_conn, p, len, MSG_NOSIGNAL);
@@ -361,9 +394,11 @@ static int xwrite_all(struct xport *x, const void *buf, size_t len)
         if (n < 0 && errno == EINTR) {
             continue;
         }
-        return -1;
+        rc = -1;
+        break;
     }
-    return 0;
+    pthread_mutex_unlock(&x->tx_mu);
+    return rc;
 }
 
 /* ---- usb open ------------------------------------------------------------------------ */
@@ -600,6 +635,154 @@ static int sock_accept(struct xport *x, long long stop_at, int has_deadline)
     return -1;
 }
 
+/* ---- appliance <-> emulator bridge ------------------------------------------------------
+ *
+ * qemu's usb-livi device is a USB device whose wire is a unix chardev. the physical
+ * appliance is a real USB device on this host. this mode claims the appliance's vendor
+ * interface with libusb and relays its bulk endpoints to that chardev, so the emulator's
+ * rawplay sees the appliance exactly like the car's rawplay sees the real link.
+ */
+
+static int sock_connect_to(struct xport *x, const char *path)
+{
+    struct sockaddr_un addr;
+    long long deadline = now_ms() + 20000;
+    int fd;
+
+    while (!g_stop) {
+        fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (fd < 0) {
+            fprintf(stderr, "rawplay-linux: socket: %s\n", strerror(errno));
+            return -1;
+        }
+        memset(&addr, 0, sizeof addr);
+        addr.sun_family = AF_UNIX;
+        snprintf(addr.sun_path, sizeof addr.sun_path, "%s", path);
+        if (connect(fd, (struct sockaddr *)&addr, sizeof addr) == 0) {
+            x->sock_conn = fd;
+            fprintf(stderr, "rawplay-linux: bridge connected to %s\n", path);
+            return 0;
+        }
+        close(fd);
+        if (now_ms() >= deadline) {
+            fprintf(stderr, "rawplay-linux: cannot connect to bridge socket %s: %s\n",
+                    path, strerror(errno));
+            return -1;
+        }
+        usleep(200000);
+    }
+    return -1;
+}
+
+static int bridge_send_all(int fd, const unsigned char *p, size_t n)
+{
+    while (n) {
+        ssize_t w = send(fd, p, n, MSG_NOSIGNAL);
+
+        if (w > 0) {
+            p += w;
+            n -= (size_t)w;
+            continue;
+        }
+        if (w < 0 && errno == EINTR) {
+            continue;
+        }
+        return -1;
+    }
+    return 0;
+}
+
+static void *bridge_usb_in(void *arg)
+{
+    struct xport *x = arg;
+    unsigned char buf[65536];
+
+    while (!g_stop) {
+        int got = 0;
+        int rc = libusb_bulk_transfer(x->dev, x->ep_in, buf, sizeof buf, &got, 500);
+
+        if (rc == LIBUSB_ERROR_TIMEOUT) {
+            continue;
+        }
+        if (rc != 0 || got <= 0) {
+            if (!g_stop) {
+                fprintf(stderr, "rawplay-linux: bridge usb-in: %s\n",
+                        libusb_strerror(rc));
+            }
+            break;
+        }
+        if (bridge_send_all(x->sock_conn, buf, (size_t)got) < 0) {
+            break;
+        }
+    }
+    return NULL;
+}
+
+static void *bridge_sock_in(void *arg)
+{
+    struct xport *x = arg;
+    unsigned char buf[65536];
+
+    while (!g_stop) {
+        struct pollfd p = { x->sock_conn, POLLIN, 0 };
+        int r = poll(&p, 1, 200);
+
+        if (r < 0 && errno == EINTR) {
+            continue;
+        }
+        if (r <= 0) {
+            continue;
+        }
+        {
+            ssize_t n = recv(x->sock_conn, buf, sizeof buf, 0);
+
+            if (n <= 0) {
+                break;
+            }
+            {
+                size_t off = 0;
+
+                while (off < (size_t)n) {
+                    int got = 0;
+                    int rc = libusb_bulk_transfer(x->dev, x->ep_out, buf + off,
+                                                  (int)((size_t)n - off), &got, 500);
+                    if (rc != 0 || got <= 0) {
+                        fprintf(stderr, "rawplay-linux: bridge usb-out: %s\n",
+                                libusb_strerror(rc));
+                        return NULL;
+                    }
+                    off += (size_t)got;
+                }
+            }
+        }
+    }
+    return NULL;
+}
+
+static int bridge_run(struct xport *x, double seconds)
+{
+    pthread_t a, b;
+    long long start = now_ms();
+
+    if (pthread_create(&a, NULL, bridge_usb_in, x) != 0
+        || pthread_create(&b, NULL, bridge_sock_in, x) != 0) {
+        fprintf(stderr, "rawplay-linux: bridge threads failed\n");
+        return 1;
+    }
+    while (!g_stop) {
+        if (seconds > 0.0 && now_ms() - start >= (long long)(seconds * 1000.0)) {
+            break;
+        }
+        usleep(200000);
+    }
+    g_stop = 1;
+    close(x->sock_conn);
+    x->sock_conn = -1;
+    pthread_join(a, NULL);
+    pthread_join(b, NULL);
+    return 0;
+}
+
 /* ---- display -------------------------------------------------------------------------- */
 
 struct view {
@@ -683,6 +866,312 @@ static void view_show(struct view *v, const unsigned char *rgb565, int stride)
     SDL_RenderCopy(v->ren, v->tex, NULL, NULL);
     SDL_RenderPresent(v->ren);
 }
+
+/* ---- audio -----------------------------------------------------------------------------
+ *
+ * downstream: raw s16le 44100 stereo from LR_AUDIO. SDL plays it directly; if the host
+ * device negotiates another format an SDL_AudioStream converts it. --audio-dump writes
+ * the wire bytes before conversion, which is what the tests compare.
+ *
+ * upstream: u8 8000 mono in LI_AUDIO. --mic captures the PC device through an
+ * SDL_AudioStream; --mic-test generates a tone so the transport can be tested with no
+ * capture hardware at all.
+ */
+
+static SDL_AudioDeviceID play_dev;
+static SDL_AudioStream *play_conv;
+static FILE *play_dump;
+static unsigned long play_chunks, play_bytes, play_drops;
+
+static SDL_AudioDeviceID mic_dev;
+static SDL_AudioStream *mic_conv;
+static SDL_AudioSpec mic_have;
+static FILE *mic_dump;
+static pthread_t mic_tid;
+static volatile int mic_stop;
+static int mic_started;
+static struct xport *mic_xport;
+static struct cfg *mic_cfg;
+
+static int audio_init(struct cfg *c)
+{
+    SDL_AudioSpec want, have;
+
+    if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+        fprintf(stderr, "rawplay-linux: SDL audio init: %s\n", SDL_GetError());
+        return c->audio ? -1 : 0;
+    }
+    if (c->audio_dump) {
+        play_dump = fopen(c->audio_dump, "wb");
+        if (!play_dump) {
+            fprintf(stderr, "rawplay-linux: cannot open %s: %s\n", c->audio_dump,
+                    strerror(errno));
+            return -1;
+        }
+    }
+    if (!c->audio) {
+        return 0;
+    }
+    memset(&want, 0, sizeof want);
+    want.freq = AUDIO_OUT_RATE;
+    want.format = AUDIO_S16LSB;
+    want.channels = AUDIO_OUT_CHANNELS;
+    want.samples = 1024;
+    play_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, SDL_AUDIO_ALLOW_ANY_CHANGE);
+    if (!play_dev) {
+        fprintf(stderr, "rawplay-linux: SDL playback: %s\n", SDL_GetError());
+        return -1;
+    }
+    if (have.format != want.format || have.channels != want.channels
+        || have.freq != want.freq) {
+        play_conv = SDL_NewAudioStream(want.format, want.channels, want.freq,
+                                       have.format, have.channels, have.freq);
+        if (!play_conv) {
+            fprintf(stderr, "rawplay-linux: SDL audio conversion: %s\n", SDL_GetError());
+        }
+    }
+    SDL_PauseAudioDevice(play_dev, 0);
+    fprintf(stderr, "rawplay-linux: audio out %d Hz %d ch (device %d Hz %d ch)\n",
+            AUDIO_OUT_RATE, AUDIO_OUT_CHANNELS, have.freq, have.channels);
+    return 0;
+}
+
+static void audio_play(const unsigned char *pcm, size_t len)
+{
+    if (play_dump) {
+        fwrite(pcm, 1, len, play_dump);
+    }
+    if (!play_dev) {
+        return;
+    }
+    if (play_conv) {
+        unsigned char out[8192];
+
+        if (SDL_AudioStreamPut(play_conv, pcm, (int)len) != 0) {
+            return;
+        }
+        for (;;) {
+            int n = SDL_AudioStreamGet(play_conv, out, sizeof out);
+
+            if (n <= 0) {
+                break;
+            }
+            SDL_QueueAudio(play_dev, out, (Uint32)n);
+        }
+    } else {
+        SDL_QueueAudio(play_dev, pcm, (Uint32)len);
+    }
+    if (SDL_GetQueuedAudioSize(play_dev) > 44100 * 4 / 2) {
+        SDL_ClearQueuedAudio(play_dev);     /* a late burst must not build 500 ms of delay */
+        play_drops++;
+    }
+    play_chunks++;
+    play_bytes += (unsigned)len;
+}
+
+static void audio_finish(void)
+{
+    if (play_dump) {
+        fclose(play_dump);
+        play_dump = NULL;
+    }
+    if (play_conv) {
+        SDL_FreeAudioStream(play_conv);
+        play_conv = NULL;
+    }
+    if (play_dev) {
+        SDL_CloseAudioDevice(play_dev);
+        play_dev = 0;
+    }
+    if (mic_dump) {
+        fclose(mic_dump);
+        mic_dump = NULL;
+    }
+    if (mic_conv) {
+        SDL_FreeAudioStream(mic_conv);
+        mic_conv = NULL;
+    }
+    if (mic_dev) {
+        SDL_CloseAudioDevice(mic_dev);
+        mic_dev = 0;
+    }
+}
+
+static void send_audio_cfg(struct xport *x)
+{
+    unsigned char m[LI_AUDIO_CFG_LEN];
+
+    m[0] = 'L';
+    m[1] = 'I';
+    m[2] = LI_AUDIO_CFG;
+    m[3] = 1;
+    m[4] = AUDIO_IN_FORMAT;
+    m[5] = AUDIO_IN_RATE & 0xff;
+    m[6] = AUDIO_IN_RATE >> 8;
+    m[7] = AUDIO_IN_CHANNELS;
+    m[8] = AUDIO_IN_CHUNK_MS;
+    m[9] = m[10] = m[11] = 0;
+    xwrite_all(x, m, sizeof m);
+}
+
+static void send_audio_data(struct xport *x, const unsigned char *pcm, int len)
+{
+    unsigned char m[LI_AUDIO_HDR_LEN + 512];
+    static unsigned seq;
+    unsigned ts = (unsigned)now_ms();
+
+    if (len <= 0 || len > 512) {
+        return;
+    }
+    m[0] = 'L';
+    m[1] = 'I';
+    m[2] = LI_AUDIO;
+    m[3] = (unsigned char)len;
+    m[4] = (unsigned char)(len >> 8);
+    put32le(m + 5, seq++);
+    put32le(m + 9, ts);
+    memcpy(m + LI_AUDIO_HDR_LEN, pcm, (size_t)len);
+    if (mic_dump) {
+        fwrite(pcm, 1, (size_t)len, mic_dump);
+    }
+    xwrite_all(x, m, LI_AUDIO_HDR_LEN + (size_t)len);
+}
+
+static void *mic_thread(void *arg)
+{
+    unsigned char pcm[AUDIO_IN_CHUNK_BYTES];
+    unsigned char in[4096];
+    double phase = 0.0;
+    long long last_cfg = 0;
+    const double pi = 3.14159265358979;
+    double step = 2.0 * pi * 440.0 / AUDIO_IN_RATE;
+
+    (void)arg;
+    while (!mic_stop && !g_stop) {
+        long long now = now_ms();
+
+        if (!mic_xport->connected) {
+            SDL_Delay(20);
+            continue;
+        }
+        if (now - last_cfg >= 1000) {
+            last_cfg = now;
+            send_audio_cfg(mic_xport);
+        }
+        if (mic_cfg->mic_test) {
+            for (int i = 0; i < AUDIO_IN_CHUNK_BYTES; i++) {
+                double t = phase < pi ? phase / pi : 2.0 - phase / pi;
+                pcm[i] = (unsigned char)(128 + (int)((t * 2.0 - 1.0) * 100));
+                phase += step;
+                if (phase > 2.0 * pi) {
+                    phase -= 2.0 * pi;
+                }
+            }
+            send_audio_data(mic_xport, pcm, sizeof pcm);
+            SDL_Delay(AUDIO_IN_CHUNK_MS);
+            continue;
+        }
+        if (!mic_dev) {
+            SDL_Delay(20);
+            continue;
+        }
+        {
+            Uint32 have = SDL_GetQueuedAudioSize(mic_dev);
+            Uint32 want = (SDL_AUDIO_BITSIZE(mic_have.format) / 8)
+                          * mic_have.channels * 1024;
+
+            if (have < want / 2) {
+                SDL_Delay(5);
+                continue;
+            }
+            if (have > sizeof in) {
+                have = sizeof in;
+            }
+            have -= have % (Uint32)((SDL_AUDIO_BITSIZE(mic_have.format) / 8)
+                                    * mic_have.channels);
+            if (have == 0) {
+                SDL_Delay(5);
+                continue;
+            }
+            if (SDL_DequeueAudio(mic_dev, in, have) != 0) {
+                SDL_Delay(5);
+                continue;
+            }
+            if (mic_conv) {
+                if (SDL_AudioStreamPut(mic_conv, in, (int)have) != 0) {
+                    continue;
+                }
+                for (;;) {
+                    int n = SDL_AudioStreamGet(mic_conv, pcm, sizeof pcm);
+
+                    if (n <= 0) {
+                        break;
+                    }
+                    send_audio_data(mic_xport, pcm, n);
+                }
+            }
+        }
+    }
+    return arg;
+}
+
+static void mic_start(struct cfg *c, struct xport *x)
+{
+    SDL_AudioSpec want, have;
+
+    mic_cfg = c;
+    mic_xport = x;
+    if (c->mic_dump) {
+        mic_dump = fopen(c->mic_dump, "wb");
+        if (!mic_dump) {
+            fprintf(stderr, "rawplay-linux: cannot open %s: %s\n", c->mic_dump,
+                    strerror(errno));
+        }
+    }
+    if (!c->mic && !c->mic_test) {
+        return;
+    }
+    if (c->mic && !c->mic_test) {
+        memset(&want, 0, sizeof want);
+        want.freq = 48000;
+        want.format = AUDIO_S16LSB;
+        want.channels = 2;
+        want.samples = 1024;
+        mic_dev = SDL_OpenAudioDevice(NULL, 1, &want, &have,
+                                      SDL_AUDIO_ALLOW_ANY_CHANGE);
+        if (!mic_dev) {
+            fprintf(stderr, "rawplay-linux: SDL capture: %s\n", SDL_GetError());
+        } else {
+            mic_have = have;
+            mic_conv = SDL_NewAudioStream(have.format, have.channels, have.freq,
+                                          AUDIO_U8, AUDIO_IN_CHANNELS, AUDIO_IN_RATE);
+            if (!mic_conv) {
+                fprintf(stderr, "rawplay-linux: SDL capture conversion: %s\n",
+                        SDL_GetError());
+            }
+            SDL_PauseAudioDevice(mic_dev, 0);
+            fprintf(stderr, "rawplay-linux: mic in %d Hz %d ch -> %d Hz %d ch u8\n",
+                    have.freq, have.channels, AUDIO_IN_RATE, AUDIO_IN_CHANNELS);
+        }
+    }
+    mic_stop = 0;
+    if (pthread_create(&mic_tid, NULL, mic_thread, NULL) != 0) {
+        fprintf(stderr, "rawplay-linux: cannot start the microphone thread\n");
+    } else {
+        mic_started = 1;
+    }
+}
+
+static void mic_finish(void)
+{
+    if (!mic_started) {
+        return;
+    }
+    mic_stop = 1;
+    pthread_join(mic_tid, NULL);
+    mic_started = 0;
+}
+
 
 /* ---- ppm dump -------------------------------------------------------------------------- */
 
@@ -903,12 +1392,15 @@ struct run {
     unsigned char *frame;
     size_t frame_cap;
     int fw, fh, stride, expected;
-    unsigned long frames, drawn, rx_kb;
+    int audio_ok;
+    unsigned long frames, drawn, rx_kb, audio_chunks, audio_bytes, audio_drops;
     unsigned long long rx_us;
     long long t_start, last_rx, last_ready, last_stats, stop_at;
     const char *exit_reason;
     int mouse_down;
 };
+
+static unsigned char rx_audio[AUDIO_MAX_PAYLOAD];
 
 /* scan for one LR header. 1 = header in *type/len/seq, 0 = need more bytes (the
  * caller runs its watchdog and pumps input), -1 = the link is gone. */
@@ -960,7 +1452,10 @@ static int read_header(struct run *r, unsigned *type, unsigned *len,
         || (*type == LR_FRAME
             && (r->expected == 0 ? *len > MAX_FRAME
                                 : *len != (unsigned)r->expected))
-        || (*type != LR_MODE && *type != LR_FRAME)) {
+        || (*type == LR_AUDIO_CFG && *len != LR_AUDIO_CFG_LEN)
+        || (*type == LR_AUDIO && *len != AUDIO_OUT_CHUNK_BYTES)
+        || (*type != LR_MODE && *type != LR_FRAME
+            && *type != LR_AUDIO_CFG && *type != LR_AUDIO)) {
         return 2;               /* not a header: keep scanning past it */
     }
     return 1;
@@ -1038,6 +1533,57 @@ static int read_mode(struct run *r)
     return 0;
 }
 
+static int read_audio_cfg(struct run *r)
+{
+    unsigned char p[LR_AUDIO_CFG_LEN];
+    unsigned fmt, rate, channels, chunk_ms;
+    long long deadline = now_ms() + LINK_DEAD_MS;
+    int rc = xread_exact(r->xport, p, sizeof p, deadline);
+
+    if (rc != 1) {
+        return -1;
+    }
+    if (skip_pad(r, LR_MSG - LR_HDR - LR_AUDIO_CFG_LEN) < 0) {
+        return -1;
+    }
+    fmt = get32le(p);
+    rate = get32le(p + 4);
+    channels = get32le(p + 8);
+    chunk_ms = get32le(p + 12);
+    if (fmt != AUDIO_OUT_FORMAT || rate != AUDIO_OUT_RATE
+        || channels != AUDIO_OUT_CHANNELS || chunk_ms != AUDIO_OUT_CHUNK_MS) {
+        fprintf(stderr, "rawplay-linux: unsupported audio %u %u Hz %u ch %u ms\n",
+                fmt, rate, channels, chunk_ms);
+        return 0;
+    }
+    r->audio_ok = 1;
+    fprintf(stderr, "rawplay-linux: audio in %u Hz %u ch s16le, %u ms chunks\n",
+            rate, channels, chunk_ms);
+    return 0;
+}
+
+static int read_audio(struct run *r, unsigned len)
+{
+    long long deadline = now_ms() + LINK_DEAD_MS;
+    int pad;
+
+    if (skip_pad(r, LR_MSG - LR_HDR) < 0) {
+        return -1;
+    }
+    if (xread_exact(r->xport, rx_audio, len, deadline) != 1) {
+        return -1;
+    }
+    pad = (int)((LR_MSG - (len % LR_MSG)) % LR_MSG);
+    if (pad && skip_pad(r, (size_t)pad) < 0) {
+        return -1;
+    }
+    audio_play(rx_audio, len);
+    r->audio_chunks++;
+    r->audio_bytes += len;
+    r->last_rx = now_ms();
+    return 0;
+}
+
 static int read_frame(struct run *r, unsigned len, unsigned seq)
 {
     long long t0 = now_ms();
@@ -1076,8 +1622,10 @@ static void stats_line(struct run *r, int final)
     if (el <= 0.0) {
         el = 1e-9;
     }
-    printf("rawplay-linux: %lu frames, %lu drawn, %lu kb in %.1f s, %.1f fps%s\n",
+    printf("rawplay-linux: %lu frames, %lu drawn, %lu kb in %.1f s, %.1f fps, "
+           "audio %lu chunks/%lu kb (%lu dropped)%s\n",
            r->frames, r->drawn, r->rx_kb, el, r->frames / el,
+           r->audio_chunks, r->audio_bytes / 1024, r->audio_drops,
            final ? " (total)" : "");
     fflush(stdout);
 }
@@ -1088,6 +1636,7 @@ static void stats_line(struct run *r, int final)
 static int run_session(struct run *r)
 {
     r->last_rx = now_ms();
+    r->xport->connected = 1;
     send_ready(r->xport);
     r->last_ready = now_ms();
     while (!g_stop) {
@@ -1148,6 +1697,20 @@ static int run_session(struct run *r)
                 return 1;
             }
             r->last_rx = now_ms();
+        } else if (type == LR_AUDIO_CFG) {
+            if (read_audio_cfg(r) < 0) {
+                r->exit_reason = "link read failed in audio config";
+                return 1;
+            }
+            r->last_rx = now_ms();
+        } else if (type == LR_AUDIO) {
+            if (read_audio(r, len) < 0) {
+                if (r->xport->conn_lost || r->xport->dead || g_stop) {
+                    return r->xport->conn_lost ? 0 : 1;
+                }
+                r->exit_reason = "link read failed in audio";
+                return 1;
+            }
         } else {
             if (!r->expected) {
                 /* a frame before any mode: the sender always opens with a mode,
@@ -1209,6 +1772,16 @@ int main(int argc, char **argv)
 
     memset(&xport, 0, sizeof xport);
     xport.sock_listen = xport.sock_conn = -1;
+    if (cfg.bridge) {
+        if (usb_open(&xport, cfg.vid, cfg.pid) < 0) {
+            return 1;
+        }
+        if (sock_connect_to(&xport, cfg.bridge) < 0) {
+            return 1;
+        }
+        return bridge_run(&xport, cfg.seconds);
+    }
+    pthread_mutex_init(&xport.tx_mu, NULL);
     if (cfg.usb) {
         if (usb_open(&xport, cfg.vid, cfg.pid) < 0) {
             return 1;
@@ -1235,9 +1808,14 @@ int main(int argc, char **argv)
     run.last_stats = run.t_start;
     run.stop_at = cfg.seconds > 0.0
                       ? run.t_start + (long long)(cfg.seconds * 1000.0) : 0;
+    if (audio_init(&cfg) < 0) {
+        failed = 1;
+    }
+    mic_start(&cfg, &xport);
 
     if (cfg.usb) {
         run_session(&run);
+        xport.connected = 0;
     } else {
         /* the sender connects, streams, and may come back; each session ends on
          * disconnect or timeout, and only a quit or --seconds expiry leaves. */
@@ -1255,6 +1833,7 @@ int main(int argc, char **argv)
             {
                 int q = run_session(&run);
 
+                xport.connected = 0;
                 close(xport.sock_conn);
                 xport.sock_conn = -1;
                 if (q == 1) {
@@ -1274,6 +1853,9 @@ int main(int argc, char **argv)
     if (run.exit_reason) {
         fprintf(stderr, "rawplay-linux: %s\n", run.exit_reason);
     }
+    xport.connected = 0;
+    mic_finish();
+    audio_finish();
     free(run.frame);
     if (view.tex) {
         SDL_DestroyTexture(view.tex);
@@ -1283,8 +1865,8 @@ int main(int argc, char **argv)
     }
     if (view.win) {
         SDL_DestroyWindow(view.win);
-        SDL_Quit();
     }
+    SDL_Quit();
     if (xport.dev) {
         libusb_release_interface(xport.dev, xport.iface);
         libusb_close(xport.dev);

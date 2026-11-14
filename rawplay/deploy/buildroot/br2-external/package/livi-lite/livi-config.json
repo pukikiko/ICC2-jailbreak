@@ -9,7 +9,8 @@
   "wirelessAaEnabled": true,
   "wifiDedicatedInterface": true,
   "wifiType": "2.4ghz",
-  "wifiChannel": 6,
+  "wifiChannel": 11,
+  "wifiChannelWidth": 20,
   "country": "AU",
   "projectionFps": 24,
   "dismissedPackages": [

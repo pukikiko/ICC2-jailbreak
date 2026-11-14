@@ -390,6 +390,32 @@ One upgrade detail:
   mapping must come from the schematic before anything is wired (do not
   trust a guessed Pi-compatible pinout). This is recorded, not guessed.
 
+### Audio over rawlink (independent of the DAC decision)
+
+LIVI's audio no longer has to stop at the null sink. `rawlink` carries it to
+the ICC over the same vendor interface:
+
+* `rawlink-wait` starts `parec` on the **default sink's monitor** and passes
+  its stdout to `rawlink --audio-cmd`. That is s16le/44100/stereo, which
+  `rawlink` chunks into 20 ms `LR_AUDIO` messages interleaved with the video.
+  It works with the PCM5102A card when one exists and with `livi-null`
+  otherwise.
+* `livi-pulse` loads `module-pipe-source source_name=livi-car-mic
+  file=/run/livi-audio/car-mic format=u8 rate=8000 channels=1`. It is the
+  default source, so LIVI's phone/assistant uplink opens the car microphone
+  with no LIVI-Lite change. `rawlink --audio-out` writes the upstream
+  `LI_AUDIO` payload there.
+* The unit's `rawplay` opens the preferred QNX PCM playback/capture devices,
+  plays the s16le/44100/stereo stream, and captures the codec's native
+  s16/stereo input, mixing/resampling it to u8/8000 mono. `--no-audio` turns
+  both directions off.
+
+`rawplay/test_audio.py` covers the socket/SDL path, `rawplay/test_audio_qemu.py`
+covers the emulator (downstream always, upstream with `AUDIO_QEMU_PA=1`), and
+the real appliance was exercised over USB with a 1 kHz downstream tone and a
+440 Hz `--mic-test` uplink. The local DAC remains a hardware decision; the
+projection audio path to the car does not depend on it.
+
 ### RAM
 
 Orange Pi lists **1 GB / 1.5 GB / 2 GB / 4 GB** LPDDR4 variants (product
@@ -440,19 +466,27 @@ are the check on real hardware.
   800x480 tier and the kiosk fullscreen check accepts the window) it carries
   the appliance's network/video defaults:
 
-      "wifiType": "2.4ghz", "wifiChannel": 6, "country": "AU",
-      "wirelessAaEnabled": true, "wifiDedicatedInterface": true,
-      "carName": "Ford Falcon", "projectionFps": 24
+      "wifiType": "2.4ghz", "wifiChannel": 11, "wifiChannelWidth": 20,
+      "country": "AU", "wirelessAaEnabled": true,
+      "wifiDedicatedInterface": true, "carName": "Ford Falcon",
+      "projectionFps": 24
 
-  The phone-facing AP therefore comes up on 2.4 GHz channel 6 under the
-  Australian regulatory domain (verified on the board: `[wifi-ap] AP up —
-  channel=6`), and the UI setting "FPS" starts at 24 (LIVI's own AA
-  handshake still negotiates 30/60 — its protocol's `VideoFrameRate` only
-  has those two; 24 is the app-side/CarPlay default). `livi-persist`
-  re-applies all of these on every boot, not only on a fresh `/data`, the
-  same way it always enforced `wirelessAaEnabled`/`carName`, so an upgrade
-  of an already-flashed card moves to the new defaults. `livi.service` also
-  sets `LIVI_UI_SIZE=800x480`, which fresh installs size their projection
+  The phone-facing AP therefore comes up on 2.4 GHz channel 11 at 20 MHz
+  under the Australian regulatory domain (verified on the board:
+  `[wifi-ap] AP up — channel=11`; hostapd reports `secondary_channel=0` and
+  the beacon is HT20). Channel 11 was chosen after a survey: channel 6
+  shared the band with a neighbouring AP, and a PC client's ping jitter to
+  the appliance dropped from ~19 ms average/~97 ms max on channel 6 to
+  ~9 ms average/~43 ms max on channel 11. The width is pinned to 20 MHz
+  because that is what the UWE5622 actually runs; asking for 40 MHz only
+  made hostapd advertise HT40 capabilities the beacon then did not use.
+  The UI setting "FPS" starts at 24 (LIVI's own AA handshake still
+  negotiates 30/60 — its protocol's `VideoFrameRate` only has those two; 24
+  is the app-side/CarPlay default). `livi-persist` re-applies all of these
+  on every boot, not only on a fresh `/data`, the same way it always
+  enforced `wirelessAaEnabled`/`carName`, so an upgrade of an
+  already-flashed card moves to the new defaults. `livi.service` also sets
+  `LIVI_UI_SIZE=800x480`, which fresh installs size their projection
   defaults from (and `livi-ui` opens at).
 * The checkout next to this repo carries two local changes on top of
   LIVI-Lite `main`, both kept as reference patches under
@@ -482,6 +516,13 @@ are the check on real hardware.
   `resources/compositor/livi-compositor` itself (the fork's design: one owner
   for the compositor, UI and helper). There is no outer launcher and no
   supervisor: the unit supervises the whole tree through one process.
+* **CPU DVFS**: `livi-persist` loads `sun50i-cpufreq-nvmem` and pins
+  `performance` on the single policy. The H618 is blocklisted from
+  `cpufreq-dt` and nothing autoloads the nvmem driver, so without this the
+  CPU sits at the bootloader frequency; this board's speed bin tops out at
+  1416 MHz. Removing the ramp latency is what makes Android Auto's
+  continuous video path feel closer to LIVI's local UI. Bench headroom was
+  ~45 °C at 1416 MHz.
 * **udev and the console**: `systemd-udev-trigger` is masked; the kernel has
   every boot-path driver built in, devtmpfs carries the nodes, and udevd
   still runs for live events (the car plugging in, a card inserted later).
@@ -528,7 +569,8 @@ are the check on real hardware.
   `livi-pulse` writes the DAC sink first when `/proc/asound/cards` names a
   PCM5102/livi card and the null sink otherwise, then the null sink; the
   first sink loaded is PulseAudio's default with no state to restore
-  (LIVI's `pactl` calls need a default sink at startup). The stock
+  (LIVI's `pactl` calls need a default sink at startup). It also loads the
+  `livi-car-mic` u8/8000 pipe source as the default capture source. The stock
   `pulseaudio.service` is masked: it would start a second, unconfigured
   daemon that takes `/run/pulse/pid`, and its `ExecStartPost` retry loop
   then held `livi.service` for ~30 s. No PipeWire: more processes for no
@@ -953,8 +995,9 @@ predates the v4l2 decoders by itself).
       machine driver (not `simple-audio-card`), which is a real driver port;
       b. use the H618's internal `codec@5096000` LINEOUT instead of the DAC
       if the Zero 2W routes it (needs the schematic; not established);
-   c. ship without sound and accept null-sink-only, which loses the
-      projection audio.
+   c. ship without the local DAC and accept that the appliance has no
+      speaker output; projection audio still reaches the car through
+      rawlink, so this only affects local appliance sounds.
 3. **MUSB throughput.** If the bench measurement in `scripts/throughput.sh`
    is below ~11.5 MB/s the 15 fps minimum fails; the response would be
    switching to the MUSB host-capable port wiring or a different SoC/board

@@ -30,5 +30,15 @@ umount /dev/ffs-liviraw 2>/dev/null
 # (livi-config.json's projectionFps), so this matches the negotiated rate.
 # --stats is what the boot-time harness reads for T5 (first frames) even when
 # no reader is attached yet
+#
+# audio: LIVI's playback goes to the current default sink (the DAC, or the null
+# sink when there is no DAC). parec's monitor of that sink is the downstream PCM
+# rawlink multiplexes into the video stream at 44100/s16le/stereo. the car mic
+# comes back as u8/8000 mono and is written to the pipe source livi-pulse loads,
+# which is the default source LIVI's uplink captures.
+export PULSE_SERVER=unix:/run/pulse/native
+export HOME=/tmp
 exec /opt/livi/rawlink run --wayland /run/livi/wayland-livi \
-    --stick /opt/livi/usb.img --fps 24 --stats
+    --stick /opt/livi/usb.img --fps 24 --stats --audio \
+    --audio-cmd 'sink=$(pactl get-default-sink); exec parec --device="$sink.monitor" --format=s16le --rate=44100 --channels=2 --raw' \
+    --audio-out /run/livi-audio/car-mic

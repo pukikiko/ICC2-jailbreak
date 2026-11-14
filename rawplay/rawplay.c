@@ -1,16 +1,17 @@
 /*
  * rawplay - the unit end of the raw livi link. it receives uncompressed rgb565 frames on
- * the composite gadget's vendor interface and puts them straight into the ipu's sdc
- * background plane (the panel), in the panel's own format, with no decode, no colour
- * conversion and no scaling. touch/knob/button go back on the same wire. the host end is
- * rawplay/rawlink.c, the protocol is in rawplay/README.md section 2.2.
+ * the composite gadget's vendor interface and puts them into the graphics surface it owns
+ * above the hmi (or into the panel framebuffer when it has to stop the hmi), in the panel's
+ * own format, with no decode, no colour conversion and no scaling. touch/knob/button go
+ * back on the same wire. the host end is rawplay/rawlink.c, the protocol is in
+ * rawplay/README.md section 2.2.
  *
- * the bulk-in urbs point straight at the framebuffer mapping, so the usb controller's dma
+ * the bulk-in urbs point straight at that surface mapping, so the usb controller's dma
  * writes each frame where the panel scans it out (zero copy). if the stack will not take
  * the buffer, the transport falls back to a dma staging buffer and one copy, which is
  * printed at startup and shown in --stats; it is never silent.
  *
- * usage: rawplay --usb [seconds] [--stats] [--stage] [--direct]
+ * usage: rawplay --usb [seconds] [--stats] [--stage] [--direct] [--hmi]
  */
 #include "qnx.h"
 #include "fb.h"
@@ -19,6 +20,278 @@
 #include "raw-usb.h"
 #include "hmictl.h"
 #include "jlog.h"
+#include "lr-audio.h"
+#include "qnx-audio.h"
+
+/* the video is drawn by a small child process that owns the spare overlay layer. the
+ * hmi keeps running and drawing into the panel's framebuffer; the parent rawplay writes
+ * frames straight into the surface physical address the child publishes. when an hmi
+ * window opens the child is killed (io-display disables the layer on client death), and
+ * when the window closes a fresh child takes the layer again. a fresh process is the
+ * reliable way back: reattaching inside the long-lived player after the hmi has used the
+ * display leaves the layer hidden. if the child cannot take the layer the player falls
+ * back to the old SIGSTOP/SIGCONT session behaviour. */
+int gf_dev_attach(void **dev, unsigned device, int *err);
+int gf_dev_detach(void *dev);
+int gf_display_attach(void **disp, void *dev, unsigned display, int *err);
+int gf_display_detach(void *disp);
+int gf_layer_attach(void **layer, void *disp, unsigned index, int flags);
+int gf_layer_detach(void *layer);
+int gf_layer_enable(void *layer);
+int gf_layer_update(void *layer, unsigned flags);
+int gf_layer_set_surfaces(void *layer, void *surfaces[], int nsurfs);
+int gf_layer_set_dst_viewport(void *layer, int x1, int y1, int x2, int y2);
+int gf_surface_create_layer(void **psurface, void *layers[], int nlayers,
+                            int surface_index, int w, int h, unsigned format,
+                            const void *palette, unsigned flags);
+int gf_surface_get_info(void *surface, void *info);
+int gf_surface_free(void *surface);
+
+#define GF_FORMAT_RGB565_LE 0x1110
+#define VIDEO_LAYER         1
+#define LAYER_STATE         "/tmp/rawplay-layer.state"
+
+extern char **environ;
+pid_t getppid(void);
+
+static pid_t layer_pid;
+static pixel *fb_direct;        /* the hmi's real framebuffer, kept for the fallback */
+static pixel *fb_layer;         /* the child's surface, where frames are streamed */
+static unsigned long long layer_paddr;
+static int layer_video;
+static unsigned gf_info[16];
+static int opt_hmi;
+static struct fb fb;
+static const char *self_path;
+static char layer_state_path[64];
+
+static void layer_helper_stop(void)
+{
+    if (layer_pid > 0) {
+        kill(layer_pid, SIGKILL);
+        waitpid(layer_pid, 0, 0);
+        layer_pid = 0;
+    }
+}
+
+static int layer_spawn(void)
+{
+    char ebuf[64], wbuf[16], hbuf[16], pidbuf[16];
+    char *argv[7];
+    void *p;
+    unsigned long long paddr;
+    unsigned stride;
+    int fd = -1, n = 0;
+
+    unlink(layer_state_path);
+    snprintf(wbuf, sizeof wbuf, "%u", fb.width);
+    snprintf(hbuf, sizeof hbuf, "%u", fb.height);
+    argv[0] = (char *)self_path;
+    argv[1] = (char *)"--layer-helper";
+    argv[2] = layer_state_path;
+    argv[3] = wbuf;
+    argv[4] = hbuf;
+    argv[5] = pidbuf;           /* parent pid */
+    argv[6] = 0;
+    snprintf(pidbuf, sizeof pidbuf, "%d", (int)getpid());
+    if (posix_spawn(&layer_pid, self_path, 0, 0, argv, environ) != 0) {
+        jlog("rawplay: cannot start the layer helper (%s)", self_path);
+        layer_pid = 0;
+        return -1;
+    }
+    /* the helper publishes the surface physical address once the layer is up */
+    paddr = 0;
+    stride = 0;
+    for (int i = 0; i < 40; i++) {
+        fd = open(layer_state_path, O_RDONLY);
+        if (fd >= 0) {
+            n = read(fd, ebuf, sizeof ebuf - 1);
+            close(fd);
+            if (n > 0) {
+                char *e;
+
+                ebuf[n] = 0;
+                paddr = (unsigned long long)strtoul(ebuf, &e, 0);
+                paddr |= (unsigned long long)strtoul(e, &e, 0) << 32;
+                stride = (unsigned)strtoul(e, &e, 0);
+                if (paddr && stride == fb.stride) {
+                    break;
+                }
+            }
+        }
+        usleep(50000);
+    }
+    unlink(layer_state_path);
+    if (!paddr || stride != fb.stride) {
+        jlog("rawplay: layer helper did not publish a usable surface");
+        layer_helper_stop();
+        return -1;
+    }
+    p = mmap_device_memory(0, fb.stride * fb.height,
+                           PROT_READ | PROT_WRITE | PROT_NOCACHE, 0, paddr);
+    if (p == MAP_FAILED) {
+        jlog("rawplay: cannot map the layer helper surface");
+        layer_helper_stop();
+        return -1;
+    }
+    if (fb_layer) {
+        munmap(fb_layer, fb.stride * fb.height);
+    }
+    fb_layer = p;
+    fb.pixels = p;
+    layer_paddr = paddr;
+    return 0;
+}
+
+static void panel_layer_close(void)
+{
+    layer_helper_stop();
+    if (fb_layer) {
+        munmap(fb_layer, fb.stride * fb.height);
+        fb_layer = 0;
+    }
+    if (fb_direct) {
+        fb.pixels = fb_direct;
+    }
+    layer_video = 0;
+}
+
+/* hand the panel back: drop the video layer, or resume the hmi in the fallback path */
+static void panel_finish(void)
+{
+    if (layer_video) {
+        panel_layer_close();
+    } else if (opt_hmi) {
+        hmi_signal(HMI_SIGCONT);
+    }
+}
+
+static int panel_layer_open(void)
+{
+    if (!opt_hmi) {
+        return -1;
+    }
+    fb_direct = fb.pixels;
+    snprintf(layer_state_path, sizeof layer_state_path, "/tmp/rawplay-layer-%d",
+             (int)getpid());
+    if (layer_spawn() != 0) {
+        return -1;
+    }
+    layer_video = 1;
+    printf("rawplay: video on layer %d, surface %#llx\n", VIDEO_LAYER, layer_paddr);
+    jlog("rawplay: video on layer %d, surface %#llx", VIDEO_LAYER, layer_paddr);
+    return 0;
+}
+
+static void panel_layer_show(int on)
+{
+    if (!layer_video) {
+        return;
+    }
+    if (on) {
+        if (layer_pid > 0) {
+            return;
+        }
+        if (layer_spawn() != 0) {
+            printf("rawplay: no video layer after the hmi window, stopping the hmi\n");
+            jlog("rawplay: no video layer after the hmi window, stopping the hmi");
+            if (fb_direct) {
+                fb.pixels = fb_direct;
+            }
+            if (opt_hmi) {
+                hmi_signal(HMI_SIGSTOP);
+            }
+            layer_video = 0;
+        }
+    } else {
+        /* dropping the child disables the layer; the hmi window is below it */
+        layer_helper_stop();
+        if (fb_layer) {
+            munmap(fb_layer, fb.stride * fb.height);
+            fb_layer = 0;
+        }
+        if (fb_direct) {
+            fb.pixels = fb_direct;
+        }
+    }
+}
+
+/* The helper owns layer 1 and the surface the parent streams into. It writes the surface
+ * physical address to the state file, then just keeps the layer alive. */
+static int layer_helper(const char *state, unsigned w, unsigned h, pid_t parent)
+{
+    void *dev = 0, *disp = 0, *layer = 0, *surface = 0;
+    void *layers[1];
+    unsigned long long paddr;
+    unsigned stride;
+    char buf[64];
+    int fd, n;
+    pid_t ppid = getppid();
+
+    if (gf_dev_attach(&dev, 0, 0) != 0 || !dev) {
+        return 1;
+    }
+    if (gf_display_attach(&disp, dev, 0, 0) != 0 || !disp) {
+        gf_dev_detach(dev);
+        return 1;
+    }
+    if (gf_layer_attach(&layer, disp, VIDEO_LAYER, 0) != 0 || !layer) {
+        gf_display_detach(disp);
+        gf_dev_detach(dev);
+        return 1;
+    }
+    layers[0] = layer;
+    if (gf_surface_create_layer(&surface, layers, 1, 0, w, h,
+                                GF_FORMAT_RGB565_LE, 0, 0) != 0 || !surface) {
+        gf_layer_detach(layer);
+        gf_display_detach(disp);
+        gf_dev_detach(dev);
+        return 1;
+    }
+    memset(gf_info, 0, sizeof gf_info);
+    gf_surface_get_info(surface, gf_info);
+    stride = gf_info[4];
+    paddr = (unsigned long long)gf_info[6] | (unsigned long long)gf_info[7] << 32;
+    gf_layer_set_surfaces(layer, &surface, 1);
+    gf_layer_set_dst_viewport(layer, 0, 0, w, h);
+    gf_layer_enable(layer);
+    if (paddr) {
+        /* leave the surface black instead of whatever the allocator hands back; the
+         * first video frame replaces it */
+        unsigned short *p = mmap_device_memory(0, stride * h,
+                                               PROT_READ | PROT_WRITE | PROT_NOCACHE,
+                                               0, paddr);
+        if (p != MAP_FAILED) {
+            for (unsigned i = 0; i < stride * h / 2; i++) p[i] = 0;
+            munmap(p, stride * h);
+        }
+    }
+    if (!paddr || gf_layer_update(layer, 0) != 0) {
+        gf_surface_free(surface);
+        gf_layer_detach(layer);
+        gf_display_detach(disp);
+        gf_dev_detach(dev);
+        return 1;
+    }
+    fd = open(state, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) {
+        gf_surface_free(surface);
+        gf_layer_detach(layer);
+        gf_display_detach(disp);
+        gf_dev_detach(dev);
+        return 1;
+    }
+    n = snprintf(buf, sizeof buf, "%u %u %u\n", (unsigned)paddr,
+                 (unsigned)(paddr >> 32), stride);
+    write(fd, buf, n);
+    close(fd);
+    for (;;) {
+        usleep(500000);
+        if (getppid() != ppid || ppid != parent) {
+            return 0;
+        }
+    }
+}
 
 #define LR_MAGIC0    'L'
 #define LR_MAGIC1    'R'
@@ -34,7 +307,6 @@
 #define LI_BUTTON    3
 #define LI_READY     5
 #define LI_RAW       8
-
 /* the stream watchdog, the same shape the serial players used: a live link that goes
  * quiet exits, a link that never delivered anything waits longer for the host to start. */
 #define STARTUP_DEAD_US 15000000
@@ -43,43 +315,39 @@
 
 /* the climate panel keys (their bits on ipc channel 6, see ICC2 sdk input.c). the hvac state
  * changes on the v850's own side when one is pressed, but the only place that state is
- * shown is the hmi's climate bar, and the hmi sits stopped behind the video. so a press
- * opens a window with --hmi: streaming pauses, the hmi runs long enough to draw the bar,
- * and a fresh press keeps the window open. a held key holds it open too. */
+ * shown is the hmi's climate bar, and the video overlay covers it. so a press opens a
+ * window with --hmi: streaming pauses, the overlay is dropped so the hmi's bar shows, and
+ * a fresh press keeps the window open. a held key holds it open too. */
 #define HMI_WINDOW_MS    1000
 #define HMI_WINDOW_STR_(x) #x
 #define HMI_WINDOW_STR(x)  HMI_WINDOW_STR_(x)
 static const unsigned char climate_keys[] = { 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 20 };
 
 /* the rest of the car that has to be shown: vehicle.state (ipc ch 4, msg 0 v7) says when
- * the gear is reverse, and vehicle.config (ipc ch 4, msg 6 v5) carries the day/night bit
- * the HMI themes on (the offsets bussignals.h/buswatch decode). a day/night switch gets
- * the same HMI_WINDOW_MS a climate key gets; reverse gear is a state, not an edge, so it
- * holds the window open from the gear engaging until it leaves reverse. the reader asks
- * for the current vehicle state when it connects, like hmictl.c's car guard, so a player
- * started while reverse is already engaged does not miss it. */
+ * the gear is reverse. reverse gear is a state, not an edge, so it holds the window open
+ * from the gear engaging until it leaves reverse. day/night is different: the HMI runs in
+ * the background and themes itself while the video covers it, so no window is needed.
+ * the reader asks for the current vehicle state when it connects, like hmictl.c's car
+ * guard, so a player started while reverse is already engaged does not miss it. */
 #define IPC_MONITOR      "/dev/ipc/0"
 #define VEHICLE_CH       4
 #define VSTATE_MSG       0x00
 #define VSTATE_VER       7
 #define VSTATE_GEAR      1      /* data byte 1 */
 #define VSTATE_LEN       7      /* msg id + version + 5 data bytes */
-#define VCONFIG_MSG      0x06
-#define VCONFIG_VER      5
-#define VCONFIG_NIGHT    6      /* data byte 0, bit 6 */
 #define GEAR_REVERSE     11
 #define VEHICLE_SILENT   500    /* 5 s of quiet reads reopens the monitor, like input.c */
 
 /* what last extended the window, for the log only */
 #define HMI_FROM_CLIMATE 0
-#define HMI_FROM_NIGHT   1
-#define HMI_FROM_REVERSE 2
+#define HMI_FROM_REVERSE 1
 
 int pthread_create(unsigned *thread, const void *attr, void *(*fn)(void *), void *arg);
+int pthread_join(unsigned thread, void **retval);
 
-static struct fb fb;
 static struct console con;
 static int opt_stats, opt_stage = 1, opt_seconds, opt_usb;
+static int opt_acm_mode = 11;       /* 11 is the ACM's USB-audio source, -1 leaves it alone */
 static int opt_poll_us = 100000;
 static int expected_len;
 
@@ -92,7 +360,6 @@ static int have_ts;
 
 /* the climate window: the input thread raises hmi_until_ms on a climate key and only the
  * main loop signals the hmi, so no frame is read between the continue and the stop */
-static int opt_hmi;
 static volatile unsigned long hmi_until_ms;
 static volatile unsigned hmi_gen;
 static volatile int climate_held;
@@ -125,6 +392,507 @@ int sem_init(out_sem_t *sem, int pshared, unsigned value);
 int sem_post(out_sem_t *sem);
 int sem_timedwait(out_sem_t *sem, const struct timespec *abs);
 static out_sem_t out_sem;
+
+/* ---- audio: PCM playback and microphone capture ----------------------------------------
+ *
+ * the host multiplexes 20 ms PCM chunks into the video stream. playback is a small ring
+ * and one thread that always writes a whole chunk: when the ring has nothing it writes
+ * silence, so the codec never underruns and the next real chunk starts exactly on a chunk
+ * boundary. the microphone runs the other way on a second thread; the writer thread puts
+ * its LI_AUDIO messages behind touch/acks so a call never delays the panel. */
+#define AUDIO_RING_BYTES (256 * 1024)
+#define AUDIO_PREBUFFER  8          /* 160 ms before the first write */
+#define MIC_QUEUE        32
+#define MIC_MSG_MAX      (LI_AUDIO_HDR_LEN + 512)
+
+static void q_lock(void);
+static void q_unlock(void);
+static unsigned long now_ms(void);
+
+static int opt_audio = 1;
+static struct qa_pcm pcm_out, pcm_in;
+
+static struct {
+    unsigned char ring[AUDIO_RING_BYTES];
+    size_t wr, rd;
+    int enabled, running;
+    volatile int stop;
+    int chunk;
+    unsigned tid;
+    unsigned long chunks, drops, underruns, errors;
+} aout;
+
+static unsigned char audio_out_buf[65536] __attribute__((aligned(16)));
+static unsigned char mic_raw[65536] __attribute__((aligned(16)));
+static unsigned char mic_acc[512];
+static int mic_acc_len;
+static double mic_pos;
+static int mic_prev;
+static int mic_have_prev;
+
+static struct {
+    int running;
+    volatile int stop;
+    int chunk;
+    unsigned tid;
+    unsigned long chunks, errors;
+} ain;
+
+static volatile int audio_lock;
+static out_sem_t audio_sem;
+
+static unsigned char qmic[MIC_QUEUE][MIC_MSG_MAX];
+static unsigned short qmic_len[MIC_QUEUE];
+static unsigned qhead_mic, qtail_mic;
+static unsigned long mic_drops;
+static unsigned mic_seq;
+static volatile int mic_cfg_pending;
+
+static unsigned char audio_buf[AUDIO_MAX_PAYLOAD];
+
+static int audio_out_reopen(void);
+static int mic_reopen(void);
+
+static void a_lock(void)
+{
+    while (__sync_lock_test_and_set(&audio_lock, 1)) {
+    }
+}
+
+static void a_unlock(void)
+{
+    audio_lock = 0;
+}
+
+static unsigned rd32le(const unsigned char *p)
+{
+    return p[0] | (unsigned)p[1] << 8 | (unsigned)p[2] << 16 | (unsigned)p[3] << 24;
+}
+
+static void put32le(unsigned char *p, unsigned v)
+{
+    p[0] = (unsigned char)v;
+    p[1] = (unsigned char)(v >> 8);
+    p[2] = (unsigned char)(v >> 16);
+    p[3] = (unsigned char)(v >> 24);
+}
+
+static size_t audio_level(void)
+{
+    size_t n;
+
+    a_lock();
+    n = aout.wr - aout.rd;
+    a_unlock();
+    return n;
+}
+
+static int audio_pop(unsigned char *dst, size_t n)
+{
+    size_t avail, i;
+
+    a_lock();
+    avail = aout.wr - aout.rd;
+    if (avail < n) {
+        a_unlock();
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        dst[i] = aout.ring[(aout.rd + i) & (AUDIO_RING_BYTES - 1)];
+    }
+    aout.rd += n;
+    a_unlock();
+    return 1;
+}
+
+static void audio_push(const unsigned char *src, size_t n)
+{
+    size_t space, drop, i;
+
+    if (!aout.enabled || n == 0 || n > AUDIO_RING_BYTES) {
+        return;
+    }
+    a_lock();
+    space = AUDIO_RING_BYTES - (aout.wr - aout.rd);
+    if (n > space) {
+        drop = n - space;
+        aout.rd += drop;
+        aout.drops++;
+    }
+    for (i = 0; i < n; i++) {
+        aout.ring[(aout.wr + i) & (AUDIO_RING_BYTES - 1)] = src[i];
+    }
+    aout.wr += n;
+    a_unlock();
+    sem_post(&audio_sem);
+}
+
+static void *audio_out_thread(void *arg)
+{
+    unsigned char *buf = audio_out_buf;
+    int playing = 0;
+
+    (void)arg;
+    while (!aout.stop) {
+        if (!playing && audio_level() < (size_t)aout.chunk * AUDIO_PREBUFFER) {
+            struct timespec ts;
+
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_nsec += 10000000;
+            while (ts.tv_nsec >= 1000000000) {
+                ts.tv_sec++;
+                ts.tv_nsec -= 1000000000;
+            }
+            sem_timedwait(&audio_sem, &ts);
+            continue;
+        }
+        playing = 1;
+        if (!audio_pop(buf, (size_t)aout.chunk)) {
+            memset(buf, 0, (size_t)aout.chunk);
+            aout.underruns++;
+        }
+        if (qa_write(&pcm_out, buf, aout.chunk) < 0) {
+            if (aout.stop) {
+                break;
+            }
+            aout.errors++;
+            if (aout.errors == 1 || (aout.errors % 100) == 0) {
+                printf("rawplay: audio output error %lu (last %d), reopening\n",
+                       aout.errors, pcm_out.last_error);
+                jlog("rawplay: audio output error %lu (last %d), reopening",
+                     aout.errors, pcm_out.last_error);
+            }
+            (void)qa_prepare(&pcm_out);
+            if (audio_out_reopen() < 0) {
+                usleep(200000);
+            }
+        } else {
+            aout.chunks++;
+        }
+    }
+    return arg;
+}
+
+static void audio_out_stop(void)
+{
+    if (!aout.running) {
+        return;
+    }
+    aout.stop = 1;
+    sem_post(&audio_sem);
+    pthread_join(aout.tid, 0);
+    aout.running = 0;
+    aout.enabled = 0;
+    qa_close(&pcm_out);
+}
+
+static int audio_out_reopen(void)
+{
+    int rate = pcm_out.rate, channels = pcm_out.channels;
+
+    qa_close(&pcm_out);
+    if (qa_open_playback_at(&pcm_out, pcm_out.card, pcm_out.device, rate, channels,
+                            AUDIO_OUT_CHUNK_BYTES) < 0) {
+        return -1;
+    }
+    pcm_out.stop = &aout.stop;
+    if (pcm_out.frag > 0 && pcm_out.frag <= (int)sizeof audio_out_buf) {
+        aout.chunk = pcm_out.frag;
+    }
+    return 0;
+}
+
+/* on the real car the ACM only unmutes the ICC's stereo/media PCM when its source is
+ * USB audio; card 0 device 0 is that path (confirmed with `wave -a0:0`). the mono/voice
+ * device is not present on this firmware, so keep it only as a last-resort fallback. */
+static int audio_out_open_best(int rate, int channels)
+{
+    /* the car's ACM unmutes the ICC media/stereo PCM when its source is USB audio;
+     * card 0 device 0 is the confirmed audible path on the real car. keep the others as
+     * fallbacks for a board whose preferred device is numbered differently. */
+    if (qa_open_playback_at(&pcm_out, 0, 0, rate, channels,
+                            AUDIO_OUT_CHUNK_BYTES) == 0) {
+        printf("rawplay: PCM out on media device 0:0\n");
+        return 0;
+    }
+    if (qa_open_playback(&pcm_out, rate, channels, AUDIO_OUT_CHUNK_BYTES) == 0) {
+        printf("rawplay: PCM out on preferred device %d:%d\n", pcm_out.card,
+               pcm_out.device);
+        return 0;
+    }
+    if (qa_open_playback_at(&pcm_out, 0, 1, rate, channels,
+                            AUDIO_OUT_CHUNK_BYTES) == 0) {
+        printf("rawplay: PCM out on device 0:1\n");
+        return 0;
+    }
+    if (qa_open_playback_at(&pcm_out, 1, 0, rate, channels,
+                            AUDIO_OUT_CHUNK_BYTES) == 0) {
+        printf("rawplay: PCM out on voice device 1:0\n");
+        return 0;
+    }
+    return -1;
+}
+
+static void audio_out_config(unsigned fmt, unsigned rate, unsigned channels,
+                             unsigned chunk_ms)
+{
+    if (!opt_audio) {
+        return;
+    }
+    if (fmt != AUDIO_OUT_FORMAT || rate != AUDIO_OUT_RATE ||
+        channels != AUDIO_OUT_CHANNELS || chunk_ms != AUDIO_OUT_CHUNK_MS) {
+        printf("rawplay: audio format %u %u Hz %u ch %u ms is not supported\n", fmt,
+               rate, channels, chunk_ms);
+        jlog("rawplay: unsupported audio format %u %u Hz %u ch %u ms", fmt, rate,
+             channels, chunk_ms);
+        return;
+    }
+    if (aout.running) {
+        a_lock();
+        aout.rd = aout.wr = 0;
+        a_unlock();
+        return;
+    }
+    if (audio_out_open_best((int)rate, (int)channels) < 0) {
+        printf("rawplay: no PCM playback device (audio stays off)\n");
+        jlog("rawplay: no PCM playback device (audio stays off)");
+        return;
+    }
+    pcm_out.stop = &aout.stop;
+    aout.chunk = pcm_out.frag > 0 && pcm_out.frag <= (int)sizeof audio_out_buf
+                     ? pcm_out.frag : AUDIO_OUT_CHUNK_BYTES;
+    aout.rd = aout.wr = 0;
+    aout.chunks = aout.drops = aout.underruns = aout.errors = 0;
+    aout.stop = 0;
+    aout.enabled = 1;
+    if (pthread_create(&aout.tid, 0, audio_out_thread, 0)) {
+        printf("rawplay: can't start the audio thread\n");
+        jlog("rawplay: can't start the audio thread");
+        aout.enabled = 0;
+        qa_close(&pcm_out);
+        return;
+    }
+    aout.running = 1;
+    printf("rawplay: PCM out %u Hz %u ch s16le, %d ms chunks, frag %d\n", rate, channels,
+           AUDIO_OUT_CHUNK_MS, pcm_out.frag);
+    jlog("rawplay: PCM out %u Hz %u ch s16le, %d ms chunks, frag %d", rate, channels,
+         AUDIO_OUT_CHUNK_MS, pcm_out.frag);
+}
+
+static void mic_push(const unsigned char *pcm, int len)
+{
+    unsigned t = qtail_mic, next = (t + 1) % MIC_QUEUE;
+    unsigned char *m;
+
+    if (len <= 0 || len > 512) {
+        return;
+    }
+    q_lock();
+    if (next == qhead_mic) {
+        qhead_mic = (qhead_mic + 1) % MIC_QUEUE;
+        mic_drops++;
+    }
+    m = qmic[t];
+    m[0] = 'L';
+    m[1] = 'I';
+    m[2] = LI_AUDIO;
+    m[3] = (unsigned char)len;
+    m[4] = (unsigned char)(len >> 8);
+    put32le(m + 5, mic_seq++);
+    put32le(m + 9, now_ms());
+    memcpy(m + LI_AUDIO_HDR_LEN, pcm, (size_t)len);
+    qmic_len[t] = (unsigned short)(LI_AUDIO_HDR_LEN + len);
+    qtail_mic = next;
+    q_unlock();
+    sem_post(&out_sem);
+}
+
+static int pop_mic(unsigned char *dst)
+{
+    unsigned h = qhead_mic;
+    int n;
+
+    q_lock();
+    if (h == qtail_mic) {
+        q_unlock();
+        return 0;
+    }
+    n = qmic_len[h];
+    memcpy(dst, qmic[h], (size_t)n);
+    qhead_mic = (h + 1) % MIC_QUEUE;
+    q_unlock();
+    return n;
+}
+
+static void mic_emit(unsigned char v)
+{
+    mic_acc[mic_acc_len++] = v;
+    if (mic_acc_len >= AUDIO_IN_CHUNK_BYTES) {
+        mic_push(mic_acc, AUDIO_IN_CHUNK_BYTES);
+        memmove(mic_acc, mic_acc + AUDIO_IN_CHUNK_BYTES,
+                (size_t)(mic_acc_len - AUDIO_IN_CHUNK_BYTES));
+        mic_acc_len -= AUDIO_IN_CHUNK_BYTES;
+        ain.chunks++;
+    }
+}
+
+/* the codec capture is s16 stereo at its own rate; average to mono, resample to 8 kHz by
+ * linear interpolation (the state carries across fragment boundaries) and convert to u8. */
+static void mic_convert_native(const unsigned char *raw, int n)
+{
+    const short *s = (const short *)raw;
+    int ch = pcm_in.channels > 1 ? pcm_in.channels : 1;
+    int frames = n / (2 * ch);
+    double step = (double)pcm_in.rate / AUDIO_IN_RATE;
+    int f;
+
+    for (f = 0; f < frames; f++) {
+        int l = s[f * ch];
+        int r = ch > 1 ? s[f * ch + 1] : l;
+        int mono = (l + r) / 2;
+
+        if (!mic_have_prev) {
+            mic_prev = mono;
+            mic_have_prev = 1;
+            mic_pos = 1.0;
+            continue;
+        }
+        while (mic_pos <= 1.0) {
+            double v = mic_prev + (mono - mic_prev) * mic_pos;
+            int u = (int)(v / 256) + 128;
+
+            if (u < 0) {
+                u = 0;
+            } else if (u > 255) {
+                u = 255;
+            }
+            mic_emit((unsigned char)u);
+            mic_pos += step;
+        }
+        mic_pos -= 1.0;
+        mic_prev = mono;
+    }
+}
+
+static void *mic_thread(void *arg)
+{
+    (void)arg;
+    mic_acc_len = 0;
+    mic_pos = 1.0;
+    mic_have_prev = 0;
+    while (!ain.stop) {
+        int want = pcm_in.frag > 0 && pcm_in.frag <= (int)sizeof mic_raw
+                       ? pcm_in.frag : 4096;
+        int n = qa_read(&pcm_in, mic_raw, want);
+
+        if (n < 0) {
+            if (ain.stop) {
+                break;
+            }
+            ain.errors++;
+            if (qa_prepare(&pcm_in) < 0) {
+                if (ain.errors == 1 || (ain.errors % 100) == 0) {
+                    printf("rawplay: microphone error %lu (last %d), retrying\n",
+                           ain.errors, pcm_in.last_error);
+                    jlog("rawplay: microphone error %lu (last %d), retrying",
+                         ain.errors, pcm_in.last_error);
+                }
+                if (mic_reopen() < 0) {
+                    usleep(200000);
+                }
+            }
+            continue;
+        }
+        if (pcm_in.format == QA_FMT_U8) {
+            for (int i = 0; i < n; i++) {
+                mic_emit(mic_raw[i]);
+            }
+        } else {
+            mic_convert_native(mic_raw, n);
+        }
+    }
+    return arg;
+}
+
+static void mic_stop(void)
+{
+    if (!ain.running) {
+        return;
+    }
+    ain.stop = 1;
+    pthread_join(ain.tid, 0);
+    ain.running = 0;
+    qa_close(&pcm_in);
+}
+
+static int mic_open_best(void)
+{
+    /* the voice/mono capture is the path the car's ACM feeds the ICC microphone/voice
+     * signal into; the stereo "Mic In" device is the fallback. */
+    if (qa_open_capture_at(&pcm_in, 1, 0, 8000, 1, 160) == 0) {
+        printf("rawplay: PCM in on voice device 1:0\n");
+        return 0;
+    }
+    if (qa_open_capture_at(&pcm_in, 0, 1, 8000, 1, 160) == 0) {
+        printf("rawplay: PCM in on device 0:1\n");
+        return 0;
+    }
+    if (qa_open_capture_native(&pcm_in, 44100, 2, 4096) == 0
+        || qa_open_capture_native(&pcm_in, 48000, 2, 4096) == 0
+        || qa_open_capture(&pcm_in, AUDIO_IN_RATE, AUDIO_IN_CHANNELS,
+                           AUDIO_IN_CHUNK_BYTES) == 0) {
+        printf("rawplay: PCM in on preferred device %d:%d\n", pcm_in.card,
+               pcm_in.device);
+        return 0;
+    }
+    return -1;
+}
+
+static int mic_reopen(void)
+{
+    qa_close(&pcm_in);
+    if (mic_open_best() < 0) {
+        return -1;
+    }
+    pcm_in.stop = &ain.stop;
+    mic_acc_len = 0;
+    mic_have_prev = 0;
+    mic_pos = 1.0;
+    return 0;
+}
+
+static void mic_start(void)
+{
+    if (!opt_audio || ain.running) {
+        return;
+    }
+    if (mic_open_best() < 0) {
+        printf("rawplay: no PCM capture device (microphone stays off)\n");
+        jlog("rawplay: no PCM capture device (microphone stays off)");
+        return;
+    }
+    pcm_in.stop = &ain.stop;
+    ain.stop = 0;
+    ain.chunks = ain.errors = 0;
+    if (pthread_create(&ain.tid, 0, mic_thread, 0)) {
+        printf("rawplay: can't start the microphone thread\n");
+        jlog("rawplay: can't start the microphone thread");
+        qa_close(&pcm_in);
+        return;
+    }
+    ain.running = 1;
+    if (pcm_in.format == QA_FMT_U8) {
+        printf("rawplay: PCM in %u Hz %u ch u8, %d ms chunks, frag %d\n",
+               AUDIO_IN_RATE, AUDIO_IN_CHANNELS, AUDIO_IN_CHUNK_MS, pcm_in.frag);
+        jlog("rawplay: PCM in %u Hz %u ch u8, %d ms chunks, frag %d", AUDIO_IN_RATE,
+             AUDIO_IN_CHANNELS, AUDIO_IN_CHUNK_MS, pcm_in.frag);
+    } else {
+        printf("rawplay: PCM in %d Hz %d ch s16 -> %u Hz u8, frag %d\n", pcm_in.rate,
+               pcm_in.channels, AUDIO_IN_RATE, pcm_in.frag);
+        jlog("rawplay: PCM in %d Hz %d ch s16 -> %u Hz u8, frag %d", pcm_in.rate,
+             pcm_in.channels, AUDIO_IN_RATE, pcm_in.frag);
+    }
+}
 
 static void q_lock(void)
 {
@@ -205,16 +973,38 @@ static void vehicle_request_state(void)
     }
 }
 
-/* the car's side of the window: a day/night switch opens one, reverse holds it open. only
- * rx frames matter (direction byte 1 set is the guest's own tx), and only the two fields
- * the window reacts to are extracted. the monitor can go quiet after a stopped hmi's
- * resume, so a read error or 5 s without a frame reopens it, the same self-healing the
- * SDK's input.c panel reader uses. the first night value seen is a baseline, not a
- * switch; a first frame that already says reverse does open the window. */
+/* the ACM gates the ICC's analogue output by its selected source. "USB audio" is the
+ * source that unmutes card 0 / device 0, and the acm process's source table maps its USB
+ * event to v850 event 5 with data 11. send that request directly, the same way the acm
+ * process does, instead of making the driver pick USB audio by hand before every session.
+ * the source is a car state, not the codec: once selected, io-audio plays straight through. */
+static int acm_select_source(int mode)
+{
+    static const unsigned char flow[] = { 0x0f, 0x03, 0x02 };
+    unsigned char request[] = { 0x10, 0x03, 0x05, 0, 0, 0, (unsigned char)mode };
+    int fd = open("/dev/ipc/2", O_WRONLY);
+
+    if (fd < 0) {
+        return -1;
+    }
+    /* ask the v850 for its current acm state, then send the source request. the acm
+     * process does the same flow request when it connects, but rawplay may start long
+     * after that connection and the source request still has to go through. */
+    write(fd, flow, sizeof flow);
+    write(fd, request, sizeof request);
+    close(fd);
+    return 0;
+}
+
+/* the car's side of the reverse window: only vehicle.state matters. only rx frames
+ * matter (direction byte 1 set is the guest's own tx). the monitor can go quiet after a
+ * stopped hmi's resume, so a read error or 5 s without a frame reopens it, the same
+ * self-healing the SDK's input.c panel reader uses. a first frame that already says
+ * reverse does open the window. */
 static void *vehicle_thread(void *arg)
 {
     static unsigned char buf[1002];
-    int fd = -1, have_night = 0, night = 0;
+    int fd = -1;
     unsigned silent = 0;
     ssize_t n;
 
@@ -257,16 +1047,6 @@ static void *vehicle_thread(void *arg)
                 }
             } else if (reverse_hold) {
                 reverse_hold = 0;
-            }
-        } else if (buf[2] == VCONFIG_MSG && buf[3] == VCONFIG_VER) {
-            int v = (buf[4] >> VCONFIG_NIGHT) & 1;
-
-            if (!have_night) {
-                have_night = 1;
-                night = v;
-            } else if (v != night) {
-                night = v;
-                note_hmi_window(HMI_FROM_NIGHT);
             }
         }
     }
@@ -351,6 +1131,7 @@ static int pop_ack(unsigned char *m)
 static void send_ready(void)
 {
     ready_pending = 1;
+    mic_cfg_pending = 1;
     sem_post(&out_sem);
 }
 
@@ -395,7 +1176,7 @@ static void send_input(const struct input_event *ev)
 
 static void *writer_thread(void *arg)
 {
-    unsigned char m[8];
+    unsigned char m[MIC_MSG_MAX];
 
     while (running) {
         int n = pop_input(m);
@@ -403,12 +1184,33 @@ static void *writer_thread(void *arg)
         if (!n) {
             n = pop_ack(m);
         }
+        if (!n && mic_cfg_pending) {
+            mic_cfg_pending = 0;
+            m[0] = 'L';
+            m[1] = 'I';
+            m[2] = LI_AUDIO_CFG;
+            m[3] = 1;                       /* version */
+            m[4] = AUDIO_IN_FORMAT;
+            m[5] = AUDIO_IN_RATE & 0xff;
+            m[6] = AUDIO_IN_RATE >> 8;
+            m[7] = AUDIO_IN_CHANNELS;
+            m[8] = AUDIO_IN_CHUNK_MS;
+            m[9] = aout.running ? (unsigned char)(1 + ((pcm_out.card & 0xf) << 4)
+                                                   + (pcm_out.device & 0xf)) : 0xff;
+            m[10] = ain.running ? (unsigned char)(1 + ((pcm_in.card & 0xf) << 4)
+                                                   + (pcm_in.device & 0xf)) : 0xff;
+            m[11] = (unsigned char)(aout.errors > 0xff ? 0xff : aout.errors);
+            n = LI_AUDIO_CFG_LEN;
+        }
         if (!n && ready_pending) {
             ready_pending = 0;
             m[0] = 'L';
             m[1] = 'I';
             m[2] = LI_READY;
             n = 3;
+        }
+        if (!n) {
+            n = pop_mic(m);
         }
         if (n) {
             raw_usb_write(m, n);
@@ -521,8 +1323,9 @@ static int sget(unsigned char *b)
 
 /* read n bytes into dst. the leftovers already buffered are used first; what remains is
  * read in maxpacket multiples straight into dst, except a tail smaller than a packet,
- * which goes through rxbuf and leaves the overshoot buffered. */
-static int read_exact(unsigned char *dst, int n)
+ * which goes through rxbuf and leaves the overshoot buffered. only the panel payload
+ * passes allow_direct: protocol bytes must never be a direct-urb destination. */
+static int read_exact_mode(unsigned char *dst, int n, int allow_direct)
 {
     int done = 0, quiet = 0;
 
@@ -541,7 +1344,8 @@ static int read_exact(unsigned char *dst, int n)
         if (rem >= mps) {
             int chunk = rem - rem % mps;
 
-            r = raw_usb_read(dst + done, chunk, LINK_DEAD_US / 1000);
+            r = allow_direct ? raw_usb_read_direct(dst + done, chunk, LINK_DEAD_US / 1000)
+                             : raw_usb_read(dst + done, chunk, LINK_DEAD_US / 1000);
             if (r < 0) {
                 return -1;      /* dead, quiet or stopped; without this the loop spins */
             }
@@ -571,6 +1375,17 @@ static int read_exact(unsigned char *dst, int n)
         }
     }
     return 0;
+}
+
+static int read_exact(unsigned char *dst, int n)
+{
+    return read_exact_mode(dst, n, 0);
+}
+
+/* the frame payload is the one transfer that may dma straight into the panel mapping */
+static int read_exact_panel(unsigned char *dst, int n)
+{
+    return read_exact_mode(dst, n, 1);
 }
 
 static int discard(int n)
@@ -709,7 +1524,10 @@ static int read_header(unsigned *type, unsigned *len, unsigned *seq, unsigned *t
     if (h[3] != 0 ||
         (*type == LR_MODE && *len != MODE_PAYLOAD) ||
         (*type == LR_FRAME && (!expected_len || *len != (unsigned)expected_len)) ||
-        (*type != LR_MODE && *type != LR_FRAME)) {
+        (*type == LR_AUDIO_CFG && *len != LR_AUDIO_CFG_LEN) ||
+        (*type == LR_AUDIO && *len != AUDIO_OUT_CHUNK_BYTES) ||
+        (*type != LR_MODE && *type != LR_FRAME &&
+         *type != LR_AUDIO_CFG && *type != LR_AUDIO)) {
         return 2;                   /* not a header: keep scanning */
     }
     return 1;
@@ -749,6 +1567,43 @@ static int read_mode(void)
     return 0;
 }
 
+/* the audio config starts both directions: playback on the unit and the microphone back
+ * to the host. it is repeated by the host whenever the reader is reset. */
+static int read_audio_cfg(void)
+{
+    unsigned char p[LR_AUDIO_CFG_LEN];
+
+    if (read_exact(p, sizeof p) < 0) {
+        return -1;
+    }
+    if (skip_pad(LR_MSG - LR_HEADER - sizeof p) < 0) {
+        return -1;
+    }
+    audio_out_config(rd32le(p), rd32le(p + 4), rd32le(p + 8), rd32le(p + 12));
+    mic_start();
+    return 0;
+}
+
+/* a PCM chunk is the 512-byte header then the payload, zero padded to the next whole
+ * 512-byte boundary so the following header starts on a packet boundary. */
+static int read_audio(unsigned len)
+{
+    int pad;
+
+    if (skip_pad(LR_MSG - LR_HEADER) < 0) {
+        return -1;
+    }
+    if (read_exact(audio_buf, (int)len) < 0) {
+        return -1;
+    }
+    pad = (int)((LR_MSG - (len % LR_MSG)) % LR_MSG);
+    if (pad && skip_pad(pad) < 0) {
+        return -1;
+    }
+    audio_push(audio_buf, len);
+    return 0;
+}
+
 /* ---- panel --------------------------------------------------------------------- */
 
 static void panel_clear(pixel c)
@@ -763,55 +1618,60 @@ static void ui_idle(void)
     con_printf(&con, "rawplay: waiting for the host\n");
 }
 
-/* put the hmi and buttons back to the way the session pause holds them */
+/* put the video and the session-paused buttons back after an hmi window */
 static void hmi_window_close(void)
 {
-    /* buttons first: it is the producer, and stopping the hmi before it would make any
-     * event still generated queue in the stopped hmi for the next window or resume */
+    /* buttons first: it is the producer, so stop it before the video returns; anything it
+     * generated during the window must not queue for the hmi's next resume */
     if (hmi_buttons) {
         hmi_events_window_close();
         hmi_buttons = 0;
         printf("rawplay: buttons stopped with the hmi again\n");
         jlog("rawplay: buttons stopped with the hmi again");
     }
-    hmi_signal(HMI_SIGSTOP);
+    if (layer_video) {
+        panel_layer_show(1);
+        if (layer_video) {
+            jlog("rawplay: video layer back after the hmi window");
+        }
+    } else {
+        hmi_signal(HMI_SIGSTOP);
+    }
     hmi_active = 0;
     if (hmi_from == HMI_FROM_REVERSE) {
-        printf("rawplay: reverse window closed, hmi stopped\n");
-        jlog("rawplay: reverse window closed, hmi stopped");
-    } else if (hmi_from == HMI_FROM_NIGHT) {
-        printf("rawplay: day/night window closed, hmi stopped\n");
-        jlog("rawplay: day/night window closed, hmi stopped");
+        printf("rawplay: reverse window closed, video back\n");
+        jlog("rawplay: reverse window closed, video back");
     } else {
-        printf("rawplay: climate window closed, hmi stopped\n");
-        jlog("rawplay: climate window closed, hmi stopped");
+        printf("rawplay: climate window closed, video back\n");
+        jlog("rawplay: climate window closed, video back");
     }
 }
 
 /* while a window is open the main loop does not read: a frame would paint over the bar the
  * hmi is drawing (in direct mode the urbs land in the panel mapping itself). the host is
  * not acked, so it keeps only what its window holds and drops the rest, and after the
- * window the link picks up with the next frame it is given. a day/night window closes
- * HMI_WINDOW_MS after the switch; reverse holds it open for as long as the gear stays
+ * window the link picks up with the next frame it is given. a climate window closes
+ * HMI_WINDOW_MS after the key; reverse holds it open for as long as the gear stays
  * engaged, however long that is. */
 static void hmi_window(void)
 {
     unsigned gen = hmi_gen;
 
     if (!hmi_active) {
-        /* buttons first, then the hmi: the session resume's order. the kill is what drops
-         * the frames queued for the frozen connection, so the hmi cannot read a backlog
-         * that was sitting in its own queue either. ham starts a clean buttons which then
-         * feeds the live panel into the resumed hmi. */
+        /* drop the video overlay first so the hmi's background and window show while its
+         * buttons are restarted and it draws. in the fallback path this is the old
+         * SIGCONT with the hmi stopped behind the video. */
+        if (layer_video) {
+            panel_layer_show(0);
+        }
         hmi_buttons = hmi_events_window_open();
-        hmi_signal(HMI_SIGCONT);
+        if (!layer_video) {
+            hmi_signal(HMI_SIGCONT);
+        }
         hmi_active = 1;
         if (hmi_from == HMI_FROM_REVERSE) {
             printf("rawplay: reverse gear, hmi back\n");
             jlog("rawplay: reverse gear, hmi back");
-        } else if (hmi_from == HMI_FROM_NIGHT) {
-            printf("rawplay: day/night switch, hmi back for %d ms\n", HMI_WINDOW_MS);
-            jlog("rawplay: day/night switch, hmi back for %d ms", HMI_WINDOW_MS);
         } else {
             printf("rawplay: climate key, hmi back for %d ms\n", HMI_WINDOW_MS);
             jlog("rawplay: climate key, hmi back for %d ms", HMI_WINDOW_MS);
@@ -846,20 +1706,33 @@ static void usage(void)
            "             default on the emulator, but on a real unit the first frame lands\n"
            "             and then the bulk-in pipe stops, so staged is the default there\n"
            "  --stage    read through the usbd_alloc staging ring and copy (the default)\n"
-           "  --hmi      the hmi is stopped behind the video: a climate panel key pauses the\n"
-           "             stream, resumes the hmi and its buttons so the climate bar shows the\n"
-           "             press, and stops them again " HMI_WINDOW_STR(HMI_WINDOW_MS) " ms after\n"
-           "             the last key. a day/night switch opens the same window, and\n"
-           "             reverse gear holds it open for as long as the gear is engaged\n"
+           "  --hmi      keep the hmi running and own the overlay layer above it. a climate\n"
+           "             panel key pauses the stream and drops the overlay for " HMI_WINDOW_STR(HMI_WINDOW_MS) " ms\n"
+           "             after the last key so the climate bar shows, then the video comes back.\n"
+           "             reverse gear holds the window open for as long as the gear is\n"
+           "             engaged. day/night needs no window: the running hmi themes itself\n"
+           "             offscreen. if the overlay cannot be attached, fall back to stopping\n"
+           "             the hmi behind the video\n"
            "  --urb      bulk-in urb size in bytes (default 262144, min 512, max 1048576)\n"
            "  --poll-us  input wake timeout in microseconds, the lost-wakeup net for the\n"
-           "             event driven input thread (default 100000, min 250)\n");
+           "             event driven input thread (default 100000, min 250)\n"
+           "  --acm-mode N  ACM source to select at startup (default 11, USB audio; -1 leaves\n"
+           "             the source alone)\n"
+           "  --no-audio do not open PCM playback/capture even when the host offers it\n");
 }
 
 int main(int argc, char **argv)
 {
     long long last_ready = 0, last_stats = 0;
 
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--layer-helper") && i + 4 < argc) {
+            return layer_helper(argv[i + 1], (unsigned)strtoul(argv[i + 2], 0, 0),
+                                (unsigned)strtoul(argv[i + 3], 0, 0),
+                                (pid_t)strtoul(argv[i + 4], 0, 0));
+        }
+    }
+    self_path = argv[0];
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--usb")) {
             opt_usb = 1;
@@ -869,6 +1742,13 @@ int main(int argc, char **argv)
             opt_stage = 0;
         } else if (!strcmp(argv[i], "--hmi")) {
             opt_hmi = 1;
+        } else if (!strcmp(argv[i], "--no-audio")) {
+            opt_audio = 0;
+        } else if (!strcmp(argv[i], "--acm-mode") && i + 1 < argc) {
+            opt_acm_mode = (int)strtol(argv[++i], 0, 0);
+            if (opt_acm_mode < -1 || opt_acm_mode > 255) {
+                opt_acm_mode = -1;
+            }
         } else if (!strcmp(argv[i], "--urb") && i + 1 < argc) {
             raw_usb_set_chunk((int)strtol(argv[++i], 0, 0));
         } else if (!strcmp(argv[i], "--poll-us") && i + 1 < argc) {
@@ -899,6 +1779,16 @@ int main(int argc, char **argv)
         jlog("rawplay: can't map the framebuffer");
         return 1;
     }
+    /* the hmi keeps running: the layer helper owns the overlay above it, and only drops
+     * that overlay for a window. only if the helper cannot take the layer does the old
+     * stop/resume session behaviour apply. */
+    if (panel_layer_open() == 0) {
+        if (opt_hmi) {
+            hmi_signal(HMI_SIGCONT);
+        }
+    } else if (opt_hmi) {
+        hmi_signal(HMI_SIGSTOP);
+    }
     panel_clear(fb_rgb(10, 14, 24));
     ui_idle();
     printf("rawplay: framebuffer %dx%d stride %u\n", fb.width, fb.height, fb.stride);
@@ -912,6 +1802,7 @@ int main(int argc, char **argv)
     if (raw_usb_start() != 0) {
         printf("rawplay: no livi usb gadget found\n");
         jlog("rawplay: no livi usb gadget found");
+        panel_finish();
         return 1;
     }
     /* a 64-byte bulk endpoint means the unit's io-usb came up with force_fs. raw 768 KB
@@ -922,27 +1813,41 @@ int main(int argc, char **argv)
     if (raw_usb_mps() < 512) {
         printf("rawplay: full-speed usb link, restarting it high speed\n");
         jlog("rawplay: full-speed usb link, restarting it high speed");
+        panel_finish();
         return 75;
+    }
+    if (opt_acm_mode >= 0) {
+        if (acm_select_source(opt_acm_mode) == 0) {
+            printf("rawplay: ACM source set to %d\n", opt_acm_mode);
+            jlog("rawplay: ACM source set to %d", opt_acm_mode);
+        } else {
+            printf("rawplay: can't open the ACM channel, source left alone\n");
+            jlog("rawplay: can't open the ACM channel, source left alone");
+        }
     }
     discard_buf = raw_usb_scratch();
     send_ready();
     t_start = now_us();
     last_rx_us = t_start;
     sem_init(&out_sem, 0, 0);
+    sem_init(&audio_sem, 0, 0);
 
     {
         unsigned thread_id;
 
         if (pthread_create(&thread_id, 0, input_thread, 0)) {
             printf("rawplay: can't start the input thread\n");
+            panel_finish();
             return 1;
         }
         if (pthread_create(&thread_id, 0, writer_thread, 0)) {
             printf("rawplay: can't start the writer thread\n");
+            panel_finish();
             return 1;
         }
         if (opt_hmi && pthread_create(&thread_id, 0, vehicle_thread, 0)) {
             printf("rawplay: can't start the vehicle thread\n");
+            panel_finish();
             return 1;
         }
     }
@@ -998,6 +1903,28 @@ int main(int argc, char **argv)
                 exit_reason = "host mode does not match the panel";
                 break;
             }
+        } else if (type == LR_AUDIO_CFG) {
+            if (read_audio_cfg() < 0) {
+                if (raw_usb_error()) {
+                    printf("rawplay: bulk-in error in audio config, resyncing\n");
+                    resync_stream();
+                    continue;
+                }
+                exit_reason = "link read failed in audio config";
+                break;
+            }
+            last_rx_us = now_us();
+        } else if (type == LR_AUDIO) {
+            if (read_audio(len) < 0) {
+                if (raw_usb_error()) {
+                    printf("rawplay: bulk-in error in audio, resyncing\n");
+                    resync_stream();
+                    continue;
+                }
+                exit_reason = "link read failed in audio";
+                break;
+            }
+            last_rx_us = now_us();
         } else if (type == LR_FRAME) {
             long long t0 = now_us();
 
@@ -1038,9 +1965,12 @@ int main(int argc, char **argv)
                 continue;
             }
             /* a header already sitting in the refill buffer means this frame is already
-             * old news: consume it without painting it (newest-wins) */
+             * old news: consume it without painting it (newest-wins). an audio message
+             * between frames is not a superseding frame, so only a complete-looking
+             * FRAME header counts here. */
             if (rxlen - rxpos >= LR_HEADER && rxbuf[rxpos] == LR_MAGIC0 &&
-                rxbuf[rxpos + 1] == LR_MAGIC1) {
+                rxbuf[rxpos + 1] == LR_MAGIC1 && rxbuf[rxpos + 2] == LR_FRAME &&
+                (rd32le(rxbuf + rxpos + 4) == (unsigned)expected_len)) {
                 if (discard(len) < 0) {
                     printf("rawplay: bulk-in error while discarding, resyncing\n");
                     resync_stream();
@@ -1050,7 +1980,7 @@ int main(int argc, char **argv)
                 send_ack(seq, 2);
                 continue;
             }
-            if (read_exact((unsigned char *)fb.pixels, (int)len) < 0) {
+            if (read_exact_panel((unsigned char *)fb.pixels, (int)len) < 0) {
                 if (raw_usb_error()) {
                     /* the frame is lost mid-transfer. ack it stale so the host's window
                      * moves on, resync, and take the next header. the panel holds part
@@ -1090,17 +2020,22 @@ int main(int argc, char **argv)
 
             last_stats = now_us();
             printf("rawplay: %lu frames, %lu drawn, %lu stale, %llu kb, %.1f fps "
-                   "(source %.1f), %.1f ms/frame, %s%s\n", frames, drawn, superseded,
+                   "(source %.1f), %.1f ms/frame, %s%s, audio %lu out/%lu mic, "
+                   "ring %lu, err %lu, drop %lu/%lu/%lu\n", frames, drawn, superseded,
                    rx_bytes / 1024, frames * 1000000.0 / el,
                    src_dt_us ? src_frames * 1000000.0 / src_dt_us : 0.0,
                    frames ? rx_us / 1000.0 / frames : 0.0,
                    raw_usb_direct() ? "direct" : "staged",
-                   raw_usb_compacted() ? " (compacted)" : "");
+                   raw_usb_compacted() ? " (compacted)" : "",
+                   aout.chunks, ain.chunks, audio_level(), aout.errors,
+                   dropped_in, dropped_ack, mic_drops);
             src_dt_us = 0;
             src_frames = 0;
         }
     }
     running = 0;
+    audio_out_stop();
+    mic_stop();
     if (hmi_active) {
         /* the exit screen is drawn where the hmi was; a failure message would otherwise be
          * painted over by a bar the hmi still owns. the window close also stops any
@@ -1116,21 +2051,25 @@ int main(int argc, char **argv)
             con_printf(&con, "rawplay: %s\n", exit_reason);
         }
         printf("rawplay: %lu frames, %lu drawn, %lu stale, %llu kb in %lld ms (%.1f fps, "
-               "%.1f ms/frame), %s%s, source %.1f fps, drop in/ack %lu/%lu%s%s\n", frames,
+               "%.1f ms/frame), %s%s, source %.1f fps, audio %lu out/%lu mic, "
+               "drop in/ack/mic %lu/%lu/%lu%s%s\n", frames,
                drawn, superseded, rx_bytes / 1024, el / 1000, frames * 1000000.0 / el,
                frames ? rx_us / 1000.0 / frames : 0.0, raw_usb_direct() ? "direct" : "staged",
                raw_usb_compacted() ? " (compacted)" : "",
                src_dt_us ? src_frames * 1000000.0 / src_dt_us : 0.0,
-               dropped_in, dropped_ack, exit_reason ? ", " : "", exit_reason ? exit_reason : "");
+               aout.chunks, ain.chunks, dropped_in, dropped_ack, mic_drops,
+               exit_reason ? ", " : "", exit_reason ? exit_reason : "");
         jlog("rawplay: exit, %lu frames, %lu drawn, %llu kb, %s%s%s%s", frames, drawn,
              rx_bytes / 1024, raw_usb_direct() ? "direct" : "staged",
              raw_usb_compacted() ? " (compacted)" : "", exit_reason ? ", " : "",
              exit_reason ? exit_reason : "");
-        /* the hmi is stopped behind the player and rawplay.sh resumes it as soon as this
-         * returns: a failure would otherwise flash past unread on a unit with no console */
+        /* a failure would otherwise flash past unread on a unit with no console. the
+         * video layer stays up for the message and is dropped afterwards, which hands
+         * the panel back to the hmi without ever stopping it. */
         if (exit_reason) {
-            usleep(3000000);
+            usleep(1000000);
         }
     }
+    panel_finish();
     return 0;
 }

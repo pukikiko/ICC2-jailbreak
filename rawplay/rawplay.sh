@@ -6,24 +6,23 @@
 # usage: rawplay.sh [seconds] [--stats] [--stage]
 #   seconds  stop after this many seconds of guest time
 #   --stage  always copy through the usbd_alloc staging ring instead of dma'ing straight
-#            into the panel mapping (the default, which falls back on its own if refused)
+#            into the video surface (the default, which falls back on its own if refused)
 #   --stats  five second progress lines
 #
 # the player sits next to this script: /tmp for an upload, /fs/usb0/... on the stick.
 #
-# the hmi is always stopped for the player (this script stops it when it is not stopped
-# already, the launcher and the menu stop it around their commands), so the player is told
-# to bring it back for the climate bar when a climate panel key is pressed. buttons is
-# paused for the session, so the player restarts it for the window (kill + ham's clean
-# respawn, the same way this script's resume does it) and stops it again at the end.
+# the hmi keeps running: a small helper process owns the graphics layer above it (layer 1)
+# and the player maps the surface it publishes. for a climate/reverse window the helper is
+# killed so the hmi shows, and a fresh one takes the layer when the window closes. day/night
+# needs no window: the hmi keeps running and themes itself offscreen. if a unit cannot give
+# the player that layer, the player itself falls back to the old SIGSTOP/SIGCONT behaviour.
 #
-# whoever stops the hmi also stops the buttons service for the session: its events would
-# otherwise queue in the stopped hmi and all replay at once when it resumes (volume jumps,
-# menus open by themselves). buttons is frozen with SIGSTOP, not killed: it is guarded by
-# ham (CONDDEATH + restart), so a kill is answered with an immediate respawn that would
-# just queue again. at resume the frozen process is SIGKILLed; the guard starts a clean one
-# and the kill is what drops the frames queued for the old connection, so the hmi sees the
-# newest state only.
+# buttons is paused for the session, so its events do not pile up in the hidden hmi. the
+# player restarts it for the window (kill + ham's clean respawn, the same way this script's
+# resume does it) and stops it again at the end. buttons is frozen with SIGSTOP, not killed:
+# it is guarded by ham (CONDDEATH + restart), so a kill is answered with an immediate
+# respawn that would just queue again. at resume the frozen process is SIGKILLed; the guard
+# starts a clean one and the kill is what drops the frames queued for the old connection.
 DIR=${0%/*}
 [ "$DIR" = "$0" ] && DIR=/tmp
 
@@ -32,14 +31,11 @@ DIR=${0%/*}
 /proc/boot/slay rawplay 2>/dev/null &
 /proc/boot/sleep 1
 
-HMI_PID=
 BUTTONS_PAUSED=no
-STOPPED=no
 
-stop_hmi() {
-    # buttons first: stopped before the hmi, it cannot be mid-write into a queue that will
-    # only be read at resume. a marker whose owner is gone is stale (a session killed
-    # before its resume), so take the pause over instead of trusting it.
+pause_buttons() {
+    # a marker whose owner is gone is stale (a session killed before its resume), so take
+    # the pause over instead of trusting it.
     bp=$(cat /tmp/buttons-paused 2>/dev/null)
     if [ -n "$bp" ] && kill -0 "$bp" 2>/dev/null; then
         :   # a live outer session owns it
@@ -56,14 +52,6 @@ stop_hmi() {
         echo $$ > /tmp/buttons-paused
         BUTTONS_PAUSED=yes
     fi
-    HMI_PID=
-    read HMI_PID < /tmp/hmi-overlay.loaded 2>/dev/null
-    if [ -n "$HMI_PID" ]; then
-        kill -STOP "$HMI_PID" 2>/dev/null
-    else
-        /proc/boot/slay -s SIGSTOP hmi
-    fi
-    STOPPED=yes
 }
 
 # a pid from slay -p only says a process exists: ham's respawn can die in the window before
@@ -77,7 +65,7 @@ buttons_live() {
     [ -s /tmp/buttons.pids ]
 }
 
-resume_hmi() {
+resume_buttons() {
     if [ "$BUTTONS_PAUSED" = yes ] && [ -e /tmp/buttons-paused ]; then
         rm -f /tmp/buttons-paused
         # SIGKILL so the ham guard restarts it (see the header); it drops the backlog
@@ -118,21 +106,11 @@ resume_hmi() {
         rm -f /tmp/buttons.pids
         [ "$alive" = yes ] || echo "rawplay.sh: buttons is still missing, the panel is deaf"
     fi
-    if [ -n "$HMI_PID" ]; then
-        kill -CONT "$HMI_PID" 2>/dev/null
-    else
-        /proc/boot/slay -s SIGCONT hmi
-    fi
-    rm -f /tmp/hmi-stopped
 }
 
-if [ ! -e /tmp/hmi-stopped ]; then
-    stop_hmi
-    # only a run that stopped the hmi may resume it: inside the launcher/menu session the
-    # outer command still owns the stop and the hmi must stay frozen behind it
-    trap 'resume_hmi' EXIT INT TERM
-    echo "rawplay.sh: hmi stopped, running player"
-fi
+pause_buttons
+trap 'resume_buttons' EXIT INT TERM
+echo "rawplay.sh: hmi left running, player owns the video layer"
 
 $DIR/rawplay --usb --hmi "$@"
 status=$?
@@ -151,10 +129,8 @@ if [ $status -eq 75 ]; then
 fi
 echo "rawplay.sh: player exited $status"
 
-if [ "$STOPPED" = yes ]; then
-    resume_hmi
-    # the player can have written the marker again while bringing the hmi back for a
-    # climate key; the hmi is running now, so the next run must not think it is stopped
-    rm -f /tmp/hmi-stopped
-fi
+resume_buttons
+# a fallback rawplay resumes the hmi itself; a killed fallback leaves the marker for
+# stickwatch, which already knows how to recover it
+rm -f /tmp/hmi-stopped
 echo "rawplay.sh: done"

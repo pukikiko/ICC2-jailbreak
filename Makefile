@@ -14,6 +14,7 @@ UNIT    = out/rawplay out/iccbuttons out/buswatch out/syncsploit out/homebrew ou
           out/hmi-overlay.so out/mediaplayer out/terminal
 STICK_SRC = stick
 STICK   = usb/homebrew
+ASOUNDSTUB = out/libasound.so.2
 
 all: $(UNIT) out/livi-usb.o
 
@@ -31,12 +32,23 @@ $(COMMON)/menufont.h: $(COMMON)/menufont.c
 # hmictl (hmi pause/resume + the car guard), jlog (the stick debug log) and the menu ui
 # live in common/; the process/framebuffer/console/input pieces stay in the ICC2 sdk.
 
-out/rawplay: rawplay/rawplay.c $(COMMON)/raw-usb.c $(SDKBASE) $(OURCO) $(COMMON)/raw-usb.h \
-             $(SDK)/qnx.h $(COMMON)/hmictl.h $(COMMON)/jlog.h $(COMMON)/usbdi.h \
-             $(LIBC) $(USBSTUB)
+# link-time stand-in for the unit's stripped libasound.so.2; qnx-audio.c calls the PCM
+# plugin API and the real library is what the loader finds on the unit at run time
+$(ASOUNDSTUB): rawplay/qnx-asound-stub.c rawplay/qnx-audio-abi.h $(SDK)/qnx.h
 	@mkdir -p out
-	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $@ $(SDKBASE) $(OURCO) $(COMMON)/raw-usb.c \
-	      rawplay/rawplay.c $(LIBC) $(USBSTUB)
+	$(CC) $(TARGET) -Os -ffreestanding -fno-pic -fno-stack-protector -shared -nostdlib \
+	      -fuse-ld=lld -Wl,-soname,libasound.so.2 -Wl,--hash-style=sysv \
+	      -Wl,-z,norelro -Wl,--build-id=none -I$(SDK) -o $@ rawplay/qnx-asound-stub.c
+
+out/rawplay: rawplay/rawplay.c rawplay/qnx-audio.c $(COMMON)/raw-usb.c $(SDKBASE) \
+             $(OURCO) $(COMMON)/raw-usb.h rawplay/lr-audio.h rawplay/qnx-audio.h \
+             rawplay/qnx-audio-abi.h $(ASOUNDSTUB) \
+             $(SDK)/qnx.h $(COMMON)/hmictl.h $(COMMON)/jlog.h $(COMMON)/usbdi.h \
+             $(LIBC) $(USBSTUB) $(SDK)/stub/libgf.so.1
+	@mkdir -p out
+	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -Irawplay -o $@ $(SDKBASE) $(OURCO) \
+	      $(COMMON)/raw-usb.c rawplay/qnx-audio.c rawplay/rawplay.c \
+	      $(LIBC) $(USBSTUB) $(SDK)/stub/libgf.so.1 $(ASOUNDSTUB)
 
 out/iccbuttons: iccbuttons/iccbuttons.c $(SDKBASE) $(OURCO) $(SDK)/qnx.h $(COMMON)/hmictl.h $(LIBC)
 	@mkdir -p out

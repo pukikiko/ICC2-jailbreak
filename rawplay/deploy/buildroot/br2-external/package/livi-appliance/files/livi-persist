@@ -88,19 +88,24 @@ set_livi_string() {
 # appliance defaults on every boot: wireless Android Auto on
 # (wirelessAaEnabled), the Wi-Fi adapter reserved for the AP (Dedicated
 # interface -> wifiDedicatedInterface), the Bluetooth/Wi-Fi/head-unit name
-# (carName = Ford Falcon), the phone-facing AP on 2.4 GHz channel 6 under the
-# Australian regulatory domain (wifiType/wifiChannel/country) and the
-# projected video at 24 fps (projectionFps). Seeding alone would leave an
-# already-flashed /data partition on the old values, so existing files are
-# merged in place and never replaced (pairing state and other user settings
-# are preserved).
+# (carName = Ford Falcon), the phone-facing AP on 2.4 GHz channel 11 at
+# 20 MHz under the Australian regulatory domain
+# (wifiType/wifiChannel/wifiChannelWidth/country) and the projected video at
+# 24 fps (projectionFps). Channel 11 is the clean one here: channel 6 shares
+# the band with a neighbouring AP and the 20 MHz width is what the UWE5622
+# actually runs (hostapd reports secondary_channel=0 and the beacon HT20).
+# The width is pinned explicitly so a saved 40 MHz config cannot make the
+# helper ask for HT40 again. Seeding alone would leave an already-flashed
+# /data partition on the old values, so existing files are merged in place
+# and never replaced (pairing state and other user settings are preserved).
 ensure_livi_settings() {
     cfg=$1
     set_livi_value "$cfg" wirelessAaEnabled true
     set_livi_value "$cfg" wifiDedicatedInterface true
     set_livi_string "$cfg" carName "Ford Falcon"
     set_livi_string "$cfg" wifiType "2.4ghz"
-    set_livi_value "$cfg" wifiChannel 6
+    set_livi_value "$cfg" wifiChannel 11
+    set_livi_value "$cfg" wifiChannelWidth 20
     set_livi_string "$cfg" country "AU"
     set_livi_value "$cfg" projectionFps 24
 }
@@ -123,6 +128,25 @@ if [ -e /dev/media0 ] && [ -s "$reg" ] && ! grep -aq v4l2slh264dec "$reg" 2>/dev
     rm -f "$reg"
     echo "livi-persist: dropped the stale GStreamer registry (no v4l2 decoder)" >&2
 fi
+
+# CPU DVFS: the H618 is blocklisted from cpufreq-dt and the nvmem driver is a
+# module that nothing autoloads, so without this the CPU stays at the
+# bootloader frequency. The appliance is mains-powered, so pin performance:
+# it removes the ramp latency from the decode/composite path that Android
+# Auto's continuous video notices most. A failed load or a board without the
+# driver is not fatal; the governor loop is a no-op then.
+modprobe sun50i-cpufreq-nvmem 2>/dev/null || true
+i=0
+while [ "$i" -lt 3 ]; do
+    if [ -e /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]; then
+        break
+    fi
+    sleep 1
+    i=$((i + 1))
+done
+for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+    [ -w "$g" ] && echo performance > "$g" 2>/dev/null || true
+done
 
 # systemd wants a real machine-id and BlueZ keys some state on it. persist
 # one so pairings keep working, and fall back to generating a fresh one.
