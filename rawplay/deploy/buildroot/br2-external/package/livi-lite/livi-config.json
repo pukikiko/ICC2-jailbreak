@@ -13,6 +13,7 @@
   "wifiChannelWidth": 20,
   "country": "AU",
   "projectionFps": 24,
+  "projectionDpi": 140,
   "dismissedPackages": [
     "bluez",
     "libspa-0.2-bluetooth",

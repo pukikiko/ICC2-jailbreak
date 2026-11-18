@@ -111,6 +111,14 @@ ensure_livi_settings() {
     set_livi_value "$cfg" wifiChannelWidth 20
     set_livi_string "$cfg" country "AU"
     set_livi_value "$cfg" projectionFps 24
+    # Android Auto infers a missing/zero DPI from the panel's physical size.
+    # Headless weston reports the 800x480 output as 800x480 mm (1 px = 1 mm),
+    # so the inferred value was 25 dpi and the AA UI was enormous. 140 is the
+    # density of the 800x480 tier; keep a user's explicit non-zero value.
+    dpi=$(sed -n 's/.*"projectionDpi": *\([0-9][0-9]*\).*/\1/p' "$cfg" | head -n 1)
+    if [ "${dpi:-0}" -eq 0 ]; then
+        set_livi_value "$cfg" projectionDpi 140
+    fi
 }
 for d in LIVI LIVI-vnc; do
     if [ ! -f "/home/user/.config/$d/config.json" ] \

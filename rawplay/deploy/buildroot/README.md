@@ -494,7 +494,7 @@ are the check on real hardware.
       "wifiType": "5ghz", "wifiChannel": 149, "wifiChannelWidth": 20,
       "country": "AU", "wirelessAaEnabled": true,
       "wifiDedicatedInterface": true, "carName": "Ford Falcon",
-      "projectionFps": 24
+      "projectionFps": 24, "projectionDpi": 140
 
   The phone-facing AP is configured for 5 GHz channel 149 at 20 MHz under
   the Australian regulatory domain. Channel 149 is in the 5725-5850 MHz
@@ -511,6 +511,12 @@ are the check on real hardware.
   `iw dev wlan0 info` (channel 149 / 5745 MHz) and `hostapd_cli status`.
   To fall back to the old default, set `wifiType`/`wifiChannel` back to
   `2.4ghz`/`11` in both `livi-config.json` and `livi-persist`.
+* `projectionDpi` is pinned to 140. Leaving it at 0 makes Android Auto infer
+  density from the panel's physical size; headless weston reports the
+  800x480 output as 800x480 mm, so the AA tier was negotiated at **25 dpi**
+  and its UI was enormous. 140 is the density the AA stack itself uses for
+  the 800x480 tier. `livi-persist` migrates an existing `/data` value of 0
+  to 140, but preserves a user-set non-zero value.
 * The image ships an empty `/etc/livi/packages.txt` and sets
   `LIVI_PACKAGES_MANIFEST` to it in `livi.service`. The appliance has no
   apt/dnf and does not use the AppImage or the AMD/Intel VA-API stack, so
