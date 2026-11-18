@@ -10,6 +10,8 @@
 
 # Pinned armbian/uwe5622 commit: the unified tree Armbian build-tested on
 # 6.12.y (among 6.1/6.18/7.0/7.1), so no extra version patches are needed.
+# 0002 is upstream 610fa78 (the 5 GHz SoftAP DS Params fix), which is newer
+# than this pin; drop the local patch when the pin is bumped past it.
 UWE5622_VERSION = cc2835a3f935d5297e03cdce464c1785381a7b4d
 UWE5622_SITE = $(call github,armbian,uwe5622,$(UWE5622_VERSION))
 UWE5622_LICENSE = GPL-2.0

@@ -1,9 +1,9 @@
 #!/bin/sh
 # Put a homebrew stick image at /opt/livi/usb.img.
 #
-# A checkout that has run `make stick` (or the phone install) already has
-# usb.img at the repo root: use it, unchanged, so the appliance serves the
-# same launcher/hmi/rawplay payload the emulator and the phone use.
+# A checkout that has run `make stick` already has usb.img at the repo root:
+# use it, unchanged, so the appliance serves the same launcher/hmi/rawplay
+# payload the emulator uses.
 #
 # A clean checkout does not (usb.img is generated and gitignored), and rawlink
 # still needs an image: without one the gadget has no mass storage and the

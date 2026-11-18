@@ -23,7 +23,7 @@ for f in \
     /opt/livi/livi-core \
     /opt/livi/livi-ui \
     /opt/livi/resources/compositor/livi-compositor \
-    /opt/livi/resources/gst-host/livi-gst-host \
+    /opt/livi/resources/output/livi-output \
     /opt/livi/resources/driver/livi-helperd; do
     if [ -f "$f" ]; then
         cat "$f" >/dev/null 2>&1 || true

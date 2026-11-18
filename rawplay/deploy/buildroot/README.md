@@ -1,10 +1,9 @@
 # rawlink + weston + LIVI-Lite as a Buildroot appliance (Orange Pi Zero 2W)
 
-This is the second rawlink deployment: a purpose-built Buildroot image for an
-**Orange Pi Zero 2W** (Allwinner H618, aarch64) with a **qemu aarch64 `virt`**
-board that proves the software stack on any x86 host. It reuses the phone
-deployment's units and the hard-won LIVI/rawlink fixes
-(`rawplay/deploy/README.md`, `rawplay/README.md`).
+This is a purpose-built Buildroot image for an **Orange Pi Zero 2W**
+(Allwinner H618, aarch64) with a **qemu aarch64 `virt`** board that proves the
+software stack on any x86 host. It carries the LIVI/rawlink units and the
+hard-won protocol fixes described in `rawplay/README.md`.
 
 ```
  car head unit (QNX, i.MX31, USB host)  <--- USB high speed --->  Orange Pi Zero 2W
@@ -23,10 +22,9 @@ GStreamer/Wayland. There is no AppImage, no Electron/Chromium and no
 supervisor script: `livi.service` runs `/opt/livi/livi-core`, which starts the
 compositor, UI, GStreamer host and helper itself.
 
-Divergences from the phone deployment, by design: the H618 is glibc (no
-Ubuntu chroot), there is no charger state machine or
-`livi-link-monitor`, the rootfs is a read-only squashfs with a small ext4
-data partition, and all boot-path drivers are built in.
+Design choices: the H618 is glibc, there is no charger state machine, the
+rootfs is a read-only squashfs with a small ext4 data partition, and all
+boot-path drivers are built in.
 
 > Status: the **qemu image builds, boots, reaches T6 and passes
 > `tests/smoke.sh`** with LIVI-Lite (measured table below). The **Orange Pi
@@ -71,7 +69,7 @@ rawplay/deploy/buildroot/
                            (BR2_GLOBAL_PATCH_DIR)
   livi-lite-patches/       reference patches for a fresh LIVI-Lite checkout
   scripts/                 build.sh, run-qemu.sh, flash.sh, boottime.sh,
-                           qemu_boot.py, throughput.sh
+                           livi-lite-build.sh, qemu_boot.py, throughput.sh
   tests/                   smoke.sh, unit-sim/, rawsink.py
 ```
 
@@ -130,7 +128,7 @@ Package versions that matter (all verified in the 2026.08 tree):
 libva 2.24.1 (>= 2.21, the bundled GStreamer's `vaMapBuffer2`),
 wayland 1.24.0 (>= 1.23, `wl_display_create_queue_with_name` for
 `libgstwaylandsink`), Python 3.14.7 (the asyncio shim is installed),
-systemd 258.7, weston 15.0.1, PulseAudio 17.0, hostapd 2.11, BlueZ 5.79.
+systemd 258.7, weston 15.0.1, PulseAudio 17.0, hostapd 2.12, BlueZ 5.79.
 
 ## Verified hardware and software facts
 
@@ -165,15 +163,23 @@ could not be verified it says so.
   768 000-byte frames (`scripts/throughput.sh` + `tests/rawsink.py` on a
   bench host, and the same rate from the board's own `rawstream` stats).
   PIO with single 512-byte FIFOs is the limit; there is no DMA path to
-  enable. The raw link needs ~23 MB/s for 30 fps, so **30 fps of raw frames
-  is out of reach on this board**: the panel can be fed ~24-25 fps, and the
-  wire time of one frame (~40 ms) is the latency floor for any full-frame
-  update. `rawlink-wait` therefore captures at 24 fps (just under the link)
-  so the sender's 2-frame window stays empty: measured 24 fps at 41 ms ack
-  latency, against 25 fps at 57 ms when capturing at 30 and queueing one
-  frame ahead. More than that (dirty-rect deltas, a DMA-capable UDC, or a
-  different wire format) is future work; qemu proves nothing here because
-  dummy_hcd is virtual and the wire is free.
+  enable. A full raw frame needs ~23 MB/s for 30 fps, so **30 fps of
+  incompressible raw frames is out of reach on this board**: the panel can
+  be fed ~24-25 fps, and the wire time of one frame (~40 ms) is the latency
+  floor for a full-frame update. The current `rawlink run` avoids most of
+  that wire time when the unit supports it: it sends only changed row runs
+  (`LR_BANDS`) and falls back to a raw frame when they are not at least
+  half the picture. A car UI or a mostly static projection stream is far
+  below the raw bitrate, so the 24 fps capture cadence is no longer the
+  wire limit; a full-screen noisy video still is. `rawlink-wait` keeps
+  `--fps 24` because that leaves the sender's 2-frame window empty and the
+  measured latency at 41 ms instead of 57 ms at 30 fps. LIVI's projection
+  sink is the default `waylandsink`; a GStreamer `videorate` cap would need
+  `videoconvert` in front of it because the v4l2 decoder hands out DMABuf
+  frames, so the 24 fps cap is left to `rawlink-wait`'s capture instead.
+  The remaining upgrades are a dirty-rect scheme with sub-row runs and a
+  DMA-capable UDC; qemu proves nothing about the MUSB wire because dummy_hcd
+  is virtual.
 
 ### Wi-Fi/BT: Unisoc UWE5622 (AW859A), shipped out of tree on mainline
 
@@ -223,6 +229,17 @@ could not be verified it says so.
   the device is pageable. The driver is still a vendor BSP port ("the
   driver is trash" per its own porters): expect flakiness, not Intel
   quality.
+* **5 GHz AP**: hostapd 2.11+ no longer emits the DS Parameter Set element
+  in 5 GHz beacons, but the UWE5622 firmware takes the SoftAP channel from
+  that element in the `WIFI_CMD_START_AP` beacon template. Without it the
+  AP reports `AP-ENABLED` and never radiates. `package/uwe5622` carries the
+  upstream `armbian/uwe5622` fix (`610fa78`), which inserts the element
+  into the beacon head for the firmware; the firmware strips it from the
+  beacons it transmits. `livi-persist` pins the phone-facing AP to 5 GHz
+  channel 149 (AU, non-DFS), and the firmware picks the actual AP width
+  from the widest 20/40/80 block holding the primary channel. The chip is
+  1x1 on one antenna shared with Bluetooth, so expect roughly 100 Mbit/s
+  and less range than 2.4 GHz.
 
 ### Hardware video decoding: the H616 video engine (cedrus)
 
@@ -266,7 +283,7 @@ it inert).
 
 LIVI's codec probe then reports hardware (verified on the board):
 
-    [core] gst-host codecs {"h264":{"hw":true,"sw":true},"h265":{"hw":true,"sw":true},...}
+    [core] output codecs {"h264":{"hw":true,"sw":true},"h265":{"hw":true,"sw":true},...}
 
 and the video host picks its sink chain from the compositor's render node
 (LIVI-Lite's `presink`, see the reference patch):
@@ -354,7 +371,10 @@ encoded bytes).
   is synchronously waiting for the frame, and the PBO round trip adds
   another 16 ms on panfrost. Result on hardware: the panel now receives
   every frame the link can carry (24 fps at 41 ms ack latency, from the
-  default 2-frame window captured at 24 fps).
+  default 2-frame window captured at 24 fps). With changed-row updates the
+  same capture loop can spend the freed wire time on more frames when the
+  content changes less than a full screen; the 24 fps send target stays the
+  safe default for a full-motion stream.
 
 One upgrade detail:
 
@@ -399,7 +419,11 @@ the ICC over the same vendor interface:
   its stdout to `rawlink --audio-cmd`. That is s16le/44100/stereo, which
   `rawlink` chunks into 20 ms `LR_AUDIO` messages interleaved with the video.
   It works with the PCM5102A card when one exists and with `livi-null`
-  otherwise.
+  otherwise. `parec --latency-msec=60 --process-time-msec=20` and the null
+  sink's `norewinds=1` (a 50 ms block; module-null-sink has no latency_msec
+  argument in PulseAudio 17) keep the monitor from adding PulseAudio's
+  few-hundred-ms default; `rawlink` queues at most six video-delayed chunks
+  and the unit starts playback with four, growing only after an underrun.
 * `livi-pulse` loads `module-pipe-source source_name=livi-car-mic
   file=/run/livi-audio/car-mic format=u8 rate=8000 channels=1`. It is the
   default source, so LIVI's phone/assistant uplink opens the car microphone
@@ -429,19 +453,20 @@ are the check on real hardware.
 * Source: the `pukikiko/LIVI-Lite` checkout next to this repo (override
   `LIVI_LITE_SRC=`), built by `package/livi-lite` with Buildroot's prebuilt
   Rust (`host-rust-bin`, Rust 1.97.1) for `aarch64-unknown-linux-gnu`. The
-  build is one shared script (`rawplay/deploy/livi-lite-build.sh`) that
-  compiles four workspaces - `livi-gst-host`, `livi-compositor`, `livi-core`
+  build is one script
+  (`rawplay/deploy/buildroot/scripts/livi-lite-build.sh`) that compiles four
+  binaries - `livi-output`, `livi-compositor`, `livi-core`
   + `livi-helperd`, `livi-ui` - with `--locked` and stages the installed
   layout `Resources::installed()` expects:
   `/opt/livi/livi-core`, `/opt/livi/livi-ui`,
-  `/opt/livi/resources/{driver/livi-helperd,gst-host/livi-gst-host,compositor/livi-compositor}`
+  `/opt/livi/resources/{driver/livi-helperd,output/livi-output,compositor/livi-compositor}`
   plus the root templates from `assets/linux`.
 * Runtime dependencies are the image's own libraries, not a bundle:
   GStreamer 1.x (system), wayland/libxkbcommon, libudev (systemd), EGL
   (Mesa llvmpipe on qemu, the board's GPU/llvmpipe on hardware), and the
   GStreamer plugins its pipelines use - `gst1-plugins-bad` (waylandsink,
   h264/h265 parse, faad), `gst1-plugins-good` (pulsesink, volume, aacparse,
-  RTP), `gst1-plugins-base` (convert/resample/opus) and `gst1-libav`
+  RTP), `gst1-plugins-base` (convert/resample/videorate/opus) and `gst1-libav`
   (`avdec_h264`/`avdec_h265`, the software fallback).
 * There is no AppImage, no Electron/Chromium, no python helper and no
   supervisor script. `livi-core` starts the nested compositor, the Slint UI,
@@ -466,23 +491,37 @@ are the check on real hardware.
   800x480 tier and the kiosk fullscreen check accepts the window) it carries
   the appliance's network/video defaults:
 
-      "wifiType": "2.4ghz", "wifiChannel": 11, "wifiChannelWidth": 20,
+      "wifiType": "5ghz", "wifiChannel": 149, "wifiChannelWidth": 20,
       "country": "AU", "wirelessAaEnabled": true,
       "wifiDedicatedInterface": true, "carName": "Ford Falcon",
       "projectionFps": 24
 
-  The phone-facing AP therefore comes up on 2.4 GHz channel 11 at 20 MHz
-  under the Australian regulatory domain (verified on the board:
-  `[wifi-ap] AP up — channel=11`; hostapd reports `secondary_channel=0` and
-  the beacon is HT20). Channel 11 was chosen after a survey: channel 6
-  shared the band with a neighbouring AP, and a PC client's ping jitter to
-  the appliance dropped from ~19 ms average/~97 ms max on channel 6 to
-  ~9 ms average/~43 ms max on channel 11. The width is pinned to 20 MHz
-  because that is what the UWE5622 actually runs; asking for 40 MHz only
-  made hostapd advertise HT40 capabilities the beacon then did not use.
+  The phone-facing AP is configured for 5 GHz channel 149 at 20 MHz under
+  the Australian regulatory domain. Channel 149 is in the 5725-5850 MHz
+  band, which is not DFS or indoor-only in AU; 36-48 is indoor-only and
+  52-144 needs DFS. The UWE5622 firmware chooses the AP bandwidth itself
+  (the widest 20/40/80 block containing the primary channel; `START_AP`
+  has no width field), so 20 MHz is pinned here to keep the first bring-up
+  deterministic. hostapd 2.11+ dropped the DS Parameter
+  Set element from 5 GHz beacons, and the firmware takes the SoftAP channel
+  from that element; `package/uwe5622`'s `0002` patch (upstream
+  `armbian/uwe5622` `610fa78`, tested there on a Zero2) inserts it into the
+  beacon head for the firmware. Without the patch hostapd reports
+  `AP-ENABLED` but nothing is radiated on 5 GHz. Check the board with
+  `iw dev wlan0 info` (channel 149 / 5745 MHz) and `hostapd_cli status`.
+  To fall back to the old default, set `wifiType`/`wifiChannel` back to
+  `2.4ghz`/`11` in both `livi-config.json` and `livi-persist`.
+* The image ships an empty `/etc/livi/packages.txt` and sets
+  `LIVI_PACKAGES_MANIFEST` to it in `livi.service`. The appliance has no
+  apt/dnf and does not use the AppImage or the AMD/Intel VA-API stack, so
+  LIVI's first-run "Missing Packages" dialog never reaches the car display.
+  The two entries the prompt would otherwise show (`mesa-va-drivers`,
+  `fuse3`) are also in the seeded `dismissedPackages`.
   The UI setting "FPS" starts at 24 (LIVI's own AA handshake still
   negotiates 30/60 — its protocol's `VideoFrameRate` only has those two; 24
-  is the app-side/CarPlay default). `livi-persist` re-applies all of these
+  is the app-side/CarPlay default). `rawlink-wait` captures weston at 24 fps;
+  the GStreamer sink stays `waylandsink` because a `videorate` cap cannot
+  negotiate the v4l2 decoder's DMABuf frames. `livi-persist` re-applies all of these
   on every boot, not only on a fresh `/data`, the same way it always
   enforced `wirelessAaEnabled`/`carName`, so an upgrade of an
   already-flashed card moves to the new defaults. `livi.service` also sets
@@ -580,10 +619,10 @@ are the check on real hardware.
   `LIVI_UI_SIZE=800x480`, `WAYLAND_DISPLAY=wayland-livi`, `PULSE_SERVER` and the persistent
   `GST_REGISTRY`; everything else is the defaults. Mesa is built with
   **llvmpipe** (plus softpipe as the fallback): the Rust compositor renders
-  through system EGL and llvmpipe is the software configuration that works
-  both here and on the phone (Adreno GL on hardware). There is no Electron
-  flag set left to carry: no `--no-sandbox`, no `--disable-gpu`, no
-  `ozone-platform`, no `APPIMAGE` shim.
+  through system EGL and llvmpipe is the software fallback that works on
+  qemu and the board. There is no Electron flag set left to carry: no
+  `--no-sandbox`, no `--disable-gpu`, no `ozone-platform`, no `APPIMAGE`
+  shim.
 * **qemu board**: same rootfs, same units, same package set; only the
   board parts differ. `dummy_hcd` gives a real configfs/FunctionFS UDC and
   a virtual host controller in the same guest (verified: it supports high
@@ -761,7 +800,7 @@ image; every item was either removed entirely or kept as a toggle.
   straight on the devtmpfs node; `systemd.getty_auto=0` plus masks of the
   stock tty instances keep generated gettys out.
 * **Native session start.** `livi.service` runs `livi-core` directly; the
-  binary starts the compositor, UI, gst-host and helper itself. Compared to
+  binary starts the compositor, UI, output host and helper itself. Compared to
   the Electron build this removes the AppImage/outer-launcher/Chromium cold
   start entirely (the two cold starts cost ~12 s and ~30 s under qemu TCG).
 * **Persistent GStreamer registry.** `GST_REGISTRY` on `/data` with
@@ -962,7 +1001,7 @@ LIVI's media hosts feed their GStreamer pipelines through `appsrc` (e.g.
 VPU image the probe picks `v4l2slh264dec`/`v4l2slh265dec` and the chain is
 covered in "Hardware video decoding"). The two
 board defconfigs originally left `BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_APP`
-unset, so on a real session the pipeline failed to parse (`gst-host.log`:
+unset, so on a real session the pipeline failed to parse (`output.log`:
 `pipeline parse FAILED: no element "appsrc"`, `create player ... FAILED`)
 while the BT/Wi-Fi session itself established normally - the panel then
 kept showing LIVI's own "phone connected" UI and the bug looked like an AA
@@ -1007,10 +1046,9 @@ predates the v4l2 decoders by itself).
    recovery path. If the owner wants a physical recovery button instead,
    that is a hardware decision.
 5. **Root services and anonymous PulseAudio.** LIVI, rawlink and weston run
-   as root (the phone ran weston as `user`), and the system PulseAudio
-   socket is `auth-anonymous` because no login session exists. The AP has no
-   shell and no root login; still, if the threat model changes, both are the
-   places to revisit.
+   as root, and the system PulseAudio socket is `auth-anonymous` because no
+   login session exists. The AP has no shell and no root login; still, if the
+   threat model changes, both are the places to revisit.
 
 ## Limits / future work
 

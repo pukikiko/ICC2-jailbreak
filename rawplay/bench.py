@@ -130,6 +130,14 @@ def main():
                          'representative table in rawplay/README.md was measured on)')
     ap.add_argument('--window', type=int, default=2,
                     help='unacked frames the host keeps in flight (default 2)')
+    ap.add_argument('--no-bands', action='store_true',
+                    help='disable changed-row updates (raw whole frames only)')
+    ap.add_argument('--audio', action='store_true',
+                    help='exercise the audio path too: qemu captures the codec output and '
+                         'rawlink sends its test tone and records the microphone')
+    ap.add_argument('--rawlink', metavar='PATH',
+                    default=os.path.join(HERE, 'out', 'rawlink'),
+                    help='host sender binary, for benching another build')
     ap.add_argument('--urb', type=int, default=None,
                     help='bulk-in urb size passed to rawplay (default: its own 262144)')
     ap.add_argument('--poll-us', type=int, default=None,
@@ -185,6 +193,15 @@ def main():
         extra += ['-device', 'usb-livi,drive=stick,chardev=liviusb,id=liviusb0,chunked=on']
     if args.icount is not None:
         extra += ['-icount', f'shift={args.icount},sleep=off']
+    if args.audio:
+        # the unit's io-audio opens wm8580; qemu needs a backend for it to be a real PCM
+        # device, otherwise the player's open fails and the audio path is never exercised.
+        try:
+            os.unlink(f'{OUT}/bench-audio.wav')
+        except FileNotFoundError:
+            pass
+        extra += ['-audiodev', f'wav,id=snd,path={OUT}/bench-audio.wav',
+                  '-global', 'wm8580.audiodev=snd']
     console = open(f'{OUT}/bench-console.log', 'w')
     if args.boot:
         etfs = QEMU_HERE + '/../dump/packages/factory/qnx_binaries_and_libraries/root/sbin/fs-etfs-ram'
@@ -461,12 +478,20 @@ def main():
                   + (f' --urb {args.urb}' if args.urb else '')
                   + (f' --poll-us {args.poll_us}' if args.poll_us else '')
                   + (' --direct' if args.direct else ' --stage' if args.stage else ''))
-        sender = os.path.join(HERE, 'out', 'rawlink')
+        sender = args.rawlink
         if not os.path.exists(sender):
             print(f'bench: {sender} not built (make -C rawplay rawlink)')
             return None
         stream_cmd = [sender, 'stream', USB_SOCKET, '--usb', '--events', events, '--stats',
                       '--seconds', str(deadline_scale), '--window', str(args.window)]
+        if args.no_bands:
+            stream_cmd.append('--no-bands')
+        if args.audio:
+            mic = f'{OUT}/bench-mic-{kind}.raw'
+            for stale in (mic,):
+                if os.path.exists(stale):
+                    os.unlink(stale)
+            stream_cmd += ['--audio-test', '--audio-out', mic]
         if args.source == 'motion':
             stream_cmd += ['--motion', '--fps', str(args.fps)]
         elif args.source == 'file':

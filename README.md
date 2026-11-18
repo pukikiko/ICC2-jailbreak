@@ -76,7 +76,8 @@ populated yet the build fetches and builds it (network needed); to do that step 
     buswatch/     the live uart3 + standby-pin scope, and the signal table baker
     mediaplayer/  the ffmpeg file browser/player
     terminal/     the framebuffer terminal + on-screen keyboard (a shell on pipes)
-    rawplay/      the raw rgb565 video/touch player: unit side, host side, tests, deploy
+    rawplay/      the raw rgb565 video/touch player: unit side, host side, tests,
+                  deploy/buildroot (the appliance image)
     syncsploit/   the navi-update installer (python tools, the ui, a ready-made stick tree)
     tests/        emulator end-to-end checks (the buttons watchdog regression)
     stick/        the tracked stick base: boot.sh, stickwatch.sh, apps.txt, buttons.txt,

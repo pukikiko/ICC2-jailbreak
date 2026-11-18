@@ -34,13 +34,13 @@ LIVI_LITE_DEPENDENCIES = host-rustc host-pkgconf host-cmake openssl \
 # infrastructure uses, so the crates.io downloads are cached in DL_DIR
 # instead of being fetched for every rebuild. The build is not `--offline`:
 # the crates are given by each workspace's Cargo.lock, fetched on first use.
-# The shared build script exports AWS_LC_SYS_NO_JITTER_ENTROPY=1 itself (see
-# rawplay/deploy/livi-lite-build.sh): Buildroot's -O2 CFLAGS would otherwise
+# The build script exports AWS_LC_SYS_NO_JITTER_ENTROPY=1 itself (see
+# scripts/livi-lite-build.sh): Buildroot's -O2 CFLAGS would otherwise
 # fight aws-lc-sys's -O0 requirement for its optional jitterentropy source.
 define LIVI_LITE_BUILD_CMDS
 	$(TARGET_MAKE_ENV) $(TARGET_CONFIGURE_OPTS) $(PKG_CARGO_ENV) \
 		CARGO_TARGET_DIR=$(@D)/target \
-		$(BR2_EXTERNAL_LIVI_APPLIANCE_PATH)/../../livi-lite-build.sh \
+		$(BR2_EXTERNAL_LIVI_APPLIANCE_PATH)/../../scripts/livi-lite-build.sh \
 			$(@D) $(@D)/stage
 endef
 
@@ -70,7 +70,7 @@ define LIVI_LITE_INSTALL_TARGET_CMDS
 	mkdir -p $(TARGET_DIR)/etc/sudoers.d $(TARGET_DIR)/usr/local/sbin
 	$(INSTALL) -D -m 0644 $(@D)/assets/linux/livi-wifi-ap.service.template \
 		$(TARGET_DIR)/etc/systemd/system/livi-wifi-ap.service
-	$(SED) 's|__USERNAME__|root|g;s|__SYSTEMCTL__|/usr/bin/systemctl|g' \
+	$(SED) 's|__USERNAME__|root|g;s|__SYSTEMCTL__|/usr/bin/systemctl|g;s|__USER_DATA__|/home/user/.config/LIVI|g' \
 		$(TARGET_DIR)/etc/systemd/system/livi-wifi-ap.service
 	$(INSTALL) -D -m 0644 $(@D)/assets/linux/99-LIVI-wifi-ap.sudoers.template \
 		$(TARGET_DIR)/etc/sudoers.d/99-LIVI-wifi-ap
@@ -79,13 +79,12 @@ define LIVI_LITE_INSTALL_TARGET_CMDS
 	chmod 0440 $(TARGET_DIR)/etc/sudoers.d/99-LIVI-wifi-ap
 	ln -sf /opt/livi/resources/driver/livi-helperd \
 		$(TARGET_DIR)/usr/local/sbin/livi-helperd
-	# The rule that lets LIVI run the helper as root. The phone installer
-	# seeds the same file for its user, aimed at the installed helper; the
-	# template's /home/__USERNAME__ path is the AppImage layout, so point it
-	# at the helper this image installs, for the root the service runs as.
+	# The rule that lets LIVI run the helper as root. The template's
+	# __HELPER__ placeholder is the AppImage layout, so point it at the
+	# helper this image installs, for the root the service runs as.
 	$(INSTALL) -D -m 0644 $(@D)/assets/linux/99-LIVI-helper.sudoers.template \
 		$(TARGET_DIR)/etc/sudoers.d/99-LIVI-helper
-	$(SED) 's|/home/__USERNAME__/.config/LIVI/driver/livi-helperd|/opt/livi/resources/driver/livi-helperd|;s|__USERNAME__|root|g' \
+	$(SED) 's|__HELPER__|/opt/livi/resources/driver/livi-helperd|g;s|__USERNAME__|root|g' \
 		$(TARGET_DIR)/etc/sudoers.d/99-LIVI-helper
 	chmod 0440 $(TARGET_DIR)/etc/sudoers.d/99-LIVI-helper
 	# AppStream metadata from the same assets dir; keep it in its canonical

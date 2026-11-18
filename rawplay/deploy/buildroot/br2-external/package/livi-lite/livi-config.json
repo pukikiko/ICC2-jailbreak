@@ -8,8 +8,8 @@
   "carName": "Ford Falcon",
   "wirelessAaEnabled": true,
   "wifiDedicatedInterface": true,
-  "wifiType": "2.4ghz",
-  "wifiChannel": 11,
+  "wifiType": "5ghz",
+  "wifiChannel": 149,
   "wifiChannelWidth": 20,
   "country": "AU",
   "projectionFps": 24,
@@ -40,6 +40,8 @@
     "pipewire-pulse",
     "wireplumber",
     "xdg-user-dirs",
+    "mesa-va-drivers",
+    "fuse3",
     "curl"
   ]
 }

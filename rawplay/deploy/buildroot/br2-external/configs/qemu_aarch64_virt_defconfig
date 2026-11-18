@@ -60,6 +60,9 @@ BR2_PACKAGE_UNIT_SIM=y
 # LIVI's media hosts feed their pipelines through appsrc (see the release
 # defconfig); without base's "app" plugin every session shows LIVI's UI only.
 BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_APP=y
+# videorate caps LIVI's projection at 24 fps like the board image (the cap is
+# in livi.service; qemu must parse the same sink chain).
+BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_VIDEORATE=y
 # GStreamer's videoconvert is the video path's only CPU-heavy step: with the
 # nested compositor on llvmpipe/pixman the hardware decoder's NV12 frames are
 # converted to the sink's shm BGRx. Without ORC that conversion runs the

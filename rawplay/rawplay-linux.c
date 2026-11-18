@@ -1,9 +1,11 @@
 /*
  * rawplay-linux - the generic-linux unit end of the raw link. it receives the same
- * uncompressed rgb565 LR MODE/FRAME stream rawplay/rawplay.c takes on the car
+ * uncompressed rgb565 LR MODE/FRAME/BANDS stream rawplay/rawplay.c takes on the car
  * (rawplay/README.md section 2.2) and shows it in an SDL window, with mouse/keyboard
  * going back upstream as the same LI touch/knob/button messages plus the ready
- * heartbeat and the per-frame ack.
+ * heartbeat and the per-frame ack. it also speaks the optional audio messages: it
+ * plays the downstream 20 ms s16le/44100/stereo chunks and advertises and sends the
+ * upstream u8/8000/mono microphone chunks.
  *
  * two transports, because the two ends of a gadget test live in different places:
  *
@@ -17,8 +19,9 @@
  *                 connects to it. this tests the sender, the protocol and this
  *                 client on one machine.
  *
- * usage: rawplay-linux (--usb [--vid VID --pid PID] | --sock PATH) [--seconds S]
- *        [--stats] [--headless] [--dump DIR] [--no-input] [--scale N]
+ * usage: rawplay-linux (--usb [--vid VID --pid PID] | --sock PATH | --bridge PATH)
+ *        [--seconds S] [--stats] [--headless] [--dump DIR] [--no-input] [--scale N]
+ *        [--audio] [--audio-dump FILE] [--mic] [--mic-test] [--mic-dump FILE]
  *
  * keys in the window: mouse press/drag/release is the touch; Left/Right is the knob;
  * Backspace/h/b/n/v/m send the icc/swc button bits rawlink has livi bindings for
@@ -180,7 +183,7 @@ static int parse_args(int argc, char **argv, struct cfg *c)
             c->mic_test = 1;
         } else if (!strcmp(argv[i], "--mic-dump") && i + 1 < argc) {
             c->mic_dump = argv[++i];
-            c->mic = c->mic || 0;
+            c->mic = 1;         /* a dump of the uplink implies capturing it */
         } else if (!strcmp(argv[i], "--scale") && i + 1 < argc) {
             c->scale = (int)strtol(argv[++i], 0, 0);
         } else if (!strcmp(argv[i], "--list-usb")) {
@@ -214,12 +217,20 @@ static int parse_args(int argc, char **argv, struct cfg *c)
  *
  * a buffered byte stream over either libusb bulk endpoints (the pc as usb host,
  * standing in for the car) or an accepted unix-socket connection (the FakeUnit
- * shape, for testing the sender with no usb hardware at all). small reads go
- * through the buffer so the LR header scan never splits a message; frame payloads
- * read straight into the image buffer in chunks.
+ * shape, for testing the sender with no usb hardware at all). all reads go through
+ * the same buffer so the LR header scan never splits a message and every USB
+ * request stays large enough for a whole message; exact-length payload reads copy
+ * out of the buffer.
  */
 
 #define RXBUF 65536
+/* Every LR message is padded to a whole 512-byte packet (README 2.2), and the sender
+ * writes a whole message per bulk transfer. A USB read must therefore hand libusb a
+ * large enough buffer: a request smaller than a queued transfer (for example 512 bytes
+ * while an audio message is 4096) makes the device babble and libusb report
+ * LIBUSB_ERROR_OVERFLOW. A full RXBUF never splits a message, and a 50 ms timeout is
+ * accepted as a partial read (below), so a frame that is still arriving does not pin
+ * the parser to the next ack. */
 
 struct xport {
     int is_usb;
@@ -236,7 +247,7 @@ struct xport {
     pthread_mutex_t tx_mu;  /* acks/ready and microphone share the bulk-out pipe */
 };
 
-/* returns 1 with a byte buffered, 0 on timeout, -1 when the link is gone.-tox-:-
+/* returns 1 with a byte buffered, 0 on timeout, -1 when the link is gone.
  * fills in at most quantum_ms so the SDL loop and the heartbeat stay live. */
 static int xfill(struct xport *x, int quantum_ms)
 {
@@ -250,12 +261,17 @@ static int xfill(struct xport *x, int quantum_ms)
         int got = 0;
         int rc = libusb_bulk_transfer(x->dev, x->ep_in, x->rx, RXBUF, &got,
                                       quantum_ms);
-        if (rc == 0 && got > 0) {
+
+        /* On timeout libusb returns the bytes that did arrive. Use them: with the
+         * maxpacket-aligned stream a whole message can be waiting in the device while
+         * the request is still short, and discarding that data would both lose a header
+         * and deadlock a small frame. */
+        if ((rc == 0 || rc == LIBUSB_ERROR_TIMEOUT) && got > 0) {
             x->rxlen = (size_t)got;
             return 1;
         }
-        if (rc == LIBUSB_ERROR_TIMEOUT) {
-            return 0;
+        if (rc == 0 || rc == LIBUSB_ERROR_TIMEOUT) {
+            return 0;           /* no data this quantum (or a zero-length packet) */
         }
         /* io errors and disconnects both end the run; the message says which */
         fprintf(stderr, "rawplay-linux: usb bulk-in: %s\n", libusb_strerror(rc));
@@ -287,13 +303,18 @@ static int xfill(struct xport *x, int quantum_ms)
     }
 }
 
-/* read exactly n bytes: buffered leftovers first, then direct chunks so a 768 KB
- * frame does not bounce through the 64 KB staging buffer. same return shape. */
+/* read exactly n bytes through the same bounded buffer as the header scan. every fill
+ * is a full RXBUF request (see above), and a timed-out fill keeps its partial bytes, so
+ * a frame larger than one transfer is copied in at most 12 chunks without ever asking
+ * libusb for less than the message the gadget may be sending. */
 static int xread_exact(struct xport *x, unsigned char *dst, size_t n, long long deadline)
 {
     size_t done = 0;
 
     while (done < n) {
+        if (g_stop) {
+            return -1;
+        }
         if (x->rxpos < x->rxlen) {
             size_t take = x->rxlen - x->rxpos;
 
@@ -306,56 +327,20 @@ static int xread_exact(struct xport *x, unsigned char *dst, size_t n, long long 
             continue;
         }
         x->rxpos = x->rxlen = 0;
-        if (now_ms() >= deadline) {
-            return 0;
-        }
-        if (x->is_usb) {
-            int got = 0;
-            long long left = deadline - now_ms();
-            int q = left > 500 ? 500 : (int)left;
-            int rc;
+        {
+            long long now = now_ms();
+            long long left = deadline - now;
+            int f;
 
-            if (q <= 0) {
+            if (left <= 0) {
                 return 0;
             }
-            rc = libusb_bulk_transfer(x->dev, x->ep_in, dst + done,
-                                      (int)(n - done), &got, q);
-            if (rc == 0 && got > 0) {
-                done += (size_t)got;
-                continue;
-            }
-            if (rc == LIBUSB_ERROR_TIMEOUT) {
-                return 0;
-            }
-            fprintf(stderr, "rawplay-linux: usb bulk-in: %s\n",
-                    libusb_strerror(rc));
-            x->dead = 1;
-            return -1;
-        } else {
-            struct pollfd p = { x->sock_conn, POLLIN, 0 };
-            long long left = deadline - now_ms();
-            int q = left > 500 ? 500 : (int)left;
-            int r;
-
-            if (q <= 0) {
-                return 0;
-            }
-            r = poll(&p, 1, q);
-            if (r < 0 && errno == EINTR) {
-                return 0;
-            }
-            if (r <= 0) {
-                return 0;
-            }
-            {
-                ssize_t m = recv(x->sock_conn, dst + done, n - done, 0);
-
-                if (m > 0) {
-                    done += (size_t)m;
-                    continue;
-                }
-                x->conn_lost = 1;
+            f = xfill(x, left > 50 ? 50 : (int)left);
+            if (f < 0) {
                 return -1;
+            }
+            if (f == 0) {
+                continue;       /* keep waiting until the deadline */
             }
         }
     }
@@ -1042,21 +1027,14 @@ static void *mic_thread(void *arg)
     unsigned char pcm[AUDIO_IN_CHUNK_BYTES];
     unsigned char in[4096];
     double phase = 0.0;
-    long long last_cfg = 0;
     const double pi = 3.14159265358979;
     double step = 2.0 * pi * 440.0 / AUDIO_IN_RATE;
 
     (void)arg;
     while (!mic_stop && !g_stop) {
-        long long now = now_ms();
-
         if (!mic_xport->connected) {
             SDL_Delay(20);
             continue;
-        }
-        if (now - last_cfg >= 1000) {
-            last_cfg = now;
-            send_audio_cfg(mic_xport);
         }
         if (mic_cfg->mic_test) {
             for (int i = 0; i < AUDIO_IN_CHUNK_BYTES; i++) {
@@ -1302,8 +1280,14 @@ static void send_knob(struct xport *x, int delta)
 
 static void send_ready(struct xport *x)
 {
-    static const unsigned char m[3] = { 'L', 'I', LI_READY };
+    static const unsigned char m[3 + LI_CAPS_LEN] = {
+        'L', 'I', LI_READY,
+        'L', 'I', LI_CAPS, LI_CAPS_VER, LR_CAP_BANDS, 0, 0, 0
+    };
 
+    /* one bulk transfer: a 3-byte ready followed by an 8-byte caps in two writes made
+     * the tiny first transfer easy to lose on a UDC that coalesces or drops short
+     * packets, and the host treats the messages independently anyway. */
     xwrite_all(x, m, sizeof m);
 }
 
@@ -1398,91 +1382,99 @@ struct run {
     long long t_start, last_rx, last_ready, last_stats, stop_at;
     const char *exit_reason;
     int mouse_down;
+    unsigned char hdr[LR_HDR];   /* an LR header that straddled a read timeout */
+    size_t hdr_len;
 };
 
 static unsigned char rx_audio[AUDIO_MAX_PAYLOAD];
 
-/* scan for one LR header. 1 = header in *type/len/seq, 0 = need more bytes (the
- * caller runs its watchdog and pumps input), -1 = the link is gone. */
-static int read_header(struct run *r, unsigned *type, unsigned *len,
-                       unsigned *seq)
+/* one buffered byte. 1 = in *c, 0 = the read quantum expired with no byte (the caller
+ * keeps its partial header), -1 = the link is gone or the run was stopped. */
+static int read_byte(struct run *r, unsigned char *c)
 {
-    unsigned char c, prev = 0;
-    unsigned char h[LR_HDR];
-    int i;
+    int f = xfill(r->xport, 50);
 
-    for (;;) {
-        int f = xfill(r->xport, 50);
-
-        if (g_stop) {
-            return -1;
-        }
-        if (f < 0) {
-            return -1;
-        }
-        if (f == 0) {
-            return 0;
-        }
-        c = r->xport->rx[r->xport->rxpos++];
-        if (c == LR_MAGIC1 && prev == LR_MAGIC0) {
-            break;
-        }
-        prev = c;
+    if (g_stop || f < 0) {
+        return -1;
     }
-    h[0] = LR_MAGIC0;
-    h[1] = LR_MAGIC1;
-    for (i = 2; i < LR_HDR;) {
-        int f = xfill(r->xport, 50);
-
-        if (g_stop) {
-            return -1;
-        }
-        if (f < 0) {
-            return -1;
-        }
-        if (f == 0) {
-            return 0;
-        }
-        h[i++] = r->xport->rx[r->xport->rxpos++];
+    if (f == 0) {
+        return 0;
     }
-    *type = h[2];
-    *len = get32le(h + 4);
-    *seq = get32le(h + 8);
-    if (h[3] != 0 || (*type == LR_MODE && *len != MODE_LEN)
-        || (*type == LR_FRAME
-            && (r->expected == 0 ? *len > MAX_FRAME
-                                : *len != (unsigned)r->expected))
-        || (*type == LR_AUDIO_CFG && *len != LR_AUDIO_CFG_LEN)
-        || (*type == LR_AUDIO && *len != AUDIO_OUT_CHUNK_BYTES)
-        || (*type != LR_MODE && *type != LR_FRAME
-            && *type != LR_AUDIO_CFG && *type != LR_AUDIO)) {
-        return 2;               /* not a header: keep scanning past it */
-    }
+    *c = r->xport->rx[r->xport->rxpos++];
     return 1;
 }
 
-/* skip the header-to-512 pad every LR message carries so the payload (or the next
- * message) starts on a packet boundary. */
-static int skip_pad(struct run *r, size_t n)
+/* scan for one LR header. 1 = header in *type/len/seq, 0 = need more bytes (the
+ * caller runs its watchdog and pumps input), -1 = the link is gone. a timeout in the
+ * middle of the two magic bytes or of the 16-byte header keeps what was read in
+ * r->hdr/hdr_len, so a large USB transfer that libusb hands over in pieces cannot make
+ * the scanner skip a header and resync inside the next picture. */
+static int read_header(struct run *r, unsigned *type, unsigned *len,
+                       unsigned *seq)
 {
-    while (n > 0) {
-        if (r->xport->rxpos < r->xport->rxlen) {
-            size_t take = r->xport->rxlen - r->xport->rxpos;
+    for (;;) {
+        unsigned char c;
+        int rc;
 
-            if (take > n) {
-                take = n;
+        if (r->hdr_len < 2) {
+            rc = read_byte(r, &c);
+            if (rc <= 0) {
+                return rc;
             }
-            r->xport->rxpos += take;
-            n -= take;
+            if (r->hdr_len == 0) {
+                if (c == LR_MAGIC0) {
+                    r->hdr[r->hdr_len++] = c;
+                }
+            } else if (c == LR_MAGIC1) {
+                r->hdr[r->hdr_len++] = c;
+            } else if (c != LR_MAGIC0) {
+                r->hdr_len = 0;
+            }
             continue;
         }
-        {
-            int f = xfill(r->xport, 500);
-
-            if (f <= 0) {
-                return -1;
-            }
+        rc = read_byte(r, &c);
+        if (rc <= 0) {
+            return rc;
         }
+        r->hdr[r->hdr_len++] = c;
+        if (r->hdr_len < LR_HDR) {
+            continue;
+        }
+        *type = r->hdr[2];
+        *len = get32le(r->hdr + 4);
+        *seq = get32le(r->hdr + 8);
+        r->hdr_len = 0;
+        if (r->hdr[3] != 0 || (*type == LR_MODE && *len != MODE_LEN)
+            || (*type == LR_FRAME
+                && (r->expected == 0 ? *len > MAX_FRAME
+                                    : *len != (unsigned)r->expected))
+            || (*type == LR_BANDS
+                && (r->expected == 0 || *len < LR_BAND_MAP
+                    || *len > (unsigned)r->expected + LR_BAND_MAP))
+            || (*type == LR_AUDIO_CFG && *len != LR_AUDIO_CFG_LEN)
+            || (*type == LR_AUDIO && *len != AUDIO_OUT_CHUNK_BYTES)
+            || (*type != LR_MODE && *type != LR_FRAME && *type != LR_BANDS
+                && *type != LR_AUDIO_CFG && *type != LR_AUDIO)) {
+            return 2;           /* not a header: keep scanning past it */
+        }
+        return 1;
+    }
+}
+
+/* skip the header-to-512 pad every LR message carries so the payload (or the next
+ * message) starts on a packet boundary. only the pad is consumed even though the
+ * transport may have buffered the next message behind it. */
+static int skip_pad(struct run *r, size_t n)
+{
+    unsigned char scratch[512];
+
+    while (n > 0) {
+        size_t take = n > sizeof scratch ? sizeof scratch : n;
+
+        if (xread_exact(r->xport, scratch, take, now_ms() + LINK_DEAD_MS) != 1) {
+            return -1;
+        }
+        n -= take;
     }
     return 0;
 }
@@ -1615,6 +1607,64 @@ static int read_frame(struct run *r, unsigned len, unsigned seq)
     return 0;
 }
 
+static int read_bands(struct run *r, unsigned len, unsigned seq)
+{
+    unsigned char map[LR_BAND_MAP];
+    unsigned count, total = 0;
+    int pad;
+    long long deadline = now_ms() + LINK_DEAD_MS;
+
+    if (len < LR_BAND_MAP || len > (unsigned)r->expected + LR_BAND_MAP) {
+        return -1;
+    }
+    if (skip_pad(r, LR_MSG - LR_HDR) < 0) {
+        return -1;
+    }
+    if (xread_exact(r->xport, map, sizeof map, deadline) != 1) {
+        return -1;
+    }
+    count = (unsigned)map[0] | (unsigned)map[1] << 8;
+    if (count > LR_BAND_MAX) {
+        return -1;
+    }
+    for (unsigned i = 0; i < count; i++) {
+        unsigned y = (unsigned)map[4 + i * 4] | (unsigned)map[5 + i * 4] << 8;
+        unsigned rows = (unsigned)map[6 + i * 4] | (unsigned)map[7 + i * 4] << 8;
+
+        if (!rows || y + rows > (unsigned)r->fh) {
+            return -1;
+        }
+        total += rows * (unsigned)r->stride;
+    }
+    if (total != len - LR_BAND_MAP) {
+        return -1;
+    }
+    for (unsigned i = 0; i < count; i++) {
+        unsigned y = (unsigned)map[4 + i * 4] | (unsigned)map[5 + i * 4] << 8;
+        unsigned rows = (unsigned)map[6 + i * 4] | (unsigned)map[7 + i * 4] << 8;
+
+        if (xread_exact(r->xport, r->frame + (size_t)y * r->stride,
+                        rows * (size_t)r->stride, deadline) != 1) {
+            return -1;
+        }
+    }
+    pad = (int)((LR_MSG - (len % LR_MSG)) % LR_MSG);
+    if (pad && skip_pad(r, (size_t)pad) < 0) {
+        return -1;
+    }
+    r->rx_us += (unsigned long long)(now_ms() - (deadline - LINK_DEAD_MS)) * 1000;
+    r->rx_kb += len / 1024;
+    r->last_rx = now_ms();
+    r->frames++;
+    view_show(r->view, r->frame, r->stride);
+    r->drawn++;
+    send_ack(r->xport, seq, 1);
+    if (r->cfg->dump) {
+        dump_ppm(r->cfg->dump, r->drawn, r->frame, r->fw, r->fh);
+    }
+    return 0;
+}
+
 static void stats_line(struct run *r, int final)
 {
     double el = (now_ms() - r->t_start) / 1000.0;
@@ -1636,8 +1686,21 @@ static void stats_line(struct run *r, int final)
 static int run_session(struct run *r)
 {
     r->last_rx = now_ms();
+    r->hdr_len = 0;             /* a partial header belongs to the previous peer */
+    r->xport->rxpos = r->xport->rxlen = 0;
     r->xport->connected = 1;
-    send_ready(r->xport);
+    /* LI_AUDIO_CFG is also the audio handshake: rawlink only sends the downstream
+     * LR_AUDIO_CFG and PCM after it sees this format. Send it with every ready
+     * heartbeat, so playback-only clients (no microphone) work too and a reader that
+     * joins late does not have to wait for the microphone thread. */
+    {
+        int audio_on = r->cfg->audio || r->cfg->mic || r->cfg->mic_test;
+
+        send_ready(r->xport);
+        if (audio_on) {
+            send_audio_cfg(r->xport);
+        }
+    }
     r->last_ready = now_ms();
     while (!g_stop) {
         unsigned type, len, seq;
@@ -1655,6 +1718,9 @@ static int run_session(struct run *r)
         if (now - r->last_ready >= READY_MS) {
             r->last_ready = now;
             send_ready(r->xport);
+            if (r->cfg->audio || r->cfg->mic || r->cfg->mic_test) {
+                send_audio_cfg(r->xport);
+            }
         }
         if (r->cfg->stats && now - r->last_stats >= 5000) {
             r->last_stats = now;
@@ -1709,6 +1775,14 @@ static int run_session(struct run *r)
                     return r->xport->conn_lost ? 0 : 1;
                 }
                 r->exit_reason = "link read failed in audio";
+                return 1;
+            }
+        } else if (type == LR_BANDS) {
+            if (read_bands(r, len, seq) < 0) {
+                if (r->xport->conn_lost || r->xport->dead || g_stop) {
+                    return r->xport->conn_lost ? 0 : 1;
+                }
+                r->exit_reason = "link read failed in bands";
                 return 1;
             }
         } else {

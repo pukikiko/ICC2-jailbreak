@@ -57,7 +57,7 @@ class FakeUnit(threading.Thread):
 
     def __init__(self, path, ack=True, ready=True, garbage=b'', close_every=0,
                  touch=None, touch_burst=b'', knob=None, buttons=(), junk_after=0,
-                 touch_after=0.0):
+                 touch_after=0.0, caps=0):
         super().__init__(daemon=True)
         self.path = path
         self.ack = ack
@@ -70,6 +70,7 @@ class FakeUnit(threading.Thread):
         self.buttons = buttons
         self.junk_after = junk_after
         self.touch_after = touch_after
+        self.caps = caps
         self.messages = []              # (type, seq, len, ts, payload)
         self.frames = 0
         self.conns = 0
@@ -111,6 +112,8 @@ class FakeUnit(threading.Thread):
                     conn.sendall(self.garbage)
                 if self.ready:
                     conn.sendall(b'LI\x05')
+                if self.caps:
+                    conn.sendall(b'LI\x0b\x01' + bytes([self.caps]) + b'\x00\x00\x00')
                 if self.touch:
                     if self.touch_after:
                         time.sleep(self.touch_after)
@@ -156,7 +159,7 @@ class FakeUnit(threading.Thread):
             if len(buf) - i < 16:
                 return buf[i:], False
             mtype, flags, ln, seq, ts = struct.unpack_from('<BBIII', buf, i + 2)
-            if mtype not in (1, 2) or flags != 0 or ln > (1 << 20):
+            if mtype not in (1, 2, 5, 6) or flags != 0 or ln > (1 << 20):
                 buf = buf[i + 2:]
                 continue
             # every LR message is a whole number of max packets: MODE is header+payload+pad
@@ -167,12 +170,12 @@ class FakeUnit(threading.Thread):
                 payload = bytes(buf[i + 16:i + 16 + ln])
                 total = 512
             else:
-                if len(buf) - i < 512 + ln:
+                total = 512 + ((ln + 511) // 512) * 512
+                if len(buf) - i < total:
                     return buf[i:], False
                 payload = bytes(buf[i + 512:i + 512 + ln])
-                total = 512 + ln
             self.messages.append((mtype, seq, ln, ts, payload))
-            if mtype == 2:
+            if mtype in (2, 5, 6):
                 self.frames += 1
                 if self.ack:
                     try:
@@ -288,6 +291,25 @@ def test_protocol():
                 break
     check('every frame payload is ffmpeg rgb565le byte-for-byte', matched == len(got),
           f'{matched}/{len(got)} matched')
+
+
+def test_caps_bands():
+    print('changed-row caps (static test card)')
+    sock = os.path.join(TMP, 'bands.sock')
+    unit = FakeUnit(sock, caps=1)
+    unit.start_server()
+    rc, out, err, timedout = run_c([sock, '--test', '--width', '64', '--height', '48',
+                                    '--fps', '30', '--window', '2', '--seconds', '2'],
+                                   timeout=10)
+    unit.stop()
+    types = [m[0] for m in unit.messages]
+    check('caps bands run exited cleanly', rc == 0 and not timedout,
+          f'rc={rc} timedout={timedout} err={err[-200:]!r}')
+    check('first picture is raw, then band maps', 2 in types and 5 in types, str(types[:8]))
+    bands = [m for m in unit.messages if m[0] == 5]
+    check('a static card sends an empty band map',
+          bands and bands[-1][2] == 512 and bands[-1][4][:2] == b'\x00\x00',
+          str((bands[-1][2], bands[-1][4][:4])) if bands else 'no bands')
 
 
 def test_no_chunked():
@@ -601,6 +623,7 @@ def main():
     test_descriptors()
     test_gadget_bridge()
     test_protocol()
+    test_caps_bands()
     test_no_chunked()
     test_hostile_li()
     test_reconnect()

@@ -7,5 +7,5 @@
 #          the composite livi gadget's vendor interface, so the host must have the gadget up
 #          and `rawplay/out/rawlink stream` sending (`rawplay/out/rawlink run` on a real car).
 # apps     the homebrew menu above
-carplay|/fs/usb0/homebrew/apps/rawplay.sh 0
+carplay|/fs/usb0/homebrew/apps/rawplay.sh 0 --direct --acm-mode 9
 apps|/fs/usb0/homebrew/main

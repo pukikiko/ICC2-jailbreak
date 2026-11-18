@@ -6,9 +6,9 @@
 #
 # rawlink sends its built-in 1 kHz test tone in the new LR_AUDIO messages while
 # rawplay-linux sends a 440 Hz u8/8k microphone tone back as LI_AUDIO. the test
-# checks both PCM streams, the video stream, the 20 ms chunking and the exact
-# wire formats.
-import os, signal, subprocess, sys, tempfile, time
+# checks both PCM streams, the video stream, the 20 ms chunking, the exact wire
+# formats, and that a playback-only client still negotiates audio.
+import os, re, signal, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RAWLINK = os.path.join(HERE, 'out', 'rawlink')
@@ -74,10 +74,41 @@ def main():
         check('microphone is the 440 Hz test tone', 400 <= hz <= 480, f'{hz:.0f} Hz')
 
     log = open(cli_log).read()
-    check('video kept flowing', 'frames,' in log and '0 frames' not in log)
+    check('video kept flowing', re.search(r'\b[1-9][0-9]* frames,', log) is not None)
+
+    # Playback-only: the unit must advertise its audio handshake even when there is no
+    # microphone behind it, or rawlink never sends LR_AUDIO_CFG/PCM downstream.
+    sock2 = os.path.join(tmp, 'play.sock')
+    rx2 = os.path.join(tmp, 'rx-only.s16')
+    cli2_log = os.path.join(tmp, 'client-only.log')
+    host2_log = os.path.join(tmp, 'host-only.log')
+    cli2 = subprocess.Popen(
+        [CLIENT, '--sock', sock2, '--headless', '--audio', '--audio-dump', rx2,
+         '--seconds', '4', '--stats'],
+        stdout=open(cli2_log, 'w'), stderr=subprocess.STDOUT,
+        env={**os.environ, 'SDL_AUDIODRIVER': 'dummy'})
+    time.sleep(0.4)
+    host2 = subprocess.Popen(
+        [RAWLINK, 'stream', sock2, '--test', '--audio-test', '--seconds', '3',
+         '--stats'], stdout=open(host2_log, 'w'), stderr=subprocess.STDOUT)
+    host2.wait(timeout=10)
+    cli2.wait(timeout=10)
+    rx2_data = open(rx2, 'rb').read() if os.path.exists(rx2) else b''
+    check('playback-only client receives downstream PCM',
+          len(rx2_data) > 0 and len(rx2_data) % 3528 == 0,
+          f'{len(rx2_data)} bytes')
+    if rx2_data:
+        import struct
+        s = struct.unpack('<%dh' % (len(rx2_data) // 2), rx2_data)
+        zc = sum(1 for a, b in zip(s, s[1:]) if (a < 0) != (b < 0))
+        hz = zc / 2 / (len(rx2_data) / 176400)
+        check('playback-only downlink is the 1 kHz test tone', 900 <= hz <= 1100,
+              f'{hz:.0f} Hz')
     if not ok:
-        print('\nclient log:\n' + log)
+        print('\nclient log:\n' + open(cli_log).read())
         print('\nhost log:\n' + open(host_log).read())
+        print('\nplayback-only client log:\n' + open(cli2_log).read())
+        print('\nplayback-only host log:\n' + open(host2_log).read())
     return 0 if ok else 1
 
 

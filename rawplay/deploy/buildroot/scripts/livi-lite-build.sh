@@ -1,16 +1,15 @@
 #!/bin/sh
 # Build LIVI-Lite from source and stage the installed runtime tree.
 #
-# This is the one build recipe both appliances use; only the environment
-# differs (Buildroot's cross cargo + target sysroot, or the phone's native
-# musl cargo). It replaces what upstream's scripts/build-native.mjs does, but
-# with no Node/pnpm in the loop and staged for the installed layout that
-# `Resources::installed()` in livi-core expects:
+# This is the Buildroot appliance's build recipe, using Buildroot's cross
+# cargo and target sysroot. It replaces what upstream's
+# scripts/build-native.mjs does, but with no Node/pnpm in the loop and staged
+# for the installed layout that `Resources::installed()` in livi-core expects:
 #
 #   $DEST/livi-core
 #   $DEST/livi-ui
 #   $DEST/resources/driver/livi-helperd
-#   $DEST/resources/gst-host/livi-gst-host
+#   $DEST/resources/output/livi-output
 #   $DEST/resources/compositor/livi-compositor
 #   $DEST/resources/<assets/linux templates>
 #
@@ -34,8 +33,8 @@ export CARGO_TARGET_DIR
 
 # aws-lc-sys (CarPlay's crypto) refuses to compile its jitterentropy fallback
 # with -O2, and cross/CI environments export -O2 in CFLAGS. The jitter source
-# is optional; the kernel CSPRNG is what an appliance wants. Set here so both
-# the Buildroot and the on-phone build get it.
+# is optional; the kernel CSPRNG is what an appliance wants. Set here so the
+# Buildroot build gets it.
 AWS_LC_SYS_NO_JITTER_ENTROPY=1
 export AWS_LC_SYS_NO_JITTER_ENTROPY
 
@@ -52,10 +51,10 @@ build() {
 # The native crates are one workspace (native/Cargo.toml); the Slint UI is
 # still its own. Order is only for readable logs; cargo builds dependencies
 # on demand either way.
-build "$SRC/native/Cargo.toml" -p gst-video-host -p livi-compositor -p livi-helperd -p livi-core
+build "$SRC/native/Cargo.toml" -p livi-output -p livi-compositor -p livi-helperd -p livi-core
 build "$SRC/native/livi-ui/Cargo.toml" -p livi-ui
 
-for bin in livi-core livi-ui livi-helperd livi-gst-host livi-compositor; do
+for bin in livi-core livi-ui livi-helperd livi-output livi-compositor; do
     test -x "$OUT/$bin" || {
         echo "livi-lite: $OUT/$bin missing after the build" >&2
         exit 1
@@ -63,19 +62,21 @@ for bin in livi-core livi-ui livi-helperd livi-gst-host livi-compositor; do
 done
 
 # installed layout, exactly what Resources::installed() resolves
-mkdir -p "$DEST/resources/driver" "$DEST/resources/gst-host" "$DEST/resources/compositor"
+# (the pre-rename gst-host stage from an older tree is not part of the layout)
+rm -rf "$DEST/resources/gst-host"
+mkdir -p "$DEST/resources/driver" "$DEST/resources/output" "$DEST/resources/compositor"
 install -D -m 0755 "$OUT/livi-core" "$DEST/livi-core"
 install -D -m 0755 "$OUT/livi-ui" "$DEST/livi-ui"
 install -D -m 0755 "$OUT/livi-helperd" "$DEST/resources/driver/livi-helperd"
-install -D -m 0755 "$OUT/livi-gst-host" "$DEST/resources/gst-host/livi-gst-host"
+install -D -m 0755 "$OUT/livi-output" "$DEST/resources/output/livi-output"
 install -D -m 0755 "$OUT/livi-compositor" "$DEST/resources/compositor/livi-compositor"
 
 # the root templates livi-core renders (udev rules, sudoers, the wifi-ap unit)
 # and the helper's touch filter; templates dir == resources dir
 cp -a "$SRC/assets/linux/." "$DEST/resources/"
 
-# both appliances use the system GStreamer; a bundle is opt-in for other
-# environments (the layout finds it at resources/gstreamer/<platform>/)
+# the Buildroot appliance uses the system GStreamer; a bundle is opt-in for
+# other environments (the layout finds it at resources/gstreamer/<platform>/)
 if [ -n "${LIVI_LITE_BUNDLE_GST:-}" ] && [ -d "$LIVI_LITE_BUNDLE_GST" ]; then
     mkdir -p "$DEST/resources/gstreamer"
     cp -a "$LIVI_LITE_BUNDLE_GST" "$DEST/resources/gstreamer/"

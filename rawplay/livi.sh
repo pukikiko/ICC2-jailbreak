@@ -6,17 +6,17 @@
 # Stack:
 #   weston (headless backend, kiosk shell, repaint-on-capture)
 #     -> livi-compositor (started by livi-core)   places LIVI's video plane
-#       -> livi-ui (Slint) + livi-gst-host
+#       -> livi-ui (Slint) + livi-output
 #
 # LIVI-Lite is the Electron-free fork: livi-core starts its own nested compositor, the
 # Slint UI, the GStreamer video host and the helper, all natively. The nested compositor
 # is still needed because the GStreamer waylandsink sends the video plane to a separate
 # Wayland surface that has to stay inside the framebuffer the sender captures.
 #
-# the installed deployment (deploy/install.sh) puts the runtime at /opt/livi. To run a
-# source build instead, point LIVI_CORE at the cargo output and set LIVI_ROOT:
+# the Buildroot appliance puts the runtime at /opt/livi. To run a source build
+# instead, point LIVI_CORE at the cargo output and set LIVI_ROOT:
 #
-#   LIVI_CORE=~/LIVI-Lite/native/livi-helperd/target/release/livi-core ./livi.sh start
+#   LIVI_CORE=~/LIVI-Lite/native/target/release/livi-core ./livi.sh start
 #
 #   ./livi.sh start            start the stack
 #   ./livi.sh stop             stop it
@@ -32,7 +32,7 @@
 set -euo pipefail
 
 HERE="$(dirname "$(readlink -f "$0")")"
-LIVI_CORE="${LIVI_CORE:-${LIVI_ROOT:-}/native/livi-helperd/target/release/livi-core}"
+LIVI_CORE="${LIVI_CORE:-${LIVI_ROOT:-}/native/target/release/livi-core}"
 [ -x "$LIVI_CORE" ] || LIVI_CORE=/opt/livi/livi-core
 if [ -z "${LIVI_ROOT:-}" ] && [ -z "${LIVI_RESOURCES:-}" ]; then
   LIVI_RESOURCES=/opt/livi/resources

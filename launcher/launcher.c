@@ -67,8 +67,8 @@ struct button {
 /* the zones are where the overlay's plates sit, left and right of home/menu */
 static const struct button BUTTONS[] = {
     { 55, 425, 196, 478, "carplay",
-      "if [ -x /tmp/rawplay.sh ]; then /tmp/rawplay.sh 0; "
-      "elif [ -x /fs/usb0/homebrew/apps/rawplay.sh ]; then /fs/usb0/homebrew/apps/rawplay.sh 0; fi" },
+      "if [ -x /tmp/rawplay.sh ]; then /tmp/rawplay.sh 0 --direct; "
+      "elif [ -x /fs/usb0/homebrew/apps/rawplay.sh ]; then /fs/usb0/homebrew/apps/rawplay.sh 0 --direct; fi" },
     { 603, 425, 748, 478, "apps",
       "if [ -x /fs/usb0/homebrew/main ]; then /fs/usb0/homebrew/main; "
       "elif [ -x /tmp/homebrew ]; then /tmp/homebrew; fi" },
@@ -82,6 +82,18 @@ static const struct button BUTTONS[] = {
 
 static char commands[NBUTTONS][MAX_COMMAND];
 static const char *buttons_file;
+
+/* qnx.h has no strstr, and the stick's command is a short shell line */
+static char *find_stage(char *s)
+{
+    for (; *s; s++) {
+        if (s[0] == '-' && s[1] == '-' && s[2] == 's' && s[3] == 't' &&
+            s[4] == 'a' && s[5] == 'g' && s[6] == 'e') {
+            return s;
+        }
+    }
+    return 0;
+}
 
 static void load_commands(void)
 {
@@ -114,7 +126,18 @@ static void load_commands(void)
             }
             for (unsigned i = 0; i < NBUTTONS; i++) {
                 if (strcmp(line, BUTTONS[i].name) == 0) {
-                    snprintf(commands[i], sizeof commands[i], "%s", bar + 1);
+                    char *cmd = bar + 1;
+                    char *stage = find_stage(cmd);
+                    /* the HMI CarPlay plate is the zero-copy path. a stale
+                     * buttons.txt from the staged era must not turn it into the
+                     * one-copy fallback, even if the stick still says --stage. */
+                    if (strcmp(BUTTONS[i].name, "carplay") == 0 && stage) {
+                        snprintf(commands[i], sizeof commands[i], "%.*s--direct%s",
+                                 (int)(stage - cmd), cmd, stage + strlen("--stage"));
+                        jlog("launcher: carplay --stage in buttons.txt forced to --direct");
+                    } else {
+                        snprintf(commands[i], sizeof commands[i], "%s", cmd);
+                    }
                 }
             }
         }

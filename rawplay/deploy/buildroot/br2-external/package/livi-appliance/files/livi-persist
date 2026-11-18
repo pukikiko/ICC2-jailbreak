@@ -88,23 +88,26 @@ set_livi_string() {
 # appliance defaults on every boot: wireless Android Auto on
 # (wirelessAaEnabled), the Wi-Fi adapter reserved for the AP (Dedicated
 # interface -> wifiDedicatedInterface), the Bluetooth/Wi-Fi/head-unit name
-# (carName = Ford Falcon), the phone-facing AP on 2.4 GHz channel 11 at
+# (carName = Ford Falcon), the phone-facing AP on 5 GHz channel 149 at
 # 20 MHz under the Australian regulatory domain
 # (wifiType/wifiChannel/wifiChannelWidth/country) and the projected video at
-# 24 fps (projectionFps). Channel 11 is the clean one here: channel 6 shares
-# the band with a neighbouring AP and the 20 MHz width is what the UWE5622
-# actually runs (hostapd reports secondary_channel=0 and the beacon HT20).
-# The width is pinned explicitly so a saved 40 MHz config cannot make the
-# helper ask for HT40 again. Seeding alone would leave an already-flashed
-# /data partition on the old values, so existing files are merged in place
-# and never replaced (pairing state and other user settings are preserved).
+# 24 fps (projectionFps; livi.service's videorate cap makes that the hard
+# output rate even though AA's handshake only offers 30/60). Channel 149 is
+# in the 5725-5850 MHz band, which is not DFS or indoor-only in AU
+# (36-48 is indoor-only, 52-144 is DFS). The UWE5622 firmware picks the
+# AP width itself (the widest 20/40/80 block that holds the primary
+# channel; START_AP has no width field), so 20 MHz is pinned here to keep
+# the first bring-up deterministic. Seeding alone would leave an
+# already-flashed /data partition on the old values, so existing files are
+# merged in place and never replaced (pairing state and other user settings
+# are preserved).
 ensure_livi_settings() {
     cfg=$1
     set_livi_value "$cfg" wirelessAaEnabled true
     set_livi_value "$cfg" wifiDedicatedInterface true
     set_livi_string "$cfg" carName "Ford Falcon"
-    set_livi_string "$cfg" wifiType "2.4ghz"
-    set_livi_value "$cfg" wifiChannel 11
+    set_livi_string "$cfg" wifiType "5ghz"
+    set_livi_value "$cfg" wifiChannel 149
     set_livi_value "$cfg" wifiChannelWidth 20
     set_livi_string "$cfg" country "AU"
     set_livi_value "$cfg" projectionFps 24
@@ -127,6 +130,13 @@ reg=$DATA/livi-config/gst-registry.aarch64.bin
 if [ -e /dev/media0 ] && [ -s "$reg" ] && ! grep -aq v4l2slh264dec "$reg" 2>/dev/null; then
     rm -f "$reg"
     echo "livi-persist: dropped the stale GStreamer registry (no v4l2 decoder)" >&2
+fi
+# The 24 fps cap is a videorate element in the sink chain. A registry written
+# before that plugin was added (an already-flashed /data) would not know it,
+# and GST_REGISTRY_UPDATE=no would keep it missing. Drop the cache once.
+if [ -s "$reg" ] && ! grep -aq videorate "$reg" 2>/dev/null; then
+    rm -f "$reg"
+    echo "livi-persist: dropped the stale GStreamer registry (no videorate)" >&2
 fi
 
 # CPU DVFS: the H618 is blocklisted from cpufreq-dt and the nvmem driver is a

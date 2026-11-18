@@ -106,10 +106,19 @@
  * sender fill ep1 while the previous chunk is still moving. */
 #define EP_BUF_LEN    (256 * 1024)
 #define VID_PIPE_BYTES (1024 * 1024)
+/* at most three 20 ms chunks (60 ms) may wait behind a picture. that matches the unit's
+ * 60 ms prebuffer and one full-frame send, so a slow link drops stale voice instead of
+ * building a noticeable delay. */
+#define AUDIO_QUEUE_MAX 3
+/* more tiny runs than this cost more USB round trips than the saved bytes are worth,
+ * especially under qemu where every direct urb is a guest wakeup. the unit still accepts
+ * the full protocol maximum; the sender simply falls back to a whole picture. */
+#define BAND_ACTIVE_MAX 8
 
 static const int li_needed[256] = { [LI_TOUCH] = 8, [LI_KNOB] = 4, [LI_BUTTON] = 5,
                                     [LI_READY] = 3, [LI_RAW] = 8,
-                                    [LI_AUDIO_CFG] = LI_AUDIO_CFG_LEN };
+                                    [LI_AUDIO_CFG] = LI_AUDIO_CFG_LEN,
+                                    [LI_CAPS] = LI_CAPS_LEN };
 
 static volatile sig_atomic_t g_stop;
 
@@ -319,6 +328,7 @@ struct cfg {
     const char *audio_in, *audio_out, *audio_cmd;
     int usb, use_test, use_motion, no_chunked, no_inject, stats, flip;
     int audio, audio_test;
+    int no_bands;
     int width, height, fps, window;
     double seconds;
     char stick[PATH_MAX], sock[PATH_MAX], name[64], udc[64], ffs[PATH_MAX];
@@ -368,6 +378,7 @@ static const char *stream_usage(void)
     return "usage: rawlink stream PATH [--usb] [--wayland W|--test|--motion|--file F]\n"
            "       [--width N] [--height N] [--fps N] [--window N] [--seconds S]\n"
            "       [--events FILE] [--stats] [--no-inject] [--no-chunked] [--flip]\n"
+           "       [--no-bands]\n"
            "       [--audio] [--audio-test] [--audio-in FIFO|--audio-cmd CMD] [--audio-out FIFO]\n";
 }
 
@@ -384,6 +395,7 @@ static const char *run_usage(void)
            "       [--wayland W|--file F|--test|--motion] [--width N] [--height N]\n"
            "       [--fps N] [--window N] [--seconds S] [--events FILE] [--stats]\n"
            "       [--no-inject] [--no-chunked] [--flip] [--dry-run] [--dump-descriptors]\n"
+           "       [--no-bands]\n"
            "       [--audio] [--audio-test] [--audio-in FIFO|--audio-cmd CMD] [--audio-out FIFO]\n";
 }
 
@@ -584,6 +596,9 @@ struct txmsg {
     size_t len, off;
     unsigned seq;
     int owned;
+    int heap;                   /* the txmsg itself came from malloc */
+    int advance_base;           /* a video picture: commit it as the next diff base */
+    int bands;                  /* the picture was a changed-row update */
     struct txmsg *next;
 };
 
@@ -616,7 +631,7 @@ struct stream {
     int mode_pending;
     unsigned seq, acked, lat_floor;
     struct txmsg *txq_head, *txq_tail, *tx;
-    struct { unsigned seq; double t; } sent[SENT_MAX];
+    struct { unsigned seq; double t; unsigned char bands; } sent[SENT_MAX];
     unsigned sent_next;
     double lat_recent[LAT_MAX];
     int lat_count, lat_pos;
@@ -624,8 +639,16 @@ struct stream {
     unsigned frames, total_bytes, stale_src;
     double started, last_stats, last_ready, last_msg, stop_at;
     FILE *events;
-    unsigned char *pending;
-    size_t pending_cap, pending_len;
+    /* two whole-frame buffers: the one being captured and the last one sent. a raw full
+     * frame goes out straight from pending (its 512-byte header sits in the reserved
+     * prefix), so the capture never pays a 768 KB copy on the way to the wire. */
+    unsigned char *pending, *prev;
+    unsigned char *dropbuf, *sendbuf, *changed_rows;
+    size_t sendcap, pending_len, drop_len;
+    int base_valid, force_full;
+    unsigned caps;
+    unsigned last_full_seq;
+    unsigned long same_src;
     unsigned char li_buf[65536 + 64];
     size_t li_len;
     int touch_pending;              /* a queued run of touch samples, newest wins */
@@ -663,6 +686,8 @@ static void tx_free(struct txmsg *m)
     }
     if (m->owned) {
         free(m->data);
+    }
+    if (m->heap) {
         free(m);
     }
 }
@@ -736,7 +761,7 @@ static ssize_t out_write(struct outlink *o, const unsigned char *buf, size_t len
     }
 }
 
-static void sent_record(struct stream *s, unsigned seq, double t)
+static void sent_record(struct stream *s, unsigned seq, double t, int bands)
 {
     unsigned slot;
 
@@ -746,6 +771,7 @@ static void sent_record(struct stream *s, unsigned seq, double t)
     slot = s->sent_next++ % SENT_MAX;
     s->sent[slot].seq = seq;
     s->sent[slot].t = t;
+    s->sent[slot].bands = (unsigned char)bands;
 }
 
 /* every slot empty. seq 0 is a valid frame number, so a zeroed slot must never look like
@@ -758,17 +784,21 @@ static void sent_clear(struct stream *s)
     for (i = 0; i < SENT_MAX; i++) {
         s->sent[i].seq = HDR_NO_SEQ;
         s->sent[i].t = 0.0;
+        s->sent[i].bands = 0;
     }
     s->sent_next = 0;
 }
 
-static int sent_take(struct stream *s, unsigned seq, double *t)
+static int sent_take(struct stream *s, unsigned seq, double *t, int *bands)
 {
     int i;
 
     for (i = 0; i < SENT_MAX; i++) {
         if (s->sent[i].seq == seq) {
             *t = s->sent[i].t;
+            if (bands) {
+                *bands = s->sent[i].bands;
+            }
             s->sent[i].seq = HDR_NO_SEQ;
             return 1;
         }
@@ -844,6 +874,8 @@ static void window_reset(struct stream *s, const char *why, unsigned seq)
     lat_reset(s);
     txq_clear(s);
     aq_clear(s);
+    s->force_full = 1;
+    s->base_valid = 0;
     s->mode_pending = 1;
     if (s->audio_ready && s->cfg->audio) {
         s->audio_cfg_pending = 1;
@@ -935,6 +967,15 @@ static void handle_li(struct stream *s, const unsigned char *m, size_t n)
         mic_write(s, m + LI_AUDIO_HDR_LEN, alen);
         return;
     }
+    if (t == LI_CAPS && n >= LI_CAPS_LEN) {
+        unsigned ver = m[3], flags = m[4];
+
+        if (ver == LI_CAPS_VER && flags != s->caps) {
+            s->caps = flags;
+            slogf("rawstream: unit caps%s", (flags & LR_CAP_BANDS) ? " bands" : "");
+        }
+        return;
+    }
     /* LI_KNOB is consumed and dropped: livi has no default binding for the knob */
     if (t == LI_BUTTON && n >= 5) {
         /* the panel buttons: the mapped ones are tapped, the rest are logged and left
@@ -973,8 +1014,9 @@ static void handle_li(struct stream *s, const unsigned char *m, size_t n)
         }
         {
             double t0;
+            int bands = 0;
 
-            if (sent_take(s, rseq, &t0)) {
+            if (sent_take(s, rseq, &t0, &bands)) {
                 if (m[7] & 1) {
                     double lat = (now - t0) * 1000.0;
 
@@ -982,6 +1024,12 @@ static void handle_li(struct stream *s, const unsigned char *m, size_t n)
                     if (s->events) {
                         fprintf(s->events, "%.3f drawn %u %.1f\n", now, rseq, lat);
                     }
+                } else if (bands) {
+                    /* the unit skipped a changed-row update. once one is missing the
+                     * previous picture is no longer a valid diff base: send a complete
+                     * one next, or the next bands would leave that hole forever. */
+                    s->force_full = 1;
+                    s->base_valid = 0;
                 }
             }
         }
@@ -1055,45 +1103,191 @@ static void li_feed(struct stream *s, const unsigned char *data, size_t n)
     touch_flush(s);
 }
 
-static void queue_frame(struct stream *s, const unsigned char *payload)
-{
-    struct txmsg *m;
-    unsigned char *buf;
+struct band {
+    unsigned y, rows;
+};
 
-    if (s->window && s->seq - s->acked >= (unsigned)s->window) {
-        /* the guest has not caught up: drop this captured frame at the source and let
-         * the panel show the next one instead of queueing stale pictures */
-        s->stale_src++;
-        return;
+/* scan the current picture against the last sent one and coalesce changed rows into
+ * packet-aligned runs. a gap of up to two rows is cheaper to carry than another map
+ * entry. returns the payload bytes (map + pixels), or 0 when nothing changed. fills the
+ * run list only when it fits in BAND_ACTIVE_MAX. */
+static unsigned band_scan(struct stream *s, struct band *list, unsigned *count)
+{
+    unsigned char *changed = s->changed_rows;
+    unsigned h = (unsigned)(s->frame_len / (s->cfg->width * 2));
+    unsigned stride = (unsigned)s->cfg->width * 2;
+    unsigned y = 0, n = 0, total = 0;
+
+    for (y = 0; y < h; y++) {
+        changed[y] = memcmp(s->pending + MSG_HDR + (size_t)y * stride,
+                            s->prev + MSG_HDR + (size_t)y * stride, stride) != 0;
     }
-    m = malloc(sizeof *m);
-    buf = malloc(MSG_HDR + (size_t)s->frame_len);
-    if (!m || !buf) {
-        free(m);
-        free(buf);
+    y = 0;
+    while (y < h) {
+        unsigned start, last, end;
+
+        while (y < h && !changed[y]) {
+            y++;
+        }
+        if (y >= h) {
+            break;
+        }
+        start = last = y++;
+        while (y < h) {
+            if (changed[y]) {
+                last = y++;
+                continue;
+            }
+            {
+                unsigned j = y;
+
+                while (j < h && !changed[j] && j - y < 2) {
+                    j++;
+                }
+                if (j < h && changed[j]) {
+                    y = j;
+                    continue;
+                }
+            }
+            break;
+        }
+        end = last + 1;
+        start &= ~(LR_BAND_ROW_ALIGN - 1);
+        end = (end + LR_BAND_ROW_ALIGN - 1) & ~(LR_BAND_ROW_ALIGN - 1);
+        if (end > h) {
+            end = h;
+        }
+        if (n == BAND_ACTIVE_MAX) {
+            *count = BAND_ACTIVE_MAX + 1;
+            return 0;               /* too fragmented: use a whole picture */
+        }
+        list[n].y = start;
+        list[n].rows = end - start;
+        total += (end - start) * stride;
+        n++;
+        y = end;
+    }
+    *count = n;
+    return n ? LR_BAND_MAP + total : 0;
+}
+
+/* build one changed-row message in sendbuf. the map is one maxpacket, so every pixel run
+ * still starts on a packet boundary and the unit dm's it straight into the panel. */
+static unsigned band_build(struct stream *s, const struct band *list, unsigned count)
+{
+    unsigned char *msg = s->sendbuf;
+    unsigned char *map = msg + MSG_HDR;
+    unsigned char *data = map + LR_BAND_MAP;
+    unsigned stride = (unsigned)s->cfg->width * 2;
+    unsigned total = 0, wire, pad;
+
+    memset(map, 0, LR_BAND_MAP);
+    map[0] = (unsigned char)count;
+    map[1] = (unsigned char)(count >> 8);
+    for (unsigned i = 0; i < count; i++) {
+        unsigned y = list[i].y, rows = list[i].rows;
+        unsigned bytes = rows * stride;
+
+        map[4 + i * 4] = (unsigned char)y;
+        map[5 + i * 4] = (unsigned char)(y >> 8);
+        map[6 + i * 4] = (unsigned char)rows;
+        map[7 + i * 4] = (unsigned char)(rows >> 8);
+        memcpy(data + total, s->pending + MSG_HDR + (size_t)y * stride, bytes);
+        total += bytes;
+    }
+    build_hdr(msg, LR_BANDS, LR_BAND_MAP + total, s->seq, now_ms());
+    memset(msg + LR_HDR, 0, MSG_HDR - LR_HDR);
+    wire = MSG_HDR + LR_BAND_MAP + total;
+    pad = (unsigned)((MSG_HDR - (wire % MSG_HDR)) % MSG_HDR);
+    if (pad) {
+        memset(msg + wire, 0, pad);
+    }
+    return wire + pad;
+}
+
+static void video_push(struct stream *s, unsigned char *data, unsigned len, int bands)
+{
+    struct txmsg *m = malloc(sizeof *m);
+
+    if (!m) {
         s->stale_src++;
         slogf("rawstream: out of memory for a frame, dropping it");
         return;
     }
-    /* the header is padded to one full max packet so the payload starts on a packet
-     * boundary: the receiver then reads the frame as a whole number of max packets with
-     * no sub-packet tail, and its ack does not have to wait for the first bytes of the
-     * next frame (a 512-byte tail read has nothing to complete on until the next frame
-     * arrives, which added a frame period to the reported latency and deadlocked a
-     * one-frame window). */
-    build_hdr(buf, LR_FRAME, (unsigned)s->frame_len, s->seq, now_ms());
-    memset(buf + LR_HDR, 0, MSG_HDR - LR_HDR);
-    memcpy(buf + MSG_HDR, payload, (size_t)s->frame_len);
-    m->data = buf;
-    m->len = MSG_HDR + (size_t)s->frame_len;
+    m->data = data;
+    m->len = len;
     m->off = 0;
     m->seq = s->seq;
-    m->owned = 1;
+    m->owned = 0;
+    m->heap = 1;
+    m->advance_base = 1;
+    m->bands = bands;
     m->next = NULL;
     txq_push(s, m);
     s->seq++;
     s->frames++;
-    s->total_bytes += (unsigned)s->frame_len;
+    s->total_bytes += len > MSG_HDR ? len - MSG_HDR : len;
+}
+
+/* pick the cheapest correct wire form for one captured picture: changed rows (zero-copy
+ * on the unit) or the raw frame. the choice only uses encodings the unit advertised in
+ * LI_CAPS. */
+static int queue_video(struct stream *s, const unsigned char *payload)
+{
+    struct band list[LR_BAND_MAX];
+    unsigned count = 0, band_payload = 0, band_wire = 0;
+    unsigned raw_wire = MSG_HDR + (unsigned)s->frame_len;
+    int can_bands = (s->caps & LR_CAP_BANDS) && s->base_valid && !s->force_full
+                    && !s->cfg->no_bands;
+    int full = 1;
+
+    (void)payload;
+    if (s->frames - s->last_full_seq >= 120) {
+        s->force_full = 1;      /* periodic clean picture: repairs a missed stale update */
+        can_bands = 0;
+    }
+    if (can_bands) {
+        band_payload = band_scan(s, list, &count);
+        if (band_payload == 0) {
+            if (count > BAND_ACTIVE_MAX) {
+                can_bands = 0;  /* too fragmented: use a whole picture */
+            } else {
+                /* an unchanged picture still gets one empty map packet: it costs 1 KB
+                 * and keeps the frame/ack cadence (and the latency sample) alive while
+                 * a test card or a parked menu is static. */
+                s->same_src++;
+                band_payload = LR_BAND_MAP;
+            }
+        }
+        if (can_bands) {
+            band_wire = MSG_HDR + band_payload;
+            band_wire += (MSG_HDR - (band_wire % MSG_HDR)) % MSG_HDR;
+            /* a changed-row message costs one guest wakeup per run, while a whole
+             * picture is only three 256 KB urbs. require half the wire bytes before
+             * turning the frame path into up to eight smaller direct urbs; full-screen
+             * video stays on the three-urb path, static UI still wins by a lot. */
+            if (band_wire + raw_wire / 2 >= raw_wire) {
+                can_bands = 0;
+            }
+        }
+    }
+    if (can_bands && band_wire) {
+        unsigned len = band_build(s, list, count);
+
+        video_push(s, s->sendbuf, len, 1);
+        full = 0;
+    } else {
+        unsigned char *msg = s->pending;
+
+        build_hdr(msg, LR_FRAME, (unsigned)s->frame_len, s->seq, now_ms());
+        memset(msg + LR_HDR, 0, MSG_HDR - LR_HDR);
+        video_push(s, msg, raw_wire, 0);
+    }
+    if (full) {
+        s->last_full_seq = s->frames;
+        s->force_full = 0;
+    }
+    return 1;
 }
 
 /* ---- audio -----------------------------------------------------------------------------
@@ -1145,6 +1339,7 @@ static void queue_audio(struct stream *s, const unsigned char *pcm, size_t len)
     m->off = 0;
     m->seq = HDR_NO_SEQ;
     m->owned = 1;
+    m->heap = 1;
     m->next = NULL;
     aq_push(s, m);
     s->audio_chunks++;
@@ -1158,7 +1353,7 @@ static void queue_audio(struct stream *s, const unsigned char *pcm, size_t len)
             depth++;
             q = q->next;
         }
-        while (depth > 64) {
+        while (depth > AUDIO_QUEUE_MAX) {
             struct txmsg *old = s->aq_head;
 
             s->aq_head = old->next;
@@ -1352,7 +1547,7 @@ static void audio_drain(struct stream *s, double now)
     if (now < s->audio_next_at) {
         return;
     }
-    /* keep a delivered chunk even if it is a little late: the unit has a 160 ms
+    /* keep a delivered chunk even if it is a little late: the unit starts with a 60 ms
      * prebuffer and a 256 KB ring, and dropping here was losing short tones entirely
      * when a video frame occupied the link */
     while (s->audio_pending_len < sizeof s->audio_pending) {
@@ -1452,7 +1647,15 @@ static int flush_tx(struct stream *s, struct outlink *o)
 
             s->tx = NULL;
             if (done->seq != HDR_NO_SEQ) {
-                sent_record(s, done->seq, now_sec());
+                sent_record(s, done->seq, now_sec(), done->bands);
+            }
+            if (done->advance_base) {
+                unsigned char *swap = s->pending;
+
+                s->pending = s->prev;
+                s->prev = swap;
+                s->pending_len = 0;
+                s->base_valid = 1;
             }
             tx_free(done);
         }
@@ -1475,6 +1678,8 @@ static void link_lost(struct stream *s, struct outlink *o)
     lat_reset(s);
     s->touch_pending = 0;       /* a held touch from the old link is stale */
     s->mode_pending = 1;
+    s->base_valid = 0;
+    s->force_full = 1;
     s->audio_ready = 0;
     s->audio_cfg_pending = 0;
     aq_clear(s);
@@ -1526,6 +1731,7 @@ static void ff_reap(struct stream *s)
         s->ff_pid = -1;
     }
     s->pending_len = 0;
+    s->drop_len = 0;
     s->ff_retry_at = now_sec() + 1.0;
 }
 
@@ -1598,6 +1804,7 @@ static int ff_spawn(struct stream *s)
     s->ff_fd = fds[0];
     s->ff_pid = pid;
     s->pending_len = 0;
+    s->drop_len = 0;
     return 0;
 }
 
@@ -2116,10 +2323,20 @@ static int stream_init(struct stream *s, struct cfg *c)
         slogf("rawstream: window %d clamped to 64", s->window);
         s->window = 64;
     }
-    s->pending_cap = (size_t)s->frame_len + 65536;
-    s->pending = malloc(s->pending_cap);
-    if (!s->pending) {
-        slogf("rawstream: out of memory for the capture buffer");
+    s->sendcap = MSG_HDR + (size_t)s->frame_len + LR_BAND_MAP + 4096;
+    s->pending = malloc(MSG_HDR + (size_t)s->frame_len);
+    s->prev = malloc(MSG_HDR + (size_t)s->frame_len);
+    s->dropbuf = malloc((size_t)s->frame_len);
+    s->sendbuf = malloc(s->sendcap);
+    s->changed_rows = malloc((size_t)c->height);
+    if (!s->pending || !s->prev || !s->dropbuf || !s->sendbuf || !s->changed_rows) {
+        slogf("rawstream: out of memory for the capture buffers");
+        free(s->pending);
+        free(s->prev);
+        free(s->dropbuf);
+        free(s->sendbuf);
+        free(s->changed_rows);
+        s->pending = s->prev = s->dropbuf = s->sendbuf = s->changed_rows = NULL;
         return -1;
     }
     fmt = FMT_RGB565 | (c->no_chunked ? 0 : 0x100);
@@ -2184,6 +2401,10 @@ static void stream_cleanup(struct stream *s)
     }
     tx_clear(s);
     free(s->pending);
+    free(s->prev);
+    free(s->dropbuf);
+    free(s->sendbuf);
+    free(s->changed_rows);
     if (s->audio_pid > 0) {
         audio_reap(s);
     } else if (s->audio_fd >= 0) {
@@ -2201,12 +2422,15 @@ static void stream_cleanup(struct stream *s)
 
 static void capture_drain(struct stream *s, struct outlink *o)
 {
-    size_t drop = 0;
+    int idle = !(s->tx || s->mode_pending || s->txq_head
+                 || (s->window && s->seq - s->acked >= (unsigned)s->window));
 
-    if (!(s->tx || s->mode_pending || s->txq_head)) {
-        /* a whole frame before anything else: the payload length is fixed */
-        size_t need = (size_t)s->frame_len - s->pending_len;
-        ssize_t n = read(s->ff_fd, s->pending + s->pending_len, need);
+    /* always finish the frame already in a buffer before choosing the other one: a mode
+     * heartbeat can arrive halfway through a capture, and restarting a read in the
+     * middle of the pipe would leave every later frame shifted. */
+    if (s->pending_len) {
+        ssize_t n = read(s->ff_fd, s->pending + MSG_HDR + s->pending_len,
+                         (size_t)s->frame_len - s->pending_len);
 
         if (n < 0) {
             if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -2225,17 +2449,21 @@ static void capture_drain(struct stream *s, struct outlink *o)
             return;
         }
         s->pending_len = 0;
-        queue_frame(s, s->pending);
-        if (flush_tx(s, o) < 0) {
-            link_lost(s, o);
+        if (!idle) {
+            s->stale_src++;
+            return;
+        }
+        if (queue_video(s, s->pending + MSG_HDR) > 0) {
+            if (flush_tx(s, o) < 0) {
+                link_lost(s, o);
+            }
         }
         return;
     }
-    /* a frame is still going out: keep draining ffmpeg so it is at the live edge, but
-     * do not queue what is captured, the panel takes the next one */
-    while (drop == 0) {
-        ssize_t n = read(s->ff_fd, s->pending + s->pending_len,
-                         s->pending_cap - s->pending_len);
+
+    if (s->drop_len) {
+        ssize_t n = read(s->ff_fd, s->dropbuf + s->drop_len,
+                         (size_t)s->frame_len - s->drop_len);
 
         if (n < 0) {
             if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -2249,14 +2477,62 @@ static void capture_drain(struct stream *s, struct outlink *o)
             ff_reap(s);
             return;
         }
-        s->pending_len += (size_t)n;
-        while (s->pending_len >= (size_t)s->frame_len) {
-            memmove(s->pending, s->pending + s->frame_len,
-                    s->pending_len - (size_t)s->frame_len);
-            s->pending_len -= (size_t)s->frame_len;
+        s->drop_len += (size_t)n;
+        if (s->drop_len == (size_t)s->frame_len) {
+            s->drop_len = 0;
             s->stale_src++;
         }
-        drop = 1;
+        return;
+    }
+
+    if (!idle) {
+        ssize_t n = read(s->ff_fd, s->dropbuf, (size_t)s->frame_len);
+
+        if (n < 0) {
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+                return;
+            }
+            ff_reap(s);
+            return;
+        }
+        if (n == 0) {
+            slogf("rawstream: capture pipe closed, restarting ffmpeg");
+            ff_reap(s);
+            return;
+        }
+        s->drop_len = (size_t)n;
+        if (s->drop_len == (size_t)s->frame_len) {
+            s->drop_len = 0;
+            s->stale_src++;
+        }
+        return;
+    }
+
+    {
+        ssize_t n = read(s->ff_fd, s->pending + MSG_HDR, (size_t)s->frame_len);
+
+        if (n < 0) {
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+                return;
+            }
+            ff_reap(s);
+            return;
+        }
+        if (n == 0) {
+            slogf("rawstream: capture pipe closed, restarting ffmpeg");
+            ff_reap(s);
+            return;
+        }
+        s->pending_len = (size_t)n;
+        if (s->pending_len < (size_t)s->frame_len) {
+            return;
+        }
+        s->pending_len = 0;
+        if (queue_video(s, s->pending + MSG_HDR) > 0) {
+            if (flush_tx(s, o) < 0) {
+                link_lost(s, o);
+            }
+        }
     }
 }
 
@@ -2718,8 +2994,8 @@ static void log_li_chunk(const unsigned char *data, size_t len)
     /* a finger reports a sample every millisecond while it is down. the journal is the
      * appliance's only log and systemd keeps 16 MiB of it, so logging every sample turns a
      * touch into tens of thousands of journal writes and can keep journald busy for the
-     * whole drive: edge log one line, and at most one move line a second. livi-link-monitor
-     * only needs a line to know the link is connected, and the 5 s stats line covers idle. */
+     * whole drive: edge log one line, and at most one move line a second. The 5 s stats
+     * line covers idle. */
     static unsigned last_touch_log;
     static int last_touch_down = -1;
     size_t off = 0;
@@ -3519,6 +3795,8 @@ static int parse_args(int argc, char **argv, struct cfg *c, int allow_gadget)
             c->no_chunked = 1;
         } else if (!strcmp(argv[i], "--flip")) {
             c->flip = 1;
+        } else if (!strcmp(argv[i], "--no-bands")) {
+            c->no_bands = 1;
         } else if (!strcmp(argv[i], "--audio")) {
             c->audio = 1;
         } else if (!strcmp(argv[i], "--audio-test")) {

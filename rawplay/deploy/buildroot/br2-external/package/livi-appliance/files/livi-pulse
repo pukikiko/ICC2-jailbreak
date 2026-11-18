@@ -46,8 +46,11 @@ if [ -n "$card" ]; then
 else
     echo "livi-pulse: no I2S DAC card, null sink only" >&2
 fi
+# module-null-sink has no latency_msec argument in PulseAudio 17 (it rejects
+# the whole module); norewinds=1 gives it the short 50 ms block instead of
+# the default 2 s one.
 printf '%s\n' \
-    'load-module module-null-sink sink_name=livi-null sink_properties=device.description=LIVI-Null' \
+    'load-module module-null-sink sink_name=livi-null sink_properties=device.description=LIVI-Null norewinds=1' \
     >> "$SINKS"
 
 # --disallow-exit keeps the daemon up for the appliance lifetime;

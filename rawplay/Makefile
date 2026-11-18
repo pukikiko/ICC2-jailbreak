@@ -1,7 +1,7 @@
 # the host side of the livi stack. weston-touch.so is the weston module that adds a touch
 # device (and injects the panel keys) the raw sender can drive, so the app gets real touch
-# instead of an x11 mouse. needs weston-devel (fedora: dnf install weston-devel,
-# postmarketos: apk add weston-dev). the newest installed libweston is picked; the major is
+# instead of an x11 mouse. needs the weston development headers (fedora:
+# dnf install weston-devel). the newest installed libweston is picked; the major is
 # passed to the source because weston 16 changed the touch and keyboard apis (see the
 # comments in weston-touch.c).
 WESTON_PC := $(shell pkg-config --list-all 2>/dev/null | awk '/^libweston-[0-9]+ /{print $$1}' | sort | tail -1)
@@ -50,7 +50,7 @@ $(CAPTURE_C): $(CAPTURE_XML) | out
 
 CFLAGS_RAWLINK := -O2 -Wall -Wextra -std=gnu11 -pthread -Iout $(WAYLAND_CFLAGS)
 
-rawlink: rawlink.c $(CAPTURE_H) $(CAPTURE_C)
+rawlink: rawlink.c lr-audio.h $(CAPTURE_H) $(CAPTURE_C)
 	mkdir -p out
 	$(CC) $(CFLAGS_RAWLINK) -o out/rawlink rawlink.c $(CAPTURE_C) $(WAYLAND_LIBS)
 
@@ -58,13 +58,6 @@ rawlink: rawlink.c $(CAPTURE_H) $(CAPTURE_C)
 test-gadget: test_gadget.c rawlink.c $(CAPTURE_H) $(CAPTURE_C)
 	mkdir -p out
 	$(CC) $(CFLAGS_RAWLINK) -o out/test_gadget test_gadget.c $(CAPTURE_C) $(WAYLAND_LIBS)
-
-# one-line client for LIVI's helper control socket: manual toggling of LIVI's wireless
-# Android Auto ("set-aa 1"/"set-aa 0"). the deployment parks AA on and leaves it alone,
-# so this is an admin/debug tool. tests: python3 test_livi_link.py
-livi-cmd: deploy/livi-cmd.c
-	mkdir -p out
-	$(CC) -O2 -Wall -Wextra -o out/livi-cmd deploy/livi-cmd.c
 
 # the generic-linux unit end: the pc as the client, standing in for the car. --usb
 # opens the real gadget (1209:1cc2) over libusb as the usb host; --sock listens for
@@ -76,13 +69,13 @@ LINUXCLI_CFLAGS := -O2 -Wall -Wextra -std=gnu11 -pthread \
                    $(shell pkg-config --cflags libusb-1.0 sdl2)
 LINUXCLI_LIBS := $(shell pkg-config --libs libusb-1.0 sdl2)
 
-linux-client: rawplay-linux.c
+linux-client: rawplay-linux.c lr-audio.h
 	mkdir -p out
 	$(CC) $(LINUXCLI_CFLAGS) -o out/rawplay-linux rawplay-linux.c $(LINUXCLI_LIBS)
 
 clean:
-	rm -f weston-touch.so mutter-devkit-touch.so out/rawlink out/test_gadget out/livi-cmd \
+	rm -f weston-touch.so mutter-devkit-touch.so out/rawlink out/test_gadget \
 	      out/rawplay-linux \
 	      out/weston-output-capture-client-protocol.h out/weston-output-capture-protocol.c
 
-.PHONY: all clean rawlink test-gadget livi-cmd linux-client
+.PHONY: all clean rawlink test-gadget linux-client

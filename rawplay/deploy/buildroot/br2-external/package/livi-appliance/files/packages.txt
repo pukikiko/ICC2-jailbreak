@@ -1,0 +1,4 @@
+# The appliance image has no package manager (no apt/dnf) and does not use
+# the AppImage or the AMD/Intel VA-API stack. Point LIVI's host package check
+# at this empty manifest (LIVI_PACKAGES_MANIFEST in livi.service) so the
+# first-run "Missing Packages" dialog never appears on the car display.

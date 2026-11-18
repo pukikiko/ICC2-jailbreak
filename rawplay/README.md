@@ -13,11 +13,10 @@ Where the pieces live:
 * `rawplay/rawlink.c` — the host: the raw sender, and FunctionFS + mass storage on a real
   car, in one binary (`stream`, `gadget`, `run`).
 * the ICC2 SDK's `fb.c` / the ICC2 SDK's `input.c` — the shared panel mapping and touch input.
-* `rawplay/bench.py` — the benchmark harness; `rawplay/test_rawlink.py` tests the host, and
-  `rawplay/test_livi_link.py` the phone deployment's link state machine (`deploy/`).
-* `rawplay/deploy/` — the postmarketOS phone appliance: the LIVI + rawlink systemd units,
-  and the phone's own `fbkeyboard` console UI, the preferred UI for the phone
-  (`rawplay/deploy/README.md`).
+* `rawplay/bench.py` — the benchmark harness; `rawplay/test_rawlink.py` tests the host.
+* `rawplay/deploy/buildroot/` — the Buildroot appliance (Orange Pi Zero 2W and a qemu
+  aarch64 `virt` board) running the LIVI + rawlink stack
+  (`rawplay/deploy/buildroot/README.md`).
 
 Everything claimed here was verified in this repo, on the emulated i.MX31, under
 `--icount 2` where performance is concerned.
@@ -177,6 +176,27 @@ status bit 0 = displayed, bit 1 = stale-dropped
 This single message carries both flow-control credit (any consumed frame) and the latency
 sample (displayed frames only). At 30 fps it costs 240 B/s.
 
+#### Changed-row pictures (2026-11)
+
+One optional downstream encoding cuts the wire time without changing the panel format. A
+unit advertises it in `LI_CAPS` (type 11, 8 B: `magic,type,ver,flags,reserved[3]`, flags
+bit 0 = bands), sent next to every `LI_READY`. A host that does not know the type skips its
+two magic bytes and resyncs, and a unit that does not send it gets whole raw frames, so old
+hosts, old units and the frozen `test_rawlink.py` fixtures keep working.
+
+* **`LR_BANDS` (type 5)** carries only rows that changed since the last sent picture. The
+  payload is one 512-byte map (`u16 count, u16 reserved`, then `count * {u16 y, u16 rows}`,
+  at most 64 runs) followed by each run's raw RGB565 rows in order. Runs are aligned to 8
+  rows, so every run is a whole number of maxpackets and each one DMAs straight into the
+  scanout mapping at `y*stride`; an unchanged picture is an empty map (1024 B total) and
+  still produces the normal frame/ack/latency sample.
+* The sender uses bands only when they save at least half the frame, so a fragmented
+  full-screen video stays on the three 256 KB URB path instead of turning into eight small
+  direct URBs. Bands are otherwise the default; `--no-bands` in `rawlink` turns them off
+  for an A/B. If a band update is acked stale, the sender forces a complete picture next;
+  a periodic full picture (every 120 updates) repairs anything a dropped update could have
+  left behind.
+
 #### Audio on the same wire
 
 Audio uses two more message types in each direction. The formats are fixed on purpose:
@@ -196,11 +216,13 @@ upstream (unit -> host):
                                                                         total 13 + len B
 ```
 
-* `LR_AUDIO_CFG` is sent after the unit says it supports audio, and again whenever the
-  reader resets. The unit opens playback only after it sees this message; `LR_AUDIO`
-  chunks are then interleaved with `FRAME` messages. The host prioritises a queued audio
-  message over the next video frame at every message boundary, but a frame already in
-  flight completes first.
+* `LR_AUDIO_CFG` is sent after the unit says it supports audio, in the one-second
+  `LI_AUDIO_CFG` heartbeat, and again whenever the reader resets. The unit opens playback
+  on the first message and treats a repeat as a no-op: flushing the ring on every
+  heartbeat used to discard up to a full prebuffer once a second. `LR_AUDIO` chunks are
+  then interleaved with `FRAME` messages. The host prioritises a queued audio message
+  over the next video frame at every message boundary, but a frame already in flight
+  completes first.
 * The unit advertises its microphone format with `LI_AUDIO_CFG` in the same one-second
   heartbeat as `LI_READY`. The host answers with `LR_AUDIO_CFG`; this is the handshake
   that keeps an old host and a new unit from sending audio at each other.
@@ -209,13 +231,27 @@ upstream (unit -> host):
   bulk-out pipe falls far behind, which keeps call latency bounded without losing the
   panel.
 * 20 ms chunks are a compromise: 10 ms costs more headers and more wakeups, 40 ms adds
-  call latency. The unit has a 100 ms playback prebuffer and a 256 KB ring; the host
-  keeps at most four 20 ms chunks queued downstream. A late voice chunk is dropped
-  instead of being played, matching the video's newest-wins policy.
+  call latency. The unit opens the PCM device on the host's audio handshake and keeps it
+  running for the whole session (silence when no PCM is arriving), so the codec never
+  stops and no window can close it. It starts playback with three chunks (60 ms) in a
+  256 KB ring and raises that one chunk at a time to six (120 ms) only after an underrun;
+  500 clean chunks lower it again. A 180 ms soft cap keeps a slow codec clock or a drifting
+  host clock from growing the queue toward the 1.45 s the 256 KB ring could hold. The
+  device itself uses a two-fragment ring of the same 20 ms chunks, so the codec adds
+  40 ms instead of the old 80 ms. The host keeps at most three 20 ms chunks queued
+  downstream (the old 64 allowed more than a second of voice delay on a slow link; six
+  still allowed twice the unit's prebuffer). A late voice chunk is dropped instead of
+  being played, matching the video's newest-wins policy. The appliance requests
+  `parec --latency-msec=60 --process-time-msec=20` from the default sink's monitor, so
+  the PulseAudio side does not add its few-hundred-ms default.
 
-At 24 fps the video is ~18.44 MB/s. The audio adds 3528 + 512 + 56 = 4096 B every 20 ms,
-or **204.8 KB/s / 1.64 Mbit/s**, leaving roughly 0.7–1.1 Mbit/s of the measured H618
-headroom. The microphone is 160 B + 13 B every 20 ms, or **8.65 KB/s / 69 kbit/s**.
+At 24 fps a raw video stream is ~18.44 MB/s. The audio adds 3528 + 512 + 56 = 4096 B every
+20 ms, or **204.8 KB/s / 1.64 Mbit/s**. The microphone is 160 B + 13 B every 20 ms, or
+**8.65 KB/s / 69 kbit/s**. With bands the video often drops to a few MB/s, so the
+H618's measured ~18.8 MB/s bulk limit stops setting the frame time; the appliance still
+captures at 24 fps because that is the panel's negotiated projection rate and keeps the
+two-frame window empty (a full raw frame at 30 fps would queue and add ~16 ms of ack
+latency).
 
 ### 2.3 Unit receiver: `rawplay`
 
@@ -229,12 +265,17 @@ headroom. The microphone is 160 B + 13 B every 20 ms, or **8.65 KB/s / 69 kbit/s
   they cannot live in the scanout image. Frames are streamed in URBs up to 256 KB (the
   `--urb` default; up to 1 MB), 4 in flight; the maxpacket padding means a 768 000-byte
   frame is exactly three of them and no sub-packet tail URB. This is what the emulator runs
-  (`--direct`) and what the real car now uses when selected. Staged remains the default and
-  fallback; see section 3.
+  (`--direct`) and what the stick's `rawplay.sh`, the HMI CarPlay plate and the homebrew
+  menu rows select by default. The launcher also rewrites a stale `buttons.txt` carplay
+  line from `--stage` to `--direct`, so the HMI plate cannot silently fall back to the
+  one-copy path. `rawplay` logs `video path direct` or `video path staged` at startup.
+  The player falls back to the staging ring automatically if the stack refuses the
+  mapping; see section 3.
 * **Video path, fallback (one copy)**: read into a `usbd_alloc` staging buffer and
   `memcpy()` into the panel mapping. This is announced loudly on the console and in
-  `--stats`; it is not a silent fallback. It is still decode-free and conversion-free, and
-  it is the default (`--stage` is now implicit; `--direct` opts into zero-copy).
+  `--stats`; it is not a silent fallback. It is still decode-free and conversion-free.
+  `rawplay.sh --stage` selects it explicitly; a bare `rawplay --usb` also still starts
+  staged, while the launcher and menu always pass `--direct`.
 * **Newest-wins**: the host keeps at most two unacked frames in flight, so no more than
   that can queue ahead; a frame that is already superseded (another complete header is
   pending by the time the receiver is ready) is consumed and acked as `stale-dropped`
@@ -250,16 +291,22 @@ headroom. The microphone is 160 B + 13 B every 20 ms, or **8.65 KB/s / 69 kbit/s
   player opened as one burst with the next touch, so without that the replayed history (the
   launch tap) reaches the host as a flood of moves and phantom clicks.
 * **Audio**: `rawplay` opens QNX PCM `card 0 / device 0` through the audio plugin API,
-  asks for s16le/44100/stereo, and writes whole driver fragments from a ring. It also
-  sends the ACM a source request for **USB audio (media mode 11)** at startup; on the real
-  car that is what unmutes the ICC's stereo path. `--acm-mode N` selects another mode and
-  `--acm-mode -1` leaves the source alone. A dedicated thread writes silence when the ring
-  is dry, so the codec never stops; an underrun is recovered with
-  `snd_pcm_channel_prepare` and the stream keeps going. The microphone is captured as the
-  codec's native s16/stereo 44.1/48 kHz, mixed to mono, resampled to 8 kHz and converted
-  to u8 in the unit, then sent upstream. A plugin u8/8000 capture is kept as a fallback for
-  hardware that refuses the native format. `--no-audio` disables both directions even if
-  the host offers them.
+  asks for s16le/44100/stereo, and writes whole driver fragments from a ring. It opens the
+  device on the host's `LR_AUDIO_CFG` and keeps it open for the whole session: when no PCM
+  is arriving the playback thread writes silence, so the codec never stops and an HMI
+  window cannot silence it. The device is driven with a two-fragment ring of the wire's
+  20 ms chunks (40 ms of hardware buffering) and the application ring starts at 60 ms of
+  PCM, growing to 120 ms only after an underrun. It forces the ACM's **USB source request
+  by default** (`--acm-mode 9`): the ACM/HMI source table maps HMI source event 10 (USB)
+  to v850 event 5/data 9, which unmutes the ICC's stereo path. Mode 11 is the HMI's AM-AS
+  request and the real car shows AUX/AM-AS, not USB. `--acm-mode -1` leaves the source
+  alone for a car that prefers the ACM's own USB selection when the PCM device opens. A
+  dedicated thread writes silence when the ring is dry, so the codec never stops; an
+  underrun is recovered with `snd_pcm_channel_prepare` and the stream keeps going. The
+  microphone is captured as the codec's native s16/stereo 44.1/48 kHz, mixed to mono,
+  resampled to 8 kHz and converted to u8 in the unit, then sent upstream. A plugin
+  u8/8000 capture is kept as a fallback for hardware that refuses the native format.
+  `--no-audio` disables both directions even if the host offers them.
 * **Timing/acks**: each consumed frame sends `LI type 8` with the displayed/stale bit; the
   host's latency sample is send-time → displayed-ack.
 * **Heartbeat and mode refresh**: a `ready` heartbeat goes out every second, and the host
@@ -286,29 +333,34 @@ headroom. The microphone is 160 B + 13 B every 20 ms, or **8.65 KB/s / 69 kbit/s
   long as the gear is engaged and closes when it is not (a brief shift through reverse
   still gets the minimum 1 s). A day/night switch does **not** open one: the HMI is already
   running, so it can apply the new theme offscreen while the video stays up. While the
-  window is open the player stops reading (a stale ack makes the host drop what its
-  two-frame window holds), and it kills the layer helper; io-display disables layer 1 on
-  client death, so the HMI's own background and climate bar are visible with the HMI still
-  running. When the window closes, a fresh helper attaches layer 1 and publishes a new
-  surface for the stream, so the video comes back on the next frame. A fresh process is
-  deliberate: reattaching layer 1 inside the long-lived player after the HMI has used the
-  display can leave the layer hidden. The climate bar is raised by a `buttons` event, so
-  the player brings the frozen `buttons` service back for the window the way the session
-  resume does: SIGKILL it by pid and let `ham` start a clean one, never a SIGCONT (which
-  would replay every panel event queued during the video as one burst), then SIGSTOP the
-  fresh process when the window closes. The main loop owns every stop/resume so no
-  in-flight bulk-in can land in the panel buffer while the HMI draws. `rawplay.sh` always
-  passes the flag.
+  window is open the player **keeps reading the link**: `LR_AUDIO` chunks are played
+  exactly as during the video, and a video message is read into the scratch ring and acked
+  stale without ever touching the panel mapping, so audio never stops and the HMI's bar
+  is not painted over. The host's two-frame window stays fed by the stale acks, so PCM
+  interleaved behind a picture is never held. The layer helper is killed on window open
+  (io-display disables layer 1 on client death, so the HMI's own background and climate
+  bar are visible with the HMI still running) and a fresh helper attaches layer 1 after
+  the window; that attach, and the `buttons` restart, run in the background while the main
+  loop still drains audio. A fresh layer process is deliberate: reattaching layer 1 inside
+  the long-lived player after the HMI has used the display can leave the layer hidden.
+  The climate bar is raised by a `buttons` event, so the player brings the frozen `buttons`
+  service back for the window the way the session resume does: SIGKILL it by pid and let
+  `ham` start a clean one, never a SIGCONT (which would replay every panel event queued
+  during the video as one burst), then SIGSTOP the fresh process when the window closes.
+  The main loop owns every stop/resume so no in-flight bulk-in can land in the panel buffer
+  while the HMI draws; like the layer attach, the slower `buttons` recovery is a worker
+  thread precisely so it cannot drain the PCM ring at the start of a window. `rawplay.sh`
+  always passes the flag.
 * **The button and vehicle readers are self-healing**: `/dev/ipc/0` is a monitor
   connection that can go quiet or fail after an HMI stop/resume, and the panel then stays
   deaf for the rest of the run while the `buttons` service and the HMI keep working. the
   panel reader in the ICC2 SDK's `input.c` reopens the monitor after a read error or 5 s
   without a frame and keeps the previous bitmap, so the first frame after the gap still
-  reports what changed (the climate/reverse windows pause the player for about 1-2.5 s, so
-  that is not a live link). the player's own `vehicle.state`/`vehicle.config`
-  reader does the same 5 s reopen, and asks for the current state when the monitor opens
-  so a player started while reverse is already engaged knows without waiting for a gear
-  change.
+  reports what changed (the climate/reverse windows restart `buttons` and can leave the
+  panel monitor quiet for about 1-2.5 s, so that is not a live link). the player's own
+  `vehicle.state`/`vehicle.config` reader does the same 5 s reopen, and asks for the
+  current state when the monitor opens so a player started while reverse is already
+  engaged knows without waiting for a gear change.
 * **A hidden HMI must not accumulate `buttons` events**: with the panel behind the video
   every panel event `buttons` sends blocks in its queue and the whole backlog replays as
   one burst when the HMI becomes visible (volume jumps, menus open by themselves).
@@ -516,7 +568,9 @@ gadget's vendor interface.
   panel payload; every protocol read stays on the `usbd_alloc` staging ring even when
   direct is selected. In a 20 s real-car run direct drew 290/290 frames at 14.4 fps and
   51.5 ms/frame, 0 stale and 0 errors, while staged drew 158/158 at 7.9 fps and
-  81.3 ms/frame (section 4). Staged remains the default; `--direct` remains opt-in.
+  81.3 ms/frame (section 4). The player binary still defaults to staged when run bare;
+  `rawplay.sh` and the launcher/menu pass `--direct` by default and the path falls back
+  automatically if the stack refuses it.
 * On a real car the gadget is unchanged: functionfs already delivers request-sized
   transfers because the bridge writes whole chunks, and the wire, not qemu's ring, is the
   limit.
@@ -526,11 +580,8 @@ gadget's vendor interface.
   userspace wakeup. At 64 KB a chunk is ~1.4 ms of high-speed wire time, so on a host that
   leaves deep CPU idle slowly (a phone with the screen off, `cpu-power-collapse` at a
   270 µs exit latency) the gap dominates and the link crawls; the panel paints a frame
-  line by line. The phone deployment therefore holds `/dev/cpu_dma_latency` at 0 while a
-  rawplay client is connected (`livi-link-monitor`, which releases it again when the link
-  goes idle; see `deploy/README.md`) and the bridge moves 256 KB per write over a 1 MB
-  pipe. If a
-  host still caps out, the next step is native AIO (`io_submit`) on ep1, which lets
+  line by line. The bridge moves 256 KB per write over a 1 MB pipe. If a host
+  still caps out, the next step is native AIO (`io_submit`) on ep1, which lets
   several requests be outstanding at once — synchronous writes cannot.
 
 ## 4. Performance
@@ -611,10 +662,43 @@ the icount clock and host load; rawplay's stats print the source cadence next to
 rate that still looks low is the source's, not the pipeline's: 768 KB/frame at 15 fps is
 92 Mbit/s.
 
+### Changed rows and bounded audio (2026-11)
+
+The 2026-11 sender no longer copies a captured picture into a second transmit buffer: the
+capture lands in a whole-frame buffer with the 512-byte LR header reserved in front, and a
+raw frame goes from there to the socket/pipe in place. It also chooses the cheapest picture
+form the unit advertised, and keeps the audio queue shallow. A/B against
+`ff7da0966dccba721a1ce315711d893955c3a9a1` on the same harness, one fresh boot per run:
+
+| run | build | frames | wall fps | guest fps | ms/frame | latency avg / p95 / max | touch |
+|---|---|---|---|---|---|---|---|
+| `--boot --icount 2`, motion 60, 10 s, `--direct` | ff7da09 | 945 | 52.4 | 94.4 | 1.9 | 5.1 / 8.4 / 112.7 ms | 59.9 ms |
+| same | current raw | 972 | 52.1 | 97.2 | 1.9 | 5.8 / 8.7 / 121.8 ms | 60.9 ms |
+| `--boot --icount 2`, test card 60, 10 s, `--direct` | current bands | 896 | 52.5 | 89.5 | 0.6 | 3.0 / 5.4 / 111.6 ms | 53.7 ms |
+| host speed, motion 60, 8 s, `--direct` | ff7da09 | 398 | 47.3 | 49.7 | 4.1 | 7.9 / 31.2 / 80.7 ms | 35.4 ms |
+| same | current raw | 453 | 53.9 | 56.6 | 3.8 | 7.8 / 30.9 / 96.3 ms | 50.3 ms |
+
+Run-to-run host noise is a few frames and several tenths of a millisecond on this harness
+(the windows VM sharing the machine is part of it); the host-speed row and the static-card
+row show the pipeline changes clearly, while the 60 fps icount row is pinned near the
+emulator's own ~52 fps delivery ceiling in both builds. The test card is static, so the
+bands path sends a 1 KB empty map per frame after the first picture: the panel still gets
+a frame/ack cadence and the 0.6 ms/frame guest cost shows what a mostly static UI pays.
+
+The audio path follows the same rule: three 20 ms chunks may wait downstream (60 ms worst
+case behind a slow link), the unit starts at three chunks and only grows to six after an
+underrun, and the codec ring is two 20 ms fragments. In the emulator audio test the host
+sent 451 chunks with 0 drops through a 9 s run; the socket audio test still checks the
+downstream tone and the byte-exact microphone loopback. The appliance's `parec` now asks
+the default sink's monitor for 60 ms latency / 20 ms process time instead of PulseAudio's
+multi-hundred-ms default.
+
 ### Direct zero-copy on the real car (2026-11)
 
+The table below used `--acm-mode -1`; the current default is `--acm-mode 9` (USB).
+
 Two 20 s field runs on the same unit and appliance, 800x480 RGB565, with the debug stick
-and `--acm-mode -1`:
+and the ACM source left alone (`--acm-mode -1`):
 
 | path | frames | drawn | stale | fps | ms/frame | source | errors | drop in/ack/mic |
 |---|---|---|---|---|---|---|---|---|
@@ -699,17 +783,11 @@ cache/sdram stalls qemu does not model.
   installed). Needs wayland-client and `wayland-scanner` at build time (`wayland-dev`);
   there is no X11 dependency anywhere. `make -C rawplay` also builds the
   `weston-touch.so` module the session loads (weston-devel).
-* Phone deployment state machine: `make -C rawplay livi-cmd` then
-  `python3 rawplay/test_livi_link.py`. It drives `deploy/livi-link-monitor` with a fake
-  journal, `/sys`, `/dev`, power supply, rfkill, systemctl and helper socket and checks
-  the charger/radio transitions (unplugged/idle/connected), the latency fd hold, the
-  `livi.service` stop on unplug / start once the radios are confirmed (including a
-  failed reload and a livi started behind the monitor), that the helper socket is never
-  touched (wireless AA is parked on in LIVI's config) and `livi-cmd` itself.
 * Audio loopback, no usb: `make out/rawplay && make -C rawplay rawlink linux-client`, then
   `python3 rawplay/test_audio.py`. It runs rawplay-linux against `rawlink stream --test`,
   checks the 1 kHz downstream s16/44.1 stereo tone and the 440 Hz u8/8k mic loopback are
-  byte-for-byte the expected 20 ms chunks, and that video keeps flowing.
+  byte-for-byte the expected 20 ms chunks, that video keeps flowing, and that a
+  playback-only client (no `--mic`) still negotiates the downstream stream.
 * Audio in the emulator: `python3 rawplay/test_audio_qemu.py` (downstream, qemu wav
   backend) or `AUDIO_QEMU_PA=1 python3 rawplay/test_audio_qemu.py` (PulseAudio null sink
   plus a pipe-source mic tone). It resumes the `started` snapshot, hotplugs usb-livi,
@@ -723,7 +801,7 @@ The display end is **LIVI-Lite** in the virtual wayland session (`rawplay/livi.s
 weston's headless backend, kiosk shell, repaint-on-capture, no X server. qemu's `usb-livi`
 uses request-sized bulk transfers (`chunked=on`), which is what makes the zero-copy path
 work. `livi.sh` runs `/opt/livi/livi-core` (or a source build via `LIVI_CORE`/`LIVI_ROOT`);
-the default renderer is pixman, which the appliance and the phone both run. On a GPU host
+the default renderer is pixman, which the appliance runs. On a GPU host
 `LIVI_WESTON_RENDERER=gl ./livi.sh start` also works; NVIDIA's GL capture is bottom-up, so
 pass rawlink `--flip` there:
 
@@ -745,8 +823,9 @@ USB gadget, not the qemu `usb-livi` chardev sender), use the bridge mode:
     # VNC on 127.0.0.1:5901; stop with kill $(cat /tmp/emu-appliance.pid)
 
 It claims the physical `1209:1cc2` vendor interface with libusb, relays its bulk endpoints
-to qemu's `usb-livi` chardev, resumes the `started` snapshot, uploads/runs the unit
-`rawplay`, and leaves the session up. `EMU_AUDIO=pa` plays the codec output on the host;
+to qemu's `usb-livi` chardev, resumes the `started` snapshot, attaches `usb.img` as the
+stick, and runs `rawplay.sh 0 --direct` from it (`/fs/usb0/homebrew/apps`), so the player
+under test is the one the stick carries. `EMU_AUDIO=pa` plays the codec output on the host;
 the default writes `/tmp/emu-appliance.wav`. `EMU_VNC=` disables the VNC display.
 
 Raw pipeline alone (fast iteration on the `started` snapshot; the usb stack may need a
@@ -758,7 +837,11 @@ restart, which `bench.py` does):
 
 `--rawplay PATH` benches another build against the one in `out` (the file must be named
 `rawplay`, the unit runs `/tmp/rawplay`), and writes `rawplay/out/bench-result-<label>.json`
-next to the printed summary.
+next to the printed summary. `--no-bands` turns changed-row updates off, so raw and bands
+can be compared under the same source.
+
+`rawlink stream|run --no-bands` is the corresponding debug switch. The unit needs no
+option: it advertises bands in `LI_CAPS` and accepts whichever form the host chooses.
 
 `--video out.mp4` records the emulated panel (QMP `screendump`) and writes a real-time
 video with each captured frame held until the next capture:
@@ -795,7 +878,7 @@ must be high speed (the jailbroken `io-usb` restart,
         --wayland "$XDG_RUNTIME_DIR/wayland-livi" --stats
 
     # on the unit
-    /fs/usb0/homebrew/apps/rawplay.sh 0 --stats
+    /fs/usb0/homebrew/apps/rawplay.sh 0 --stats --direct
 
 The appliance's `livi-pulse` loads the `livi-car-mic` pipe source and the
 `rawlink-wait` wrapper feeds `rawlink` the default sink's monitor. To test both directions
@@ -819,8 +902,9 @@ storage, the descriptor bytes the device has always enumerated); `--sock` defaul
 `/fs/usb0`.
 
 The unit player is `rawplay --usb [seconds] [--stats] [--direct] [--stage] [--hmi]
-[--urb BYTES] [--poll-us US]`. Staged is the default (read into a usbd_alloc ring and memcpy to the
-panel); `--direct` opts into the zero-copy path, which now works on the real unit too:
+[--urb BYTES] [--poll-us US]`. A bare player defaults to staged (read into a usbd_alloc
+ring and memcpy to the panel); `rawplay.sh`, the HMI CarPlay plate and the homebrew menu
+rows pass `--direct`, which is the zero-copy path that now works on the real unit too:
 the frame payload DMAs into the panel mapping while headers, MODE, audio and padding stay on
 the staging ring (section 3). The header is validated against the protocol
 (reserved byte, known type, mode length, frame length) because raw pixels have no start
@@ -839,7 +923,19 @@ are) and shows the video in an SDL window with the mouse/keys going back as the
 same `LI` messages; `--sock PATH` instead listens for `rawlink stream PATH` so
 the sender and the protocol can be exercised with no USB hardware at all.
 `--headless` parses, acks and stats without a window, and `--dump DIR` saves
-frames as ppm for the pixel checks.
+frames as ppm for the pixel checks. `--audio[-dump]` and `--mic[-test|-dump]` use the
+same LR/LI audio messages as the car: 20 ms s16le/44100/stereo down, u8/8000/mono up.
+`--audio` alone still sends the `LI_AUDIO_CFG` heartbeat (with no chunks behind it),
+because that message is the handshake rawlink gates both audio directions on.
+
+On USB the aligned framing needs two details: every bulk-in request is a full buffer
+(a request smaller than an already-queued message makes the device babble and libusb
+returns `OVERFLOW`), and a timed-out transfer keeps the bytes that did arrive (the
+maxpacket-aligned stream has no short packet after a message, so waiting for one would
+deadlock a small frame behind the sender's ack window). The parser also keeps a partly
+read header across a timeout, so splitting one transfer cannot make it resync inside a
+picture. `test_audio.py` covers both audio directions over the socket, and the same
+client runs over the real gadget with the `--usb` recipe above.
 
 ### Conventions
 
@@ -857,6 +953,6 @@ frames as ppm for the pixel checks.
 * Double-buffered scanout (flip at IPU EOF) to remove tearing without a copy; needs a
   DMA-capable second buffer plus either a physical-address API for `usbd_alloc` memory or
   a driver-provided second panel buffer.
-* Evaluate making `--direct` the real-car default (staged stays the fallback) after longer
-  runs and more units.
+* Evaluate making `--direct` the bare player default as well (staged stays the fallback)
+  after longer runs and more units; the launcher and menu already use it.
 * Revisit IPU YUV/CSC if a later QNX graphics driver exposes the foreground layer.

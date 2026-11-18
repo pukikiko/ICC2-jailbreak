@@ -3,7 +3,7 @@
 #
 #   - all unit programs (out/): rawplay, mediaplayer, terminal, hbmenu, launcher,
 #     hmi-overlay.so, iccbuttons, buswatch, syncsploit, the livi-usb compile check
-#   - the host tools (rawplay/out/): rawlink, test_gadget, livi-cmd
+#   - the host tools (rawplay/out/): rawlink, test_gadget
 #   - a complete homebrew stick tree under usb/homebrew/ and usb.img
 #
 # ICC2 (the SDK and emulator) is referenced, never copied: ICC2_DIR comes from the

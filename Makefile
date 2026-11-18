@@ -137,10 +137,10 @@ out/mediaplayer: out/obj/mediaplayer.o out/obj/menu.o out/obj/menufont.o out/obj
 	      out/obj/mediaplayer.o out/obj/compat.o $(FFLIBS) $(LIBC) $(SDK)/stub/libm.so.2
 
 # ---------------------------------------------------------------- host tools ---
-# rawlink (gadget/streamer/run) and the two small test/admin helpers. weston-touch.so is
+# rawlink (gadget/streamer/run) and the gadget bridge test helper. weston-touch.so is
 # built by rawplay/Makefile's default target and needs libweston headers.
 host:
-	$(MAKE) -C rawplay rawlink test-gadget livi-cmd
+	$(MAKE) -C rawplay rawlink test-gadget
 
 # ---------------------------------------------------------------- the usb stick ---
 # stick/ is the tracked base of the stick: boot.sh, stickwatch.sh, apps.txt, buttons.txt

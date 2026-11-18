@@ -164,8 +164,8 @@ def check():
     ok = True
     source = micro.heard.get('acm msg 0x10') if micro else None
     log(f"acm source request: {source['payload'] if source else '(none)'}")
-    if not source or not source['payload'].startswith('10 03 05 00 00 00 0b'):
-        log('FAIL rawplay did not select ACM media mode 11 (USB audio)')
+    if not source or not source['payload'].startswith('10 03 05 00 00 00 09'):
+        log('FAIL rawplay did not select ACM media mode 9 (USB audio)')
         ok = False
     src = PA_OUT if PA else WAV
     if not os.path.exists(src) or os.path.getsize(src) < 1000:

@@ -264,7 +264,7 @@ nothing on the unit but the one hook file. `launcher/launcher.c` takes the stock
 place: the hmi gets the same touch events it always did, except touches on two plates next to
 the footer's home and menu buttons are swallowed and run a command instead:
 
-    CarPlay   /fs/usb0/homebrew/apps/rawplay.sh 0   the raw video player, rawplay/README.md
+    CarPlay   /fs/usb0/homebrew/apps/rawplay.sh 0 --direct   the raw video player, rawplay/README.md
     Apps      /fs/usb0/homebrew/main               the homebrew menu above
 
 the plates are painted by the hmi itself: they are baked into copies of the theme frame PNGs
@@ -328,7 +328,7 @@ the server and blocks while the launcher has the hmi stopped.
 the commands default to the `BUTTONS[]` table in `launcher/launcher.c` and are overridden by
 `/fs/usb0/homebrew/buttons.txt` (or `/tmp/buttons.txt`), one `name|command` a line, the names
 being `carplay` and `apps`; `usb/homebrew/buttons.txt` is the stick's copy. the built-in
-default and the stick's buttons.txt both run the raw player off the stick (`rawplay.sh 0`).
+default and the stick's buttons.txt both run the raw player off the stick (`rawplay.sh 0 --direct`).
 the launcher re-reads the file before each launch, so editing it on a pc is enough.
 
 on the stick that means:

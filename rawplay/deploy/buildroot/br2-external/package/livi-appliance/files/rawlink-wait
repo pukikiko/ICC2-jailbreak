@@ -27,7 +27,8 @@ umount /dev/ffs-liviraw 2>/dev/null
 # ~16 ms to every ack (measured: 57 ms at --fps 30, 41 ms at --fps 24 for the
 # same 24 fps on the wire). Pacing just under the link keeps the window at
 # one frame and the latency at the wire time. The panel target is 24 fps
-# (livi-config.json's projectionFps), so this matches the negotiated rate.
+# (livi-config.json's projectionFps, enforced in livi.service's videorate
+# sink chain), so this matches what LIVI actually renders.
 # --stats is what the boot-time harness reads for T5 (first frames) even when
 # no reader is attached yet
 #
@@ -36,9 +37,17 @@ umount /dev/ffs-liviraw 2>/dev/null
 # rawlink multiplexes into the video stream at 44100/s16le/stereo. the car mic
 # comes back as u8/8000 mono and is written to the pipe source livi-pulse loads,
 # which is the default source LIVI's uplink captures.
+#
+# --latency-msec=60 --process-time-msec=20: the monitor is consumed in 20 ms pieces
+# with a bounded sink latency instead of PulseAudio's few-hundred-ms default. rawlink's
+# audio queue holds at most three 20 ms chunks and the unit starts playback with three,
+# so the whole path stays around 100 ms without underrunning on a 24 fps link.
+#
+# changed-row updates (bands) are always on and only used when they save at least half
+# the picture; pass --no-bands to rawlink to A/B the raw frame path.
 export PULSE_SERVER=unix:/run/pulse/native
 export HOME=/tmp
 exec /opt/livi/rawlink run --wayland /run/livi/wayland-livi \
     --stick /opt/livi/usb.img --fps 24 --stats --audio \
-    --audio-cmd 'sink=$(pactl get-default-sink); exec parec --device="$sink.monitor" --format=s16le --rate=44100 --channels=2 --raw' \
+    --audio-cmd 'sink=$(pactl get-default-sink); exec parec --device="$sink.monitor" --format=s16le --rate=44100 --channels=2 --latency-msec=60 --process-time-msec=20 --raw' \
     --audio-out /run/livi-audio/car-mic

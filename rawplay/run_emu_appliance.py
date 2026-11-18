@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # run the ICC emulator as the car end of the physical appliance: the appliance's USB
 # gadget is claimed on this host and its vendor bulk bytes are relayed to qemu's
-# usb-livi chardev. the guest rawplay then sees the same LR/LI stream the real car sees.
+# usb-livi chardev. the guest runs the stick's own rawplay.sh, so the player is the one
+# the stick carries, and it sees the same LR/LI stream the real car sees.
 #
 #   python3 rawplay/run_emu_appliance.py            # gtk window + host audio via pacat
 #   EMU_AUDIO=pa python3 rawplay/run_emu_appliance.py
@@ -16,12 +17,14 @@ JB = os.path.dirname(HERE)
 ICC = os.environ.get('ICC2_DIR', os.path.join(JB, '..', 'ICC2'))
 sys.path.insert(0, os.path.join(ICC, 'qemu'))
 
-import hmi, qmp, v850, upload
+import hmi, qmp
 import pexpect
 from guest import (GDB_SOCKET, QMP_SOCKET, SER5_SOCKET, UART3_SOCKET, USB_SOCKET,
                    resume, type_line)
-RAWPLAY = os.path.join(JB, 'out', 'rawplay')
+STICK = os.path.join(JB, 'usb.img')
 BRIDGE = os.path.join(HERE, 'out', 'rawplay-linux')
+# the unit runs the player the way the stick's own launcher does, not a /tmp upload
+STICK_RAWPLAY = '/fs/usb0/homebrew/apps/rawplay.sh'
 CONSOLE = '/tmp/emu-appliance-console.log'
 BRIDGE_LOG = '/tmp/emu-appliance-bridge.log'
 WAV = '/tmp/emu-appliance.wav'
@@ -123,8 +126,13 @@ def cleanup():
 
 def main():
     global g, bridge
-    if not os.path.exists(RAWPLAY) or not os.path.exists(BRIDGE):
-        raise SystemExit('build out/rawplay and rawplay/out/rawplay-linux first')
+    if not os.path.exists(BRIDGE):
+        raise SystemExit('build rawplay/out/rawplay-linux first')
+    if not os.path.exists(STICK):
+        raise SystemExit('build usb.img (make stick) first: the unit runs rawplay off the stick')
+    built = os.path.join(JB, 'out', 'rawplay')
+    if os.path.exists(built) and os.path.getmtime(STICK) < os.path.getmtime(built):
+        status('usb.img is older than out/rawplay; make stick to run the current player')
     for p in (QMP_SOCKET, UART3_SOCKET, SER5_SOCKET, GDB_SOCKET, USB_SOCKET, PIDFILE):
         try:
             os.unlink(p)
@@ -136,7 +144,7 @@ def main():
     signal.signal(signal.SIGTERM, on_signal)
 
     extra = ['-qmp', f'unix:{QMP_SOCKET},server=on,wait=off',
-             '-drive', f'if=none,id=stick,format=raw,read-only=on,file={os.path.join(JB, "usb.img")}',
+             '-drive', f'if=none,id=stick,format=raw,read-only=on,file={STICK}',
              '-chardev', f'socket,id=liviusb,path={USB_SOCKET},server=on,wait=off']
     if DISPLAY_MODE == 'vnc':
         extra += ['-display', f'vnc={VNC}']
@@ -158,8 +166,6 @@ def main():
 
     status('resuming the started snapshot')
     g = resume('started', extra, log=open(CONSOLE, 'w', buffering=1))
-    micro = v850.V850(v850.connect(UART3_SOCKET), lambda m: None)
-    micro.uploader = lambda paths: upload.upload(GDB_SOCKET, paths)
     q = qmp.Qmp(QMP_SOCKET)
     time.sleep(2)
 
@@ -177,11 +183,8 @@ def main():
                               stderr=subprocess.STDOUT)
     time.sleep(1)
 
-    status('uploading rawplay')
-    v850.command(micro, f'upload {RAWPLAY}')
-    time.sleep(6)
-    status('starting the unit player')
-    type_line(g, '/tmp/rawplay --usb --stats --direct')
+    status('starting the unit player off the stick')
+    type_line(g, f'sh {STICK_RAWPLAY} 0 --direct')
     threading.Thread(target=drain, daemon=True).start()
 
     status(f'emulator up; display={DISPLAY_MODE} audio={AUDIO}')

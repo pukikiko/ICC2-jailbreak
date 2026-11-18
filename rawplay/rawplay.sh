@@ -3,10 +3,12 @@
 # and no codec: the frames are already the panel's format. see rawplay/README.md; the host
 # side is rawplay/out/rawlink.
 #
-# usage: rawplay.sh [seconds] [--stats] [--stage]
+# usage: rawplay.sh [seconds] [--stats] [--direct|--stage]
 #   seconds  stop after this many seconds of guest time
-#   --stage  always copy through the usbd_alloc staging ring instead of dma'ing straight
-#            into the video surface (the default, which falls back on its own if refused)
+#   --direct zero-copy into the video surface (the default here; the player falls back on
+#            its own if the stack refuses the mapping)
+#   --stage  copy through the usbd_alloc staging ring instead of dma'ing straight into the
+#            video surface (kept as an explicit debug/fallback path)
 #   --stats  five second progress lines
 #
 # the player sits next to this script: /tmp for an upload, /fs/usb0/... on the stick.
@@ -25,6 +27,13 @@
 # starts a clean one and the kill is what drops the frames queued for the old connection.
 DIR=${0%/*}
 [ "$DIR" = "$0" ] && DIR=/tmp
+
+# the launcher/menu and every stick entry start this script, so direct is the default
+# here. an explicit --stage (or --direct) is left alone for benchmarking and fallback.
+case " $* " in
+    *" --stage "*|*" --direct "*) ;;
+    *) set -- "$@" --direct ;;
+esac
 
 # background the old player: pdksh can miss the death of a child that exits at once, and a
 # foreground slay here could wedge this script's shell before the player ever runs

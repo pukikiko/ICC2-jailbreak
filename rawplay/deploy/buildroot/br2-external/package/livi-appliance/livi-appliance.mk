@@ -39,6 +39,11 @@ define LIVI_APPLIANCE_INSTALL_TARGET_CMDS
         $(TARGET_DIR)/etc/pulse/system.pa
     $(INSTALL) -D -m 0644 $(LIVI_APPLIANCE_PKGDIR)/files/journald.conf \
         $(TARGET_DIR)/etc/systemd/journald.conf
+    # Empty package manifest: the appliance has no apt/dnf and does not use
+    # the AppImage or the AMD/Intel VA-API stack, so LIVI's host package
+    # prompt must stay off the car display.
+    $(INSTALL) -D -m 0644 $(LIVI_APPLIANCE_PKGDIR)/files/packages.txt \
+        $(TARGET_DIR)/etc/livi/packages.txt
     $(INSTALL) -D -m 0644 $(LIVI_APPLIANCE_PKGDIR)/files/fstab \
         $(TARGET_DIR)/etc/fstab
     $(INSTALL) -D -m 0644 $(LIVI_APPLIANCE_PKGDIR)/files/livi-weston.service \

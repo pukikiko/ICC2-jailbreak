@@ -111,6 +111,10 @@ BR2_PACKAGE_LIVI_APPLIANCE_GPU=y
 # the phone's session still establishes but the panel keeps showing LIVI's
 # own UI. This is the one plugin the pipeline needs beyond the defaults.
 BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_APP=y
+# videorate caps LIVI's projection at the 24 fps the MUSB link carries. The
+# Android Auto handshake only offers 30/60, so the 30 fps it negotiates is
+# dropped to 24 before the sink instead of being rendered in full.
+BR2_PACKAGE_GST1_PLUGINS_BASE_PLUGIN_VIDEORATE=y
 # GStreamer's videoconvert is the video path's only CPU-heavy step: with the
 # nested compositor on llvmpipe/pixman the hardware decoder's NV12 frames are
 # converted to the sink's shm BGRx. Without ORC that conversion runs the

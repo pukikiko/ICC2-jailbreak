@@ -6,8 +6,9 @@ set -eu
 # systemd wants a machine-id before PID1 reads it, and the rootfs is
 # read-only, so PID1 cannot generate one. livi-persist replaces it with a
 # per-unit id from /data when a data partition exists; this placeholder keeps
-# PID1 and early services quiet on a partitionless boot. it is not secret: the
-# image ships no ssh, no logins and no network services.
+# PID1 and early services quiet on a partitionless boot. it is not secret:
+# the release image ships dropbear with a blank root password on the
+# phone-facing AP, so the AP network is trusted for maintenance.
 if [ ! -s "$TARGET_DIR/etc/machine-id" ]; then
     printf 'b5a3f1c2d4e67890b5a3f1c2d4e67890\n' > "$TARGET_DIR/etc/machine-id"
 fi

@@ -41,8 +41,18 @@ Environment=LIVI_KIOSK=1
 # RGB565); livi-core sizes fresh projection defaults from it and livi-ui
 # opens at it
 Environment=LIVI_UI_SIZE=800x480
-# the installed layout: resources/{driver,gst-host,compositor} and ../livi-ui
+# the installed layout: resources/{driver,output,compositor} and ../livi-ui
 Environment=LIVI_RESOURCES=/opt/livi/resources
+# The appliance has no package manager and does not use the AppImage or the
+# AMD/Intel VA-API stack. The empty manifest suppresses LIVI's first-run
+# "Missing Packages" prompt on the car display; it can be overridden in
+# /etc/default/livi like the other settings.
+Environment=LIVI_PACKAGES_MANIFEST=/etc/livi/packages.txt
+# Keep the default waylandsink. The 24 fps cap cannot use videorate here:
+# the v4l2 decoder hands waylandsink DMABuf frames and videorate cannot
+# negotiate them (not-negotiated, no video). rawlink-wait already captures
+# weston at 24 fps; a user override in /etc/default/livi still wins.
+Environment=LIVI_GST_SINK=waylandsink
 # audio is the system PulseAudio daemon
 Environment=PULSE_SERVER=unix:/run/pulse/native
 # the system GStreamer registry lives on the persistent partition, so the

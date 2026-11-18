@@ -51,7 +51,10 @@ static int pcm_open(struct qa_pcm *p, int mode, int card, int device, int rate,
     params.stop_mode = SND_PCM_STOP_STOP;
     params.buf.block.frag_size = frag_bytes;
     params.buf.block.frags_min = 1;
-    params.buf.block.frags_max = mode == SND_PCM_OPEN_PLAYBACK ? 4 : -1;
+    /* playback asks for two wire-sized fragments (40 ms of codec ring): enough for the
+     * driver's own scheduling, half the old 80 ms. the application prebuffer above it
+     * absorbs the link jitter. capture keeps the driver's choice. */
+    params.buf.block.frags_max = mode == SND_PCM_OPEN_PLAYBACK ? 2 : -1;
 
     if (mode == SND_PCM_OPEN_PLAYBACK) {
         /* the unit's audio manager is happier with a single-fragment ring and no mmap;
@@ -138,7 +141,10 @@ void qa_close(struct qa_pcm *p)
     if (!p->handle) {
         return;
     }
-    if (p->channel == SND_PCM_CHANNEL_PLAYBACK) {
+    /* playback uses the non-plugin handle; a plugin flush there can block behind a
+     * driver that stopped consuming (seen with qemu's wav backend on an underrun), and
+     * the close below already stops the stream. only the plugin capture path flushes. */
+    if (p->channel == SND_PCM_CHANNEL_PLAYBACK && p->plugin) {
         (void)snd_pcm_plugin_flush(p->handle, p->channel);
     }
     snd_pcm_close(p->handle);
@@ -187,6 +193,9 @@ int qa_write(struct qa_pcm *p, const void *buf, int len)
     int done = 0;
     int retried = 0, stalls = 0;
 
+    if (!p->handle) {
+        return -1;
+    }
     while (done < len) {
         ssize_t n = p->plugin
                         ? snd_pcm_plugin_write(p->handle, q + done, (size_t)(len - done))
@@ -226,6 +235,9 @@ int qa_read(struct qa_pcm *p, void *buf, int len)
     int done = 0;
     int retried = 0, stalls = 0;
 
+    if (!p->handle) {
+        return -1;
+    }
     while (done < len) {
         ssize_t n = p->plugin
                         ? snd_pcm_plugin_read(p->handle, (unsigned char *)buf + done,
