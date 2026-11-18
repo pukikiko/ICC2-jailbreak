@@ -137,6 +137,9 @@ def main():
     ap.add_argument('--audio', action='store_true',
                     help='exercise the audio path too: qemu captures the codec output and '
                          'rawlink sends its test tone and records the microphone')
+    ap.add_argument('--audio-backend', choices=('wav', 'none', 'pa'), default='wav',
+                    help='qemu backend for the unit codec (default wav; none keeps the '
+                         'unit PCM path active without host file I/O)')
     ap.add_argument('--rawlink', metavar='PATH',
                     default=os.path.join(HERE, 'out', 'rawlink'),
                     help='host sender binary, for benching another build')
@@ -202,8 +205,13 @@ def main():
             os.unlink(f'{OUT}/bench-audio.wav')
         except FileNotFoundError:
             pass
-        extra += ['-audiodev', f'wav,id=snd,path={OUT}/bench-audio.wav',
-                  '-global', 'wm8580.audiodev=snd']
+        if args.audio_backend == 'none':
+            extra += ['-audiodev', 'none,id=snd', '-global', 'wm8580.audiodev=snd']
+        elif args.audio_backend == 'pa':
+            extra += ['-audiodev', 'pa,id=snd', '-global', 'wm8580.audiodev=snd']
+        else:
+            extra += ['-audiodev', f'wav,id=snd,path={OUT}/bench-audio.wav',
+                      '-global', 'wm8580.audiodev=snd']
     console = open(f'{OUT}/bench-console.log', 'w')
     if args.boot:
         etfs = QEMU_HERE + '/../dump/packages/factory/qnx_binaries_and_libraries/root/sbin/fs-etfs-ram'
