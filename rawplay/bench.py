@@ -49,6 +49,8 @@ USB_RESTART = ('slay -Q -f -s9 devb-umass 2>/dev/null; slay -Q -f -s9 io-usb_sws
                'auto=partition,automount=hd0@dos:/fs/usb0,ro dos exe=all; waitfor /fs/usb0 15')
 TOTALS_RAW = re.compile(r'rawplay: (\d+) frames, (\d+) drawn, (\d+) stale, (\d+) kb in '
                         r'(\d+) ms \(([\d.]+) fps, ([\d.]+) ms/frame\), (direct|staged)')
+AUDIO_STATS = re.compile(r'audio (\d+) chunks/(\d+) kb \((\d+) dropped\), '
+                         r'mic (\d+) chunks/(\d+) kb')
 
 
 def blue_at(path):
@@ -614,6 +616,12 @@ def main():
             res['lat_n'] = 0
         if args.source == 'test' and res['shot']:
             res['blue'] = blue_at(res['shot'])
+        if args.audio and os.path.exists(streamlog):
+            m = AUDIO_STATS.search(open(streamlog).read())
+            if m:
+                res.update(audio_chunks=int(m.group(1)), audio_kb=int(m.group(2)),
+                           audio_drops=int(m.group(3)), mic_chunks=int(m.group(4)),
+                           mic_kb=int(m.group(5)))
         # touch round trip: the first touch event at or after each click
         rt = []
         if os.path.exists(events):
@@ -666,6 +674,10 @@ def main():
     row('latency samples', 'lat_n', '{}')
     row('touch round trip ms', 'touch_ms')
     row('test pattern blue hits', 'blue', '{}')
+    if args.audio:
+        row('audio chunks sent', 'audio_chunks', '{}')
+        row('audio drops', 'audio_drops', '{}')
+        row('mic chunks received', 'mic_chunks', '{}')
     print(f'{"usb path":32} {res.get("mode", "n/a"):>16}')
     print(f'{"homebrew stick mounted":32} {"yes" if stick_ok else "no":>16}')
     ok = True
