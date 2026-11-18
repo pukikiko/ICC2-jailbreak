@@ -40,7 +40,7 @@ LIVI_LITE_DEPENDENCIES = host-rustc host-pkgconf host-cmake openssl \
 define LIVI_LITE_BUILD_CMDS
 	$(TARGET_MAKE_ENV) $(TARGET_CONFIGURE_OPTS) $(PKG_CARGO_ENV) \
 		CARGO_TARGET_DIR=$(@D)/target \
-		$(BR2_EXTERNAL_LIVI_APPLIANCE_PATH)/../../scripts/livi-lite-build.sh \
+		$(BR2_EXTERNAL_LIVI_APPLIANCE_PATH)/../scripts/livi-lite-build.sh \
 			$(@D) $(@D)/stage
 endef
 

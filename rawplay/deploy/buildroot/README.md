@@ -527,15 +527,21 @@ are the check on real hardware.
   already-flashed card moves to the new defaults. `livi.service` also sets
   `LIVI_UI_SIZE=800x480`, which fresh installs size their projection
   defaults from (and `livi-ui` opens at).
-* The checkout next to this repo carries two local changes on top of
-  LIVI-Lite `main`, both kept as reference patches under
+* The checkout next to this repo carries three local changes on top of
+  LIVI-Lite `main`, all kept as reference patches under
   `livi-lite-patches/`: `0001-reconnect-wake-paired-phones.patch` (the
-  wireless first-session wake, see "Android Auto wireless") and
+  wireless first-session wake, see "Android Auto wireless"),
   `0002-convert-hw-decoder-frames-for-a-gpu-less-compositor.patch` (the
   hardware decoder's frames are converted for a GPU-less compositor, see
-  "Hardware video decoding"). Buildroot's livi-lite package uses the local
-  site method and never applies patches for it, so apply the references by
-  hand to a fresh checkout before building.
+  "Hardware video decoding"), and
+  `0003-recover-stale-bluez-connection.patch` (a `br-connection-busy`
+  BlueZ attempt that outlived the phone's profile link is cleared with
+  `Device1.Disconnect` before the next page; without it the helper paged
+  forever and the panel stayed on "phone connected"). Buildroot's
+  livi-lite package uses the local site method and never applies patches
+  for it, so apply the references by hand to a fresh checkout before
+  building. The build script itself lives at `buildroot/scripts/`; the
+  package path points there, not at the old `deploy/scripts/` location.
 
 ## Image design and why
 
@@ -974,8 +980,11 @@ Two traps this exposed:
   iAP (CarPlay wireless) profiles and the phone's own app starts the
   session; from then on the phone is a registry target and the normal
   round-robin owns it. Everyday users just pair and the projection starts
-  (verified on the board). The change lives in the LIVI-Lite checkout and a
-  reference copy is kept at
+  (verified on the board). A stale BlueZ attempt that reports
+  `br-connection-busy` is now disconnected and retried (see
+  `0003-recover-stale-bluez-connection.patch`); this is the case where the
+  phone stayed on "phone connected" with no Wi-Fi station. The change lives
+  in the LIVI-Lite checkout and a reference copy is kept at
   `buildroot/livi-lite-patches/0001-reconnect-wake-paired-phones.patch`
   (the livi-lite package uses the local/override site method, so Buildroot
   never applies patches for it - apply this by hand to a fresh checkout
