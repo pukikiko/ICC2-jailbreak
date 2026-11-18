@@ -1,0 +1,90 @@
+diff --git a/native/crates/livi-compositor/src/render.rs b/native/crates/livi-compositor/src/render.rs
+index 393e4524..a76ed076 100644
+--- a/native/crates/livi-compositor/src/render.rs
++++ b/native/crates/livi-compositor/src/render.rs
+@@ -213,11 +213,18 @@ fn collect_elements(state: &mut LiviState, screen_idx: usize) -> Vec<LiviElement
+     }
+ 
+     let renderer = state.renderer.as_mut().unwrap();
+-    for t in state
+-        .toplevels
+-        .iter()
+-        .filter(|t| t.kind == Kind::Ui && t.screen_idx == screen_idx && !t.clear)
+-    {
++    // Elements are collected front-to-back: OutputDamageTracker draws them
++    // in reverse. Put the projection video above the main UI (which paints
++    // the opaque "phone connected" projection placeholder), but below the
++    // dialogs collected above. This is what lets the projected picture show
++    // once the phone starts streaming.
++    for &vi in state.video_order.iter().rev() {
++        let Some(t) = state.toplevels.get(vi) else {
++            continue;
++        };
++        if t.kind != Kind::Video || t.screen_idx != screen_idx || !t.visible {
++            continue;
++        }
+         elements.extend(
+             render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<GlesRenderer>>(
+                 renderer,
+@@ -232,13 +239,11 @@ fn collect_elements(state: &mut LiviState, screen_idx: usize) -> Vec<LiviElement
+         );
+     }
+ 
+-    for &vi in state.video_order.iter().rev() {
+-        let Some(t) = state.toplevels.get(vi) else {
+-            continue;
+-        };
+-        if t.kind != Kind::Video || t.screen_idx != screen_idx || !t.visible {
+-            continue;
+-        }
++    for t in state
++        .toplevels
++        .iter()
++        .filter(|t| t.kind == Kind::Ui && t.screen_idx == screen_idx && !t.clear)
++    {
+         elements.extend(
+             render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<GlesRenderer>>(
+                 renderer,
+diff --git a/native/crates/livi-compositor/src/shell.rs b/native/crates/livi-compositor/src/shell.rs
+index 7ab48a36..ae7548a3 100644
+--- a/native/crates/livi-compositor/src/shell.rs
++++ b/native/crates/livi-compositor/src/shell.rs
+@@ -158,7 +158,17 @@ fn classify_on_initial_commit(state: &mut LiviState, idx: usize) {
+     {
+         screen_idx = i;
+     }
+-    let is_dialog = app_id.as_deref() != Some(state.output_app_id.as_str());
++    // Slint's winit software window does not always propagate the app id
++    // requested by `slint::set_xdg_app_id`; the title is the stable marker
++    // its UI windows already use. Treating the main UI as a dialog put its
++    // opaque projection placeholder above the video plane in the damage
++    // tracker's reverse draw order.
++    let title_is_ui = title
++        .as_deref()
++        .and_then(|t| t.strip_prefix("livi:"))
++        .and_then(|role| state.screen_idx_by_role(role))
++        .is_some_and(|i| i == screen_idx);
++    let is_dialog = app_id.as_deref() != Some(state.output_app_id.as_str()) && !title_is_ui;
+     state.toplevels[idx].screen_idx = screen_idx;
+     state.toplevels[idx].kind = if is_dialog { Kind::Dialog } else { Kind::Ui };
+     log::info!(
+diff --git a/native/crates/livi-ui/src/lib.rs b/native/crates/livi-ui/src/lib.rs
+index 1d0a9a06..0b4d18f7 100644
+--- a/native/crates/livi-ui/src/lib.rs
++++ b/native/crates/livi-ui/src/lib.rs
+@@ -481,10 +481,14 @@ pub fn run(
+ ) -> Result<(), Box<dyn std::error::Error>> {
+     KIOSK.with_borrow_mut(|k| *k = Some(Box::new(kiosk)));
+     PICK.with_borrow_mut(|p| *p = pick);
+-    let ui = AppWindow::new()?;
++    // `set_xdg_app_id` configures the next toplevel created, so it has to
++    // run before AppWindow::new(). The winit software window does not carry
++    // it on this build (the compositor uses the `livi:<role>` title as the
++    // fallback), but the ordering is the supported one.
+     slint::set_xdg_app_id(
+         std::env::var("LIVI_OUTPUT_APP_ID").unwrap_or_else(|_| "dev.f-io.livi".into()),
+     )?;
++    let ui = AppWindow::new()?;
+     ui.set_bands(ModelRc::from(Rc::new(VecModel::from(vec![0.0f32; BANDS]))));
+     ui.set_clock(clock::now_text().into());
+     ui.global::<DashState>().set_clock(clock::now_text().into());

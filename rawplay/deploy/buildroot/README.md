@@ -527,17 +527,21 @@ are the check on real hardware.
   already-flashed card moves to the new defaults. `livi.service` also sets
   `LIVI_UI_SIZE=800x480`, which fresh installs size their projection
   defaults from (and `livi-ui` opens at).
-* The checkout next to this repo carries three local changes on top of
+* The checkout next to this repo carries four local changes on top of
   LIVI-Lite `main`, all kept as reference patches under
   `livi-lite-patches/`: `0001-reconnect-wake-paired-phones.patch` (the
   wireless first-session wake, see "Android Auto wireless"),
   `0002-convert-hw-decoder-frames-for-a-gpu-less-compositor.patch` (the
   hardware decoder's frames are converted for a GPU-less compositor, see
-  "Hardware video decoding"), and
+  "Hardware video decoding"),
   `0003-recover-stale-bluez-connection.patch` (a `br-connection-busy`
   BlueZ attempt that outlived the phone's profile link is cleared with
   `Device1.Disconnect` before the next page; without it the helper paged
-  forever and the panel stayed on "phone connected"). Buildroot's
+  forever and the panel stayed on "phone connected"), and
+  `0004-show-projection-above-ui.patch` (the main UI had no app id and was
+  treated as a dialog, so its opaque placeholder covered the video plane;
+  it is classified by its `livi:<role>` title and the video is collected
+  above the main UI but below real dialogs). Buildroot's
   livi-lite package uses the local site method and never applies patches
   for it, so apply the references by hand to a fresh checkout before
   building. The build script itself lives at `buildroot/scripts/`; the
@@ -1022,6 +1026,13 @@ grep -c appsrc` - `0` means the plugin is missing; delete the registry
 after installing the plugin so it is rescanned (`GST_REGISTRY_UPDATE=no`
 otherwise keeps the stale cache, and `livi-persist` now drops a cache that
 predates the v4l2 decoders by itself).
+A second, independent "phone connected" case was in the new compositor:
+the main UI arrived without an app id, was classified as a dialog, and its
+opaque placeholder was painted above the video plane. `livi-compositor`
+now identifies the UI by its `livi:<role>` title and stacks the video above
+the main UI but below real dialogs (`0004-show-projection-above-ui.patch`).
+The raw capture then shows the projected picture rather than the
+placeholder.
 
 ## Needs a decision
 
