@@ -56,7 +56,8 @@ output: the tracked base in `stick/` plus the built programs, copied and baked b
     usb/homebrew/main        the homebrew menu (hbmenu/homebrew.c)
     usb/homebrew/menu.raw    the menu's background art (hbmenu/mkmenuassets.py bakes it)
     usb/homebrew/apps.txt    one "label|command" a line
-    usb/homebrew/apps/       the built apps: doom, fbdemo, rawplay, buswatch, iccbuttons, mediaplayer, terminal
+    usb/homebrew/apps/       the built apps: doom, fbdemo, rawplay, buswatch, ipcsniff, iccbuttons,
+                             mediaplayer, terminal
                              and the scripts rawplay.sh, mediaplayer.sh, usbhs.sh
 
 the appliance serves this tree read-only, and the stock media stack can restart
@@ -66,6 +67,10 @@ the hmi start needs into `/tmp` *before* starting it (the shim, launcher, `butto
 probes before handing over. that stops a restart during startup from leaving a zero-byte
 launcher, no watchdog, and an overlay that missed every theme frame; all of those were seen
 on the real appliance in the emulator.
+
+the `ipc sniff start` / `ipc sniff stop` rows drive `ipcsniff/ipcsniff.sh`: start detaches the
+`/dev/ipc/0` monitor with `on -d` and returns, so the hmi and buttons keep running while the
+sniffer logs to `/fs/usb0/homebrew/ipc.log`; stop kills it by the pid in `/tmp/ipc-sniff.pid`.
 
 `apps.txt` is plain text, add a line to add an app. the menu runs the command with the shell
 and comes back when it ends. the launcher stops the hmi before the command runs and resumes it

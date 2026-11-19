@@ -98,6 +98,7 @@ populated yet the build fetches and builds it (network needed); to do that step 
 | `out/hmi-overlay.so` | theme-asset overlay shim | `hmi-overlay.so` |
 | `out/iccbuttons` | panel button mapper | `apps/iccbuttons` |
 | `out/buswatch` | uart3 + pmm standby-pin scope | `apps/buswatch` |
+| `out/ipcsniff` | passive ipc monitor logger, safe beside a running hmi | `apps/ipcsniff` |
 | `out/syncsploit` | installer ui over the frozen hmi | `synctool/syncsploit` (installer tree on the stick) |
 | `out/livi-usb.o` | alternate gadget transport (compile check) | - |
 

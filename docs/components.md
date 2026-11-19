@@ -95,6 +95,7 @@ the stick scripts live here too:
 | terminal | `terminal/terminal.c` | a shell on the panel: framebuffer vt100 terminal + touch keyboard, the unit's fbterm + fbkeyboard. no pty on the unit, so it spawns `/bin/sh -i` on pipes (posix_spawn) and does the prompt, echo, editing, history and ctrl-c itself. keyboard toggles between 100x17 and 100x30. run by `apps/terminal.sh`. |
 | iccbuttons | `iccbuttons/iccbuttons.c` | maps front-panel and steering-wheel bits to names, shows the hmi event ids the stock buttons app fires, saves an `INPUT_BUTTON` table. |
 | buswatch | `buswatch/buswatch.c` | live scope for uart3 and pmm's standby pin (gpio3 bit 26): decode tables baked from the ICC2 SDK's `qemu/v850_messages.py` (`mksignals.py`), every byte/bit edge timestamped, log flushed on a pin edge so a sleep leaves the evidence. |
+| ipcsniff | `ipcsniff/ipcsniff.c`, `ipcsniff/ipcsniff.sh` | passive logger for `/dev/ipc/0`, both directions with uptime stamps. started detached by the `ipc sniff start` menu row, so the hmi and buttons keep running; writes `/fs/usb0/homebrew/ipc.log`. |
 | doom, fbdemo | the ICC2 SDK's `sdk/doom`, `sdk/fbdemo` | the game and a framebuffer smoke test; built in the SDK, copied into the stick. |
 
 ## syncsploit/

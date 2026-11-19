@@ -10,8 +10,8 @@
 #   make clean
 include config.mk
 
-UNIT    = out/rawplay out/iccbuttons out/buswatch out/syncsploit out/homebrew out/launcher \
-          out/hmi-overlay.so out/mediaplayer out/terminal
+UNIT    = out/rawplay out/iccbuttons out/buswatch out/ipcsniff out/syncsploit out/homebrew \
+          out/launcher out/hmi-overlay.so out/mediaplayer out/terminal
 STICK_SRC = stick
 STICK   = usb/homebrew
 ASOUNDSTUB = out/libasound.so.2
@@ -59,6 +59,11 @@ out/buswatch: buswatch/buswatch.c buswatch/bussignals.h $(SDKBASE) $(OURCO) $(ME
 	@mkdir -p out
 	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -Ibuswatch -o $@ $(SDKBASE) $(OURCO) $(MENUUI) \
 	      buswatch/buswatch.c $(LIBC)
+
+# the passive ipc monitor tap: reads /dev/ipc/0 and logs both directions, no hmi calls
+out/ipcsniff: ipcsniff/ipcsniff.c $(SDKBASE) $(SDK)/qnx.h $(LIBC)
+	@mkdir -p out
+	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $@ $(SDKBASE) ipcsniff/ipcsniff.c $(LIBC)
 
 # the decode tables are baked from the car emulator's own signal tables (in ICC2), so the
 # two cannot drift apart. the generated header is tracked, the rule is for regeneration.
@@ -163,6 +168,9 @@ stick: $(UNIT) synctool
 	cp out/rawplay $(STICK)/apps/rawplay
 	cp out/mediaplayer $(STICK)/apps/mediaplayer
 	cp out/buswatch $(STICK)/apps/buswatch
+	cp out/ipcsniff $(STICK)/apps/ipcsniff
+	cp ipcsniff/ipcsniff.sh $(STICK)/apps/ipcsniff.sh
+	chmod 755 $(STICK)/apps/ipcsniff.sh
 	cp out/iccbuttons $(STICK)/apps/iccbuttons
 	cp out/terminal $(STICK)/apps/terminal
 	cp out/homebrew $(STICK)/main
