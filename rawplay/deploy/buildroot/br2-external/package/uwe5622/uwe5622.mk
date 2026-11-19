@@ -8,11 +8,12 @@
 # recompiled: only these three modules plus the firmware land in the rootfs.
 ################################################################################
 
-# Pinned armbian/uwe5622 commit: the unified tree Armbian build-tested on
+# Pinned armbian/uwe5622 commit: the unified tree Armbian build-tests on
 # 6.12.y (among 6.1/6.18/7.0/7.1), so no extra version patches are needed.
-# 0002 is upstream 610fa78 (the 5 GHz SoftAP DS Params fix), which is newer
-# than this pin; drop the local patch when the pin is bumped past it.
-UWE5622_VERSION = cc2835a3f935d5297e03cdce464c1785381a7b4d
+# This pin is current as of the 2026-11-13 tree and already carries the two
+# fixes this package used to patch in locally: 7621d0d (regulatory domain
+# from cfg80211) and 610fa78 (the 5 GHz SoftAP DS Parameter Set channel).
+UWE5622_VERSION = d2d6bc45c5ef9cefdd53e6c51cec3ba948b84972
 UWE5622_SITE = $(call github,armbian,uwe5622,$(UWE5622_VERSION))
 UWE5622_LICENSE = GPL-2.0
 UWE5622_LICENSE_FILES = README.md

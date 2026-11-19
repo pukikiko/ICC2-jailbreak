@@ -86,7 +86,7 @@ rawplay/deploy/buildroot/
 
     scripts/flash.sh build/orangepi_zero2w/images/sdcard.img /dev/sdX
 
-Buildroot is fetched and pinned by `build.sh` (**2026.08**, see "Pin" below)
+Buildroot is fetched and pinned by `build.sh` (**2026.08.1**, see "Pin" below)
 and the external tree is applied with `BR2_EXTERNAL`; rawlink, weston-touch
 and LIVI-Lite are built from the working trees (`local` site), so a `git pull`
 plus a rebuild is an update. LIVI-Lite's crate downloads are pinned by each
@@ -101,22 +101,34 @@ on repeat builds. With LIVI-Lite the image no longer needs Python or
 longer exercised; it is kept because the external tree still supports the
 older Electron package set.
 
-## Pin: Buildroot 2026.08, kernel 6.12 LTS / 6.18 LTS, U-Boot 2024.10
+## Pin: Buildroot 2026.08.1, kernel 6.12 LTS / 6.18 LTS, U-Boot 2026.10
 
-* **Buildroot 2026.08**, not the 2026.02 LTS. Reason, verified in the
-  sources: the LTS ships weston 14 and **weston 14's headless backend has no
-  seat at all** (`libweston/backend-headless/headless.c` has the `fake_seat`
-  struct but no `wesyon_seat_init`; `--fake-seat` first appears in 15.0.0).
-  Without a seat, `weston-touch.so` can add no touch device, panel keys can
-  not be injected, and the UI has no `wl_seat`. 2026.08 ships weston
-  15.0.1, which has `--fake-seat` and `weston_capture_v1`; `weston-touch.c`
+* **Buildroot 2026.08.1**, the current stable bugfix release of 2026.08
+  (2026.11 was still `-rc1` when this image was built), not the 2026.02 LTS.
+  Reason, verified in the sources: the LTS ships weston 14 and **weston 14's
+  headless backend has no seat at all** (`libweston/backend-headless/headless.c`
+  has the `fake_seat` struct but no `wesyon_seat_init`; `--fake-seat` first
+  appears in 15.0.0). Without a seat, `weston-touch.so` can add no touch
+  device, panel keys can not be injected, and the UI has no `wl_seat`.
+  2026.08.1 ships the same weston 15.0.1 as 2026.08, which has
+  `--fake-seat` and `weston_capture_v1`; `weston-touch.c`
   is built with `-DLIVI_WESTON_MAJOR=15` and uses its pre-16 API path
   (`weston_touch_create_touch_device()` with 4 arguments, confirmed in
   weston 15.0.1 `libweston/input.c`; 16.0.0 has the 5-argument form).
-* **Kernel 6.12.111** for the board (latest 6.12 longterm at the time; the
-  upstream defconfig pins 6.12.3) and **6.18.7** for qemu (Buildroot's
-  qemu_aarch64_virt base config). U-Boot **2024.10** and TF-A **v2.11**
-  (`sun50i_h616`) are upstream Buildroot's orangepi_zero2w choices.
+* **Kernel 6.12.118** for the board (the current 6.12 longterm; the upstream
+  defconfig pins 6.12.3) and **6.18.7** for qemu (Buildroot's
+  qemu_aarch64_virt base config). U-Boot **2026.10** (current stable) and
+  TF-A **v2.15.0** (`sun50i_h616`) are newer than the upstream Buildroot
+  orangepi_zero2w choices; the board defconfigs pin them explicitly.
+* The out-of-tree UWE5622 driver is pinned to Armbian's
+  `d2d6bc45c5ef9cefdd53e6c51cec3ba948b84972` (2026-11-13), which already
+  carries the regulatory-domain and 5 GHz SoftAP DS-Parameter fixes that
+  older pins needed as local patches.
+* This pin set is build-verified (kernel, U-Boot, TF-A, LIVI-Lite and the
+  image all compile and the payload checks pass). The hardware measurements
+  below were taken on the earlier 6.12.111 / U-Boot 2024.10 / TF-A v2.11
+  image; re-run `scripts/boottime.sh board ...` on the board before treating
+  them as measurements of this image.
 * H618 boot chain is ROM -> SPL -> TF-A BL31 -> U-Boot -> kernel (U-Boot's
   own `orangepi_zero2w_defconfig` and Buildroot's use of
   `BR2_TARGET_UBOOT_NEEDS_ATF_BL31` confirm it). SPL falcon mode is not
@@ -124,16 +136,16 @@ older Electron package set.
   and `CONFIG_BOOTCOMMAND` loads `boot.scr` from the boot FAT directly, with
   no distro-boot scan.
 
-Package versions that matter (all verified in the 2026.08 tree):
+Package versions that matter (all verified in the 2026.08.1 tree):
 libva 2.24.1 (>= 2.21, the bundled GStreamer's `vaMapBuffer2`),
 wayland 1.24.0 (>= 1.23, `wl_display_create_queue_with_name` for
-`libgstwaylandsink`), Python 3.14.7 (the asyncio shim is installed),
-systemd 258.7, weston 15.0.1, PulseAudio 17.0, hostapd 2.12, BlueZ 5.79.
+`libgstwaylandsink`), Python 3.14.8 (the asyncio shim is installed),
+systemd 258.7, weston 15.0.1, PulseAudio 17.0, hostapd 2.12, BlueZ 5.86.
 
 ## Verified hardware and software facts
 
 These were checked against the mainline kernel/device trees, U-Boot, the
-LIVI-Lite checkout and upstream Buildroot 2026.08. Where something
+LIVI-Lite checkout and upstream Buildroot 2026.08.1. Where something
 could not be verified it says so.
 
 ### USB: USB0 is the USB-C port, on a MUSB controller
@@ -192,7 +204,7 @@ could not be verified it says so.
 * **Mainline Linux has no driver for it**, so the image carries one:
   `package/uwe5622` builds the pinned `armbian/uwe5622` tree (the unified
   tree Armbian build-tests on 6.12.y, so no version patches) **out of tree**
-  against the image's own 6.12.111 kernel build dir. The kernel package
+  against the image's own 6.12.118 kernel build dir. The kernel package
   itself is never recompiled for this: only the three modules land in
   `/lib/modules/.../extra` (`uwe5622_bsp_sdio`, `sprdwl_ng`, `sprdbt_tty`),
   loaded via `/etc/modules-load.d/uwe5622.conf`. It is not the brcmfmac

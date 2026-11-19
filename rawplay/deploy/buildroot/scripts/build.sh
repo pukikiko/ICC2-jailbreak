@@ -11,13 +11,14 @@
 #   orangepi_zero2w  -> build/orangepi_zero2w/images/sdcard.img
 set -eu
 
-# Pinned release. 2026.08 (not the 2026.02 LTS) because its weston 15 is the
+# Pinned release. 2026.08.1 is the current stable bugfix release of 2026.08
+# (2026.11 is still -rc). Not the 2026.02 LTS because its weston 15 is the
 # first in this range with the headless backend's --fake-seat; weston 14 has
 # no seat at all and breaks weston-touch/Electron. See br2-external
 # configs and README.md.
-BR_VERSION=2026.08
+BR_VERSION=2026.08.1
 BR_URL="https://buildroot.org/downloads/buildroot-${BR_VERSION}.tar.gz"
-BR_SHA256=d678e810abf877d04513e03ca2c99f992dd49118b9c2e18d6e25f5f58fa8c5cd
+BR_SHA256=38a6c152490096018720a9ade379ee1e571c9bf5f93a3657a166566945a98b0d
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)

@@ -4,7 +4,7 @@
 # USB throughput, Wi-Fi/BT or the I2S DAC. See README.md for what it does and
 # does not prove.
 #
-# pin: Buildroot 2026.08 ships weston 15 (the LTS 2026.02 ships weston 14,
+# pin: Buildroot 2026.08.1 ships weston 15 (the LTS 2026.02 ships weston 14,
 # whose headless backend has no seat at all: --fake-seat is missing, and
 # without a seat weston-touch can not inject and Electron has no wl_seat).
 
