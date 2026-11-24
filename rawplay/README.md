@@ -233,15 +233,17 @@ upstream (unit -> host):
 * 20 ms chunks are a compromise: 10 ms costs more headers and more wakeups, 40 ms adds
   call latency. The unit opens the PCM device on the host's audio handshake and keeps it
   running for the whole session (silence when no PCM is arriving), so the codec never
-  stops and no window can close it. It starts playback with three chunks (60 ms) in a
+  stops and no window can close it. It starts playback with four chunks (80 ms) in a
   256 KB ring and raises that one chunk at a time to six (120 ms) only after an underrun;
-  500 clean chunks lower it again. A 180 ms soft cap keeps a slow codec clock or a drifting
+  500 clean chunks lower it again. A 240 ms soft cap keeps a slow codec clock or a drifting
   host clock from growing the queue toward the 1.45 s the 256 KB ring could hold. The
   device itself uses a two-fragment ring of the same 20 ms chunks, so the codec adds
-  40 ms instead of the old 80 ms. The host keeps at most three 20 ms chunks queued
-  downstream (the old 64 allowed more than a second of voice delay on a slow link; six
-  still allowed twice the unit's prebuffer). A late voice chunk is dropped instead of
-  being played, matching the video's newest-wins policy. The appliance requests
+  40 ms instead of the old 80 ms. The host keeps at most six 20 ms chunks queued
+  downstream (120 ms; the old 64 allowed more than a second of voice delay on a slow
+  link). This bound is only reached when the link is behind: it delays the burst and plays
+  it instead of dropping it, which is what the old three-chunk bound did on a saturated
+  24 fps link. A late voice chunk is still dropped rather than played after the queue is
+  full, matching the video's newest-wins policy. The appliance requests
   `parec --latency-msec=60 --process-time-msec=20` from the default sink's monitor, so
   the PulseAudio side does not add its few-hundred-ms default.
 
@@ -295,7 +297,7 @@ latency).
   device on the host's `LR_AUDIO_CFG` and keeps it open for the whole session: when no PCM
   is arriving the playback thread writes silence, so the codec never stops and an HMI
   window cannot silence it. The device is driven with a two-fragment ring of the wire's
-  20 ms chunks (40 ms of hardware buffering) and the application ring starts at 60 ms of
+  20 ms chunks (40 ms of hardware buffering) and the application ring starts at 80 ms of
   PCM, growing to 120 ms only after an underrun. It forces the ACM's **USB source request
   by default** (`--acm-mode 9`): the ACM/HMI source table maps HMI source event 10 (USB)
   to v850 event 5/data 9, which unmutes the ICC's stereo path. Mode 11 is the HMI's AM-AS
@@ -441,10 +443,12 @@ handling).
 * **`run` mode moves a whole frame per pipe fill and a quarter of one per FunctionFS
   write.** FunctionFS allows exactly one bulk-in request per endpoint and a synchronous
   `write()` blocks until it completes, so the per-write userspace wakeup lands between
-  every chunk. The video pipe is 1 MB (a whole 768 KB frame fits, so the sender keeps the
-  endpoint fed while it captures the next frame) and the bridge reads/writes in 256 KB
-  chunks (four remotes instead of twelve per frame). This is what keeps a phone that idles
-  in deep CPU states from painting the panel line by line; see section 3.
+  every chunk. Without audio the video pipe is 1 MB (a whole 768 KB frame fits, so the
+  sender keeps the endpoint fed while it captures the next frame) and the bridge
+  reads/writes in 256 KB chunks (three remotes instead of twelve per frame). With audio
+  the pipe is 256 KB: at most one 256 KB ffs request plus the sender's next fill can sit
+  in front of a PCM message, instead of most of a frame. This is what keeps a phone that
+  idles in deep CPU states from painting the panel line by line; see section 3.
 * A fresh reader's first heartbeat resets the latency window and discards acks for frames
   that were queued before the reader existed, so a one or two second startup wait no
   longer shows up forever as `latency ... max` in `--stats`.
@@ -685,13 +689,50 @@ emulator's own ~52 fps delivery ceiling in both builds. The test card is static,
 bands path sends a 1 KB empty map per frame after the first picture: the panel still gets
 a frame/ack cadence and the 0.6 ms/frame guest cost shows what a mostly static UI pays.
 
-The audio path follows the same rule: three 20 ms chunks may wait downstream (60 ms worst
-case behind a slow link), the unit starts at three chunks and only grows to six after an
-underrun, and the codec ring is two 20 ms fragments. In the emulator audio test the host
-sent 451 chunks with 0 drops through a 9 s run; the socket audio test still checks the
-downstream tone and the byte-exact microphone loopback. The appliance's `parec` now asks
-the default sink's monitor for 60 ms latency / 20 ms process time instead of PulseAudio's
-multi-hundred-ms default.
+The audio path follows the same rule: six 20 ms chunks may wait downstream (120 ms worst
+case behind a slow link), the unit starts at four chunks (80 ms) and only grows to six
+after an underrun, and the codec ring is two 20 ms fragments. In the emulator audio test
+the host sent 451 chunks with 0 drops through a 9 s run; the socket audio test still
+checks the downstream tone and the byte-exact microphone loopback. The appliance's
+`parec` now asks the default sink's monitor for 60 ms latency / 20 ms process time
+instead of PulseAudio's multi-hundred-ms default.
+
+#### Full-rate video and audio (2026-11)
+
+A 24 fps full-screen picture is one 768 512-byte message on a link measured at
+18.8 MB/s, so a frame owns the wire for about 41 ms. That is a bandwidth/ordering limit,
+not the unit cpu: under `--icount 2`, `--direct` costs about 1.4 ms of guest time per raw
+frame, far below the 41 ms frame period.
+
+The old run-mode pipe could hold most of a frame in front of a PCM message, and the
+three-chunk queue plus the unit's 60 ms start sat exactly on the resulting delay, so a
+scheduling hiccup dropped voice and the unit played a gap. The fix keeps the one-message
+video path (so video fps and ack latency are unchanged) and gives audio the margins:
+
+* the host audio queue is six 20 ms chunks (120 ms), so a burst is delayed and played
+  instead of dropped;
+* with audio the run-mode video pipe is 256 KB, so at most one 256 KB ffs request plus the
+  sender's next fill can sit in front of PCM, not most of a frame;
+* the unit starts playback at four chunks (80 ms), which covers one full-frame wait plus
+  the pipe, and still grows to six only after an underrun;
+* if the audio queue does reach its bound, the sender drops the next video frame at the
+  source rather than dropping PCM.
+
+`bench.py --boot --icount 2 --source motion --fps 24 --audio --direct --seconds 10`,
+fresh boots, old = tag `1.4.0`:
+
+| build | source frames | guest fps | latency avg | median | p95 |
+|---|---:|---:|---:|---:|---:|
+| 1.4.0, 3 runs | 284-303 | 28.4-30.3 | 4.5-4.6 ms | 3.7-3.8 ms | 6.2-6.4 ms |
+| this build, 4 runs | 282-307 | 28.1-30.7 | 4.7-5.4 ms* | 3.7-4.0 ms | 6.6-7.1 ms |
+
+\* the 5.4 average is one run with a single 224 ms startup outlier; its median was 3.7
+and p95 6.7 ms. Fps and median latency are inside the same run-to-run spread, and the
+no-audio 60 fps case is also unchanged (`--icount 2`, motion 60): 1.4.0 88.8 guest fps /
+4.3 ms avg, this build 91.5 / 4.0 ms. A socket sink paced at 18.8 MB/s with full-screen
+motion plus `--audio-test` shows a ~64 ms maximum PCM gap; the unit's 80 ms start covers
+that rather than playing a gap. On the appliance, `rawlink` stats' `drops` and the unit's
+`under` counter (both printed) are the field check.
 
 ### Direct zero-copy on the real car (2026-11)
 

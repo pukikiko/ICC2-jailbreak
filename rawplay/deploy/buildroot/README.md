@@ -182,13 +182,17 @@ could not be verified it says so.
   that wire time when the unit supports it: it sends only changed row runs
   (`LR_BANDS`) and falls back to a raw frame when they are not at least
   half the picture. A car UI or a mostly static projection stream is far
-  below the raw bitrate, so the 24 fps capture cadence is no longer the
-  wire limit; a full-screen noisy video still is. `rawlink-wait` keeps
-  `--fps 24` because that leaves the sender's 2-frame window empty and the
-  measured latency at 41 ms instead of 57 ms at 30 fps. LIVI's projection
-  sink is the default `waylandsink`; a GStreamer `videorate` cap would need
-  `videoconvert` in front of it because the v4l2 decoder hands out DMABuf
-  frames, so the 24 fps cap is left to `rawlink-wait`'s capture instead.
+  below the raw bitrate; a full-screen noisy video is still at it. With
+  audio enabled the run-mode video pipe is 256 KB instead of 1 MB, so a PCM
+  chunk waits behind at most one 256 KB ffs request plus the next fill
+  rather than most of a frame; the host queue is six chunks and the unit
+  starts at 80 ms, so that delay is absorbed instead of dropped.
+  `rawlink-wait` keeps `--fps 24` because that leaves the sender's 2-frame
+  window empty and the measured latency at 41 ms instead of 57 ms at
+  30 fps. LIVI's projection sink is the default `waylandsink`; a GStreamer
+  `videorate` cap would need `videoconvert` in front of it because the v4l2
+  decoder hands out DMABuf frames, so the 24 fps cap is left to
+  `rawlink-wait`'s capture instead.
   The remaining upgrades are a dirty-rect scheme with sub-row runs and a
   DMA-capable UDC; qemu proves nothing about the MUSB wire because dummy_hcd
   is virtual.
@@ -435,7 +439,9 @@ the ICC over the same vendor interface:
   sink's `norewinds=1` (a 50 ms block; module-null-sink has no latency_msec
   argument in PulseAudio 17) keep the monitor from adding PulseAudio's
   few-hundred-ms default; `rawlink` queues at most six video-delayed chunks
-  and the unit starts playback with four, growing only after an underrun.
+  and the unit starts playback with four (80 ms), growing only after an
+  underrun. With audio the run-mode video pipe is 256 KB, so only about one
+  ffs request can sit in front of PCM.
 * `livi-pulse` loads `module-pipe-source source_name=livi-car-mic
   file=/run/livi-audio/car-mic format=u8 rate=8000 channels=1`. It is the
   default source, so LIVI's phone/assistant uplink opens the car microphone

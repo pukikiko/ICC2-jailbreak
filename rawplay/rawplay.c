@@ -481,21 +481,21 @@ static out_sem_t btn_sem;
  * boundary. the microphone runs the other way on a second thread; the writer thread puts
  * its LI_AUDIO messages behind touch/acks so a call never delays the panel. */
 #define AUDIO_RING_BYTES (256 * 1024)
-/* three 20 ms chunks (60 ms) cover the ~42 ms a full 768 KB picture occupies the link, and
- * the host may queue three more behind it. that is half the old 80/160 ms ladder; with the
- * two-fragment (40 ms) device ring the playback path stays at about 100 ms. an underrun
- * raises the target by one chunk up to 120 ms; a long clean run lowers it again, so a
- * noisy link trades latency for smoothness and a clean one gets the latency back. */
-#define AUDIO_PREBUFFER_MS_MIN  60
+/* four 20 ms chunks (80 ms) cover one full 768 KB picture on the link (about 42 ms) and
+ * the PCM queued behind it, which is the worst wait left now that the host's video pipe is
+ * small; the old 60 ms start sat exactly on that edge. an underrun raises the target by one
+ * chunk up to 120 ms; a long clean run lowers it again, so a noisy link trades latency for
+ * smoothness and a clean one gets the latency back. */
+#define AUDIO_PREBUFFER_MS_MIN  80
 #define AUDIO_PREBUFFER_MS_MAX  120
 #define AUDIO_PREBUFFER_MS_STEP 20
 #define AUDIO_PREBUFFER_BYTES(ms) \
     ((size_t)(AUDIO_OUT_RATE * AUDIO_OUT_CHANNELS * 2) * (ms) / 1000)
 /* the ring is 256 KB (1.45 s) only so a burst never loses data; letting the queue sit
  * there would turn a slow codec clock or a drifting host clock into more than a second
- * of delay before the first drop. keep it near real time: 180 ms covers the 120 ms
- * adaptive target plus a three-chunk burst behind a full picture. */
-#define AUDIO_QUEUE_MS_MAX     180
+ * of delay before the first drop. keep it near real time: 240 ms covers the 120 ms
+ * adaptive target plus the host's six-chunk (120 ms) burst behind a full picture. */
+#define AUDIO_QUEUE_MS_MAX     240
 #define MIC_QUEUE        32
 #define MIC_MSG_MAX      (LI_AUDIO_HDR_LEN + 512)
 
@@ -2506,13 +2506,13 @@ int main(int argc, char **argv)
             last_stats = now_us();
             printf("rawplay: %lu frames, %lu drawn, %lu stale, %llu kb, %.1f fps "
                    "(source %.1f), %.1f ms/frame, %s%s, audio %lu out/%lu mic, "
-                   "ring %lu, err %lu, drop %lu/%lu/%lu\n", frames, drawn, superseded,
-                   rx_bytes / 1024, frames * 1000000.0 / el,
+                   "under %lu, ring %lu, err %lu, drop %lu/%lu/%lu\n", frames, drawn,
+                   superseded, rx_bytes / 1024, frames * 1000000.0 / el,
                    src_dt_us ? src_frames * 1000000.0 / src_dt_us : 0.0,
                    frames ? rx_us / 1000.0 / frames : 0.0,
                    raw_usb_direct() ? "direct" : "staged",
                    raw_usb_compacted() ? " (compacted)" : "",
-                   aout.chunks, ain.chunks, audio_level(), aout.errors,
+                   aout.chunks, ain.chunks, aout.underruns, audio_level(), aout.errors,
                    dropped_in, dropped_ack, mic_drops);
             src_dt_us = 0;
             src_frames = 0;
@@ -2537,12 +2537,12 @@ int main(int argc, char **argv)
         }
         printf("rawplay: %lu frames, %lu drawn, %lu stale, %llu kb in %lld ms (%.1f fps, "
                "%.1f ms/frame), %s%s, source %.1f fps, audio %lu out/%lu mic, "
-               "drop in/ack/mic %lu/%lu/%lu%s%s\n", frames,
+               "under %lu, drop in/ack/mic %lu/%lu/%lu%s%s\n", frames,
                drawn, superseded, rx_bytes / 1024, el / 1000, frames * 1000000.0 / el,
                frames ? rx_us / 1000.0 / frames : 0.0, raw_usb_direct() ? "direct" : "staged",
                raw_usb_compacted() ? " (compacted)" : "",
                src_dt_us ? src_frames * 1000000.0 / src_dt_us : 0.0,
-               aout.chunks, ain.chunks, dropped_in, dropped_ack, mic_drops,
+               aout.chunks, ain.chunks, aout.underruns, dropped_in, dropped_ack, mic_drops,
                exit_reason ? ", " : "", exit_reason ? exit_reason : "");
         jlog("rawplay: exit, %lu frames, %lu drawn, %llu kb, %s%s%s%s", frames, drawn,
              rx_bytes / 1024, raw_usb_direct() ? "direct" : "staged",

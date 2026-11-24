@@ -40,8 +40,9 @@ umount /dev/ffs-liviraw 2>/dev/null
 #
 # --latency-msec=60 --process-time-msec=20: the monitor is consumed in 20 ms pieces
 # with a bounded sink latency instead of PulseAudio's few-hundred-ms default. rawlink's
-# audio queue holds at most three 20 ms chunks and the unit starts playback with three,
-# so the whole path stays around 100 ms without underrunning on a 24 fps link.
+# audio queue holds at most six 20 ms chunks and the unit starts playback with four
+# (80 ms), so a frame-sized burst is delayed and played instead of dropped. with audio
+# the run-mode video pipe is 256 KB, so only about one ffs request sits in front of PCM.
 #
 # changed-row updates (bands) are always on and only used when they save at least half
 # the picture; pass --no-bands to rawlink to A/B the raw frame path.

@@ -106,10 +106,15 @@
  * sender fill ep1 while the previous chunk is still moving. */
 #define EP_BUF_LEN    (256 * 1024)
 #define VID_PIPE_BYTES (1024 * 1024)
-/* at most three 20 ms chunks (60 ms) may wait behind a picture. that matches the unit's
- * 60 ms prebuffer and one full-frame send, so a slow link drops stale voice instead of
- * building a noticeable delay. */
-#define AUDIO_QUEUE_MAX 3
+/* with audio enabled the video pipe only needs to hold one 256 KB ffs request plus the
+ * sender's next fill; a bigger pipe would let most of a frame queue in front of a PCM
+ * chunk and add tens of milliseconds to the voice path. */
+#define VID_PIPE_AUDIO_BYTES (256 * 1024)
+/* at most six 20 ms chunks (120 ms) may wait behind video. the old three-chunk bound
+ * dropped voice as soon as one full-frame send and the pipe queue added up to more than
+ * 60 ms; the deeper bound delays a burst and plays it instead. the queue normally sits at
+ * one or two chunks on a healthy link. */
+#define AUDIO_QUEUE_MAX 6
 /* more tiny runs than this cost more USB round trips than the saved bytes are worth,
  * especially under qemu where every direct urb is a guest wakeup. the unit still accepts
  * the full protocol maximum; the sender simply falls back to a whole picture. */
@@ -1309,6 +1314,17 @@ static void aq_push(struct stream *s, struct txmsg *m)
     s->aq_tail = m;
 }
 
+static unsigned aq_depth(const struct stream *s)
+{
+    unsigned depth = 0;
+    const struct txmsg *q;
+
+    for (q = s->aq_head; q; q = q->next) {
+        depth++;
+    }
+    return depth;
+}
+
 static void queue_audio(struct stream *s, const unsigned char *pcm, size_t len)
 {
     struct txmsg *m;
@@ -1346,13 +1362,8 @@ static void queue_audio(struct stream *s, const unsigned char *pcm, size_t len)
     s->audio_bytes += (unsigned)len;
 
     {
-        unsigned depth = 1;
-        struct txmsg *q = s->aq_head;
+        unsigned depth = aq_depth(s);
 
-        while (q && q->next) {
-            depth++;
-            q = q->next;
-        }
         while (depth > AUDIO_QUEUE_MAX) {
             struct txmsg *old = s->aq_head;
 
@@ -2422,8 +2433,15 @@ static void stream_cleanup(struct stream *s)
 
 static void capture_drain(struct stream *s, struct outlink *o)
 {
+    /* if the audio queue is at its bound the link is behind: drop the next captured
+     * picture at the source instead of adding another ~40 ms of video in front of the
+     * PCM and forcing queue_audio to discard a chunk. audio is the thing that cannot
+     * tolerate a gap; a dropped video frame just holds the previous picture. */
+    int audio_full = s->cfg->audio && s->audio_ready
+                     && aq_depth(s) >= AUDIO_QUEUE_MAX;
     int idle = !(s->tx || s->mode_pending || s->txq_head
-                 || (s->window && s->seq - s->acked >= (unsigned)s->window));
+                 || (s->window && s->seq - s->acked >= (unsigned)s->window))
+               && !audio_full;
 
     /* always finish the frame already in a buffer before choosing the other one: a mode
      * heartbeat can arrive halfway through a capture, and restarting a read in the
@@ -3719,9 +3737,12 @@ static int run_main(struct cfg *c)
         tlogf("usbgadget: pipe: %s", strerror(errno));
         return 1;
     }
-    /* a whole 768 KB frame fits: the sender can finish a frame into the pipe without
-     * waiting on the usb and start the next capture while ep1 still drains this one */
-    (void)fcntl(vid[1], F_SETPIPE_SZ, VID_PIPE_BYTES);
+    /* a whole 768 KB frame fits when no audio competes for the link: the sender can
+     * finish a frame into the pipe without waiting on the usb and start the next capture
+     * while ep1 still drains this one. with audio the pipe holds one 256 KB ffs request
+     * plus the sender's next fill, which bounds how long PCM can sit behind video. */
+    (void)fcntl(vid[1], F_SETPIPE_SZ,
+                c->audio ? VID_PIPE_AUDIO_BYTES : VID_PIPE_BYTES);
     g.vid_r = vid[0];
     g.vid_w = vid[1];
     g.up_r = up[0];
